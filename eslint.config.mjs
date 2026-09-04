@@ -10,9 +10,12 @@ export default tseslint.config(
     ignores: ['dist/**', 'out/**', '.vscode-test/**', '.scratch/**', 'node_modules/**', '*.vsix'],
   },
   js.configs.recommended,
-  ...tseslint.configs.recommendedTypeChecked,
   {
     files: ['src/**/*.ts', 'test/**/*.ts'],
+    // `extends` here scopes the type-checked presets to THIS block's `files` glob only —
+    // without it they apply eslint-wide and crash on the plain-JS config/script files, which
+    // are not part of tsconfig.json's program.
+    extends: [...tseslint.configs.recommendedTypeChecked],
     languageOptions: {
       parserOptions: {
         project: './tsconfig.json',
