@@ -3,8 +3,8 @@
   "slug": "extension-skeleton-core-attach-and-a-doctor-that",
   "type": "feature",
   "title": "Extension skeleton, core attach, and a doctor that proves the host can run it",
-  "stage": "refine",
-  "status": "spec",
+  "stage": "build",
+  "status": "building",
   "spec": "WHY: everything else stands on the extension host being able to load repo-tour's core (ESM, tree-sitter WASM) and find the claude CLI. Prove that first (.autodev/specs/T-1-build-tutorials-v1.md §3, §10).\n\nACs:\n1. A VS Code extension manifest (package.json) with id build-tutorials, activation on command, commands buildTutorials.start and buildTutorials.doctor, and a setting buildTutorials.repoTourPath (default: the sibling ../repo-tour checkout). Check: the extension activates in vscode-test.\n2. The extension's own code is bundled with esbuild to CJS; repo-tour is a file: dependency loaded UNBUNDLED via dynamic import() so its import.meta.url asset lookups keep working. Check: an activation test imports the core and calls baseCss().\n3. doctor reports, in an output channel, in plain words: core found at <path> + version; each public module resolved; tree-sitter initialised in the host and the four grammars loaded; claude CLI found via the core's resolveBin (or not, with the reason). Check: run in vscode-test with the core present and with repoTourPath pointing nowhere.\n4. CI (GitHub Actions) runs typecheck, lint, tests and vsce package on push. Check: a green run on main.\n5. AGPL-3.0 headers/NOTICE in the extension and a Source link in its README, matching repo-tour's practice. Check: files present.\n\nOut of scope\n- Any user-facing screen — T-3\n- Publishing — T-8",
   "pipeline_version": "feature@v1",
   "modifiers": [],
@@ -23,16 +23,18 @@
     "monitor"
   ],
   "passport": [
-    "2026-09-04 created as feature \"Extension skeleton, core attach, and a doctor that proves the host can run it\" on feature@v1 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
-    "2026-09-04 advanced intake → refine · intake on unrecorded",
-    "2026-09-04 waiting at gate spec_ready (keyholder human:owner) since 2026-09-04"
+    "2026-09-04 gate spec_ready cleared by agent:claude(on-behalf:evan,GA-1) on go-ahead GA-1 (\"Let's go ahead and loop through it until these are created a\")",
+    "2026-09-04 advanced refine → queue · refine on unrecorded",
+    "2026-09-04 advanced queue → locate · queue on unrecorded",
+    "2026-09-04 advanced locate → plan · locate on unrecorded",
+    "2026-09-04 advanced plan → build · plan on unrecorded"
   ],
   "assignees": {},
   "links": {
     "intent": "T-1"
   },
   "gates": {
-    "spec_ready": false,
+    "spec_ready": true,
     "merge": false,
     "accept": false,
     "deploy": false,
@@ -43,9 +45,8 @@
   "overrides": {},
   "risk": "low",
   "loop": {
-    "validator_passed": true,
-    "attempts": 0,
-    "evidence": ".autodev/specs/T-2-extension-skeleton.md"
+    "validator_passed": false,
+    "attempts": 0
   },
   "history": [
     {
@@ -53,6 +54,30 @@
       "to": "refine",
       "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
       "at": "2026-09-04T22:59:21.032Z"
+    },
+    {
+      "from": "refine",
+      "to": "queue",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:02:04.763Z"
+    },
+    {
+      "from": "queue",
+      "to": "locate",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:02:05.030Z"
+    },
+    {
+      "from": "locate",
+      "to": "plan",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:02:05.138Z"
+    },
+    {
+      "from": "plan",
+      "to": "build",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:02:05.233Z"
     }
   ],
   "receipts": {
@@ -70,6 +95,30 @@
       "fingerprint": "sha256:a3c2cacb39c78ba8",
       "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
       "at": "2026-09-04T22:59:21.121Z",
+      "model": "unrecorded"
+    },
+    "queue": {
+      "evidence": "priority 1 in this shop: T-2 is the only ready ticket and every other ticket here waits on it (--after chain); no conflicts — nothing else in flight in this repo",
+      "kind": "other",
+      "fingerprint": "priority 1 in this shop: T-2 is the only ready ticket and every other ticket here waits on it (--after chain); no conflicts — nothing else in flight in this repo",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:02:05.026Z",
+      "model": "unrecorded"
+    },
+    "locate": {
+      "evidence": ".autodev/locates/T-2.md",
+      "kind": "file",
+      "fingerprint": "sha256:a254795164eb21fa",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:02:05.136Z",
+      "model": "unrecorded"
+    },
+    "plan": {
+      "evidence": ".autodev/plans/T-2.md",
+      "kind": "file",
+      "fingerprint": "sha256:7729c984332577a7",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:02:05.232Z",
       "model": "unrecorded"
     }
   }

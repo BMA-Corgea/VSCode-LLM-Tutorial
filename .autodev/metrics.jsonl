@@ -3,3 +3,7 @@
 {"ts":"2026-09-04T22:49:20.536Z","kind":"stage.advanced","ticket":"T-1","from":"dir-scope","to":"dir-route"}
 {"ts":"2026-09-04T22:50:48.475Z","kind":"pipeline.complete","ticket":"T-1","at":"dir-route"}
 {"ts":"2026-09-04T22:59:21.039Z","kind":"stage.advanced","ticket":"T-2","from":"intake","to":"refine"}
+{"ts":"2026-09-04T23:02:04.764Z","kind":"stage.advanced","ticket":"T-2","from":"refine","to":"queue"}
+{"ts":"2026-09-04T23:02:05.031Z","kind":"stage.advanced","ticket":"T-2","from":"queue","to":"locate"}
+{"ts":"2026-09-04T23:02:05.138Z","kind":"stage.advanced","ticket":"T-2","from":"locate","to":"plan"}
+{"ts":"2026-09-04T23:02:05.240Z","kind":"stage.advanced","ticket":"T-2","from":"plan","to":"build"}
