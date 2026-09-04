@@ -1,0 +1,3 @@
+{"ts":"2026-09-04T22:02:38.328Z","type":"blueprint.imported","blueprint":"solo-builder-review","by":"human:evan","landed":0,"reused":58,"quarantined":0}
+{"ts":"2026-09-04T22:02:38.329Z","type":"setup","shop":"vscode-llm-tutorial","preset":"solo-builder-review","blueprint":"solo-builder-review","by":"human:evan"}
+{"ts":"2026-09-04T22:02:53.915Z","type":"session.started","model":"unrecorded","source":"payload-missing","payload_keys":["session_id","transcript_path","cwd","hook_event_name","source"]}
