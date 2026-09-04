@@ -9,7 +9,6 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
-- **T-2** (feature) — Extension skeleton, core attach, doctor. 2026-09-04: built on
   `feature/T-2-skeleton` (commits through `1f5c259` plus a README/NOTICE/packaging follow-up)
   and self-verified — typecheck, lint, `npm test` (4/4, both under a real DISPLAY and under
   `xvfb-run -a`), `npm run build`, `./build-tutorials doctor`, `./build-tutorials package`
@@ -33,19 +32,18 @@ here and found via the reference table below.
   routed into T-2…T-10 here + repo-tour T-11…T-13. Waiting on his approval of the set and his
   answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
   thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
-- **T-2** (feature) — Extension skeleton, core attach, and a doctor that proves the host can run it — gate
 
 ## Waiting on
 
 <!-- Holds: "waiting at <gate> on <keyholder> since <date>, ping sent to
      <channel>" — no session should discover a hold by archaeology (ruling 24). -->
-- **T-2** — waiting at spec_ready on human:owner since 2026-09-04
 
 
 ## Recent past (~15 items / ~30 days)
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-04 **T-2 COMPLETE** — Extension skeleton, core attach, and a doctor that proves the host can run it
 - 2026-09-04 **T-1 COMPLETE** — Build tutorials v1 — recreate a repo by its decisions, in VS Code, on repo-tour…
 
 

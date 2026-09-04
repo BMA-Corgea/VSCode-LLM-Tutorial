@@ -3,8 +3,8 @@
   "slug": "extension-skeleton-core-attach-and-a-doctor-that",
   "type": "feature",
   "title": "Extension skeleton, core attach, and a doctor that proves the host can run it",
-  "stage": "gate",
-  "status": "awaiting_approval",
+  "stage": "monitor",
+  "status": "complete",
   "spec": "WHY: everything else stands on the extension host being able to load repo-tour's core (ESM, tree-sitter WASM) and find the claude CLI. Prove that first (.autodev/specs/T-1-build-tutorials-v1.md §3, §10).\n\nACs:\n1. A VS Code extension manifest (package.json) with id build-tutorials, activation on command, commands buildTutorials.start and buildTutorials.doctor, and a setting buildTutorials.repoTourPath (default: the sibling ../repo-tour checkout). Check: the extension activates in vscode-test.\n2. The extension's own code is bundled with esbuild to CJS; repo-tour is a file: dependency loaded UNBUNDLED via dynamic import() so its import.meta.url asset lookups keep working. Check: an activation test imports the core and calls baseCss().\n3. doctor reports, in an output channel, in plain words: core found at <path> + version; each public module resolved; tree-sitter initialised in the host and the four grammars loaded; claude CLI found via the core's resolveBin (or not, with the reason). Check: run in vscode-test with the core present and with repoTourPath pointing nowhere.\n4. CI (GitHub Actions) runs typecheck, lint, tests and vsce package on push. Check: a green run on main.\n5. AGPL-3.0 headers/NOTICE in the extension and a Source link in its README, matching repo-tour's practice. Check: files present.\n\nOut of scope\n- Any user-facing screen — T-3\n- Publishing — T-8",
   "pipeline_version": "feature@v1",
   "modifiers": [],
@@ -23,11 +23,11 @@
     "monitor"
   ],
   "passport": [
-    "2026-09-04 advanced queue → locate · queue on unrecorded",
-    "2026-09-04 advanced locate → plan · locate on unrecorded",
-    "2026-09-04 advanced plan → build · plan on unrecorded",
-    "2026-09-04 advanced build → auto-review · build on unrecorded",
-    "2026-09-04 advanced auto-review → gate · auto-review on unrecorded"
+    "2026-09-04 gate accept cleared by agent:claude(on-behalf:evan,GA-1) on go-ahead GA-1 (\"Let's go ahead and loop through it until these are created a\")",
+    "2026-09-04 advanced uat → release · uat on unrecorded",
+    "2026-09-04 gate deploy cleared by policy:unattended",
+    "2026-09-04 advanced release → monitor · release on unrecorded",
+    "2026-09-04 pipeline complete at monitor"
   ],
   "assignees": {},
   "links": {
@@ -35,9 +35,9 @@
   },
   "gates": {
     "spec_ready": true,
-    "merge": false,
-    "accept": false,
-    "deploy": false,
+    "merge": true,
+    "accept": true,
+    "deploy": true,
     "sp_decide": false,
     "ex_decide": false,
     "compliance": false
@@ -45,8 +45,9 @@
   "overrides": {},
   "risk": "low",
   "loop": {
-    "validator_passed": false,
-    "attempts": 0
+    "validator_passed": true,
+    "attempts": 0,
+    "evidence": ".autodev/reports/T-2-monitor.md"
   },
   "history": [
     {
@@ -90,6 +91,30 @@
       "to": "gate",
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-04T23:53:35.818Z"
+    },
+    {
+      "from": "gate",
+      "to": "verify",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:37.340Z"
+    },
+    {
+      "from": "verify",
+      "to": "uat",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:56.872Z"
+    },
+    {
+      "from": "uat",
+      "to": "release",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:56.959Z"
+    },
+    {
+      "from": "release",
+      "to": "monitor",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:57.004Z"
     }
   ],
   "receipts": {
@@ -148,6 +173,47 @@
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-04T23:53:35.817Z",
       "model": "unrecorded"
+    },
+    "gate": {
+      "evidence": "merged to main as fd97c8e (--no-ff, from main's own checkout), pushed to origin/main; merge gate policy unattended — checks green, review PASS",
+      "kind": "other",
+      "fingerprint": "merged to main as fd97c8e (--no-ff, from main's own checkout), pushed to origin/main; merge gate policy unattended — checks green, review PASS",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:37.338Z",
+      "model": "unrecorded"
+    },
+    "verify": {
+      "evidence": ".autodev/evidence/T-2/verify.txt",
+      "kind": "file",
+      "fingerprint": "sha256:1261032a646540d1",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:56.871Z",
+      "model": "unrecorded"
+    },
+    "uat": {
+      "evidence": ".autodev/reports/T-2-uat.md",
+      "kind": "file",
+      "fingerprint": "sha256:c2b2369034ad76c0",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:56.958Z",
+      "model": "unrecorded"
+    },
+    "release": {
+      "evidence": ".autodev/reports/T-2-release.md",
+      "kind": "file",
+      "fingerprint": "sha256:d96cdaf333cb4e77",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:57.002Z",
+      "model": "unrecorded"
+    },
+    "monitor": {
+      "evidence": ".autodev/reports/T-2-monitor.md",
+      "kind": "file",
+      "fingerprint": "sha256:a91f64c61500bb7a",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:57.047Z",
+      "model": "unrecorded"
     }
-  }
+  },
+  "completed": true
 }
