@@ -10,6 +10,11 @@
 
 import { CORE_MODULE_NAMES, loadCore, type CoreLoadResult, type ModuleLoad } from './core.js';
 
+// Re-exported so scripts/doctor-cli.mjs — which loads only dist/doctor.js, deliberately never
+// dist/extension.js, so it never touches `vscode` — has one bundle to import from instead of
+// needing a second dist/core.js entry point.
+export { resolveCoreRoot } from './core.js';
+
 export interface GrammarCheck {
   ok: boolean;
   /** the languages we asked repo-tour to load — reported as loaded only when `ok` */
