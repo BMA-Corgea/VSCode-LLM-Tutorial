@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# T-2 AC4: typecheck, lint, tests and `vsce package` on push. repo-tour is not published, so
+# this extension depends on it via `file:../repo-tour` (spec §3) — the two repos are checked
+# out as SIBLING directories here, exactly as they are on a developer's machine, so
+# `buildTutorials.repoTourPath`'s default (`../repo-tour`) resolves the same way in CI as it
+# does locally.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: VSCode-LLM-Tutorial
+
+      - name: Checkout repo-tour (sibling — this extension's core)
+        uses: actions/checkout@v4
+        with:
+          repository: BMA-Corgea/repo-tour
+          path: repo-tour
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build repo-tour
+        working-directory: repo-tour
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install extension dependencies
+        working-directory: VSCode-LLM-Tutorial
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: VSCode-LLM-Tutorial
+        run: npm run typecheck
+
+      - name: Lint
+        working-directory: VSCode-LLM-Tutorial
+        run: npm run lint
+
+      # vscode-test needs a display; GitHub's runners have none, and scripts/run-tests.mjs
+      # already wraps itself in `xvfb-run -a` whenever DISPLAY is unset (AC8) — it just needs
+      # xvfb itself to actually be on the box.
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Test
+        working-directory: VSCode-LLM-Tutorial
+        run: npm test
+
+      # `npm run package` is `vsce package --no-dependencies`. Plain `vsce package` was tried
+      # first, since repo-tour is a runtime dependency and dependencies shipping was the plan
+      # — but vsce hard-errors on it: repo-tour is a `file:../repo-tour` SIBLING checkout, so
+      # walking into ITS node_modules for web-tree-sitter/tree-sitter-wasms produces paths
+      # like `extension/../repo-tour/node_modules/...`, which escape the vsix's own root and
+      # are not representable in the archive. Vendoring repo-tour into a truly standalone
+      # .vsix is deferred to T-8 (spec §11) — for now the packaged extension still expects a
+      # sibling repo-tour checkout at run time, exactly like `./build-tutorials dev` already
+      # does.
+      - name: Package
+        working-directory: VSCode-LLM-Tutorial
+        run: npm run package
+
+      - name: Upload .vsix
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-tutorials-vsix
+          path: VSCode-LLM-Tutorial/*.vsix

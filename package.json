@@ -1,0 +1,77 @@
+{
+  "name": "build-tutorials",
+  "displayName": "Build Tutorials",
+  "description": "Walks you through building an app the way its decisions were made — a paint-by-numbers tutorial generated from a real repository. Part of the repo-tour suite.",
+  "version": "0.0.1",
+  "publisher": "bma-corgea",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BMA-Corgea/VSCode-LLM-Tutorial"
+  },
+  "engines": {
+    "vscode": "^1.95.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:buildTutorials.start",
+    "onCommand:buildTutorials.doctor"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "buildTutorials.start",
+        "title": "Build Tutorials: Start",
+        "category": "Build Tutorials"
+      },
+      {
+        "command": "buildTutorials.doctor",
+        "title": "Build Tutorials: Doctor",
+        "category": "Build Tutorials"
+      }
+    ],
+    "configuration": {
+      "title": "Build Tutorials",
+      "properties": {
+        "buildTutorials.repoTourPath": {
+          "type": "string",
+          "default": "../repo-tour",
+          "description": "Path to the repo-tour checkout, relative to the extension or absolute. repo-tour supplies the core engine (extraction, digest, the LLM layer, skins) that this extension loads at run time."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "pretest": "npm run build",
+    "test": "node scripts/run-tests.mjs",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "repo-tour": "file:../repo-tour"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.95.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.2",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
+    "mocha": "^11.0.1",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2"
+  }
+}

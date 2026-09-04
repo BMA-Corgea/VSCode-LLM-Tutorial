@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# build-tutorials — top-level control script.
+#
+#   ./build-tutorials dev [folder]   build, then open the Extension Development Host with
+#                                    this extension loaded on `folder` (default: a fresh
+#                                    empty scratch folder under .scratch/)
+#   ./build-tutorials build          bundle src/ to dist/ (esbuild)
+#   ./build-tutorials test           run the vscode-test suite (xvfb-run -a when headless)
+#   ./build-tutorials doctor [path]  run the doctor with no editor host and print its report
+#                                    (path overrides buildTutorials.repoTourPath's default)
+#   ./build-tutorials package        build a .vsix (vsce)
+#
+# Prefers `codium` (VSCodium), falls back to `code` (VS Code), and says plainly which it
+# found and used — repo-tour's `start.sh` is the shape this mirrors (see that file).
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── colours (fall back to plain when not a tty) ─────────────────────────────
+if [ -t 1 ]; then
+  C_G=$'\e[32m'; C_R=$'\e[31m'; C_Y=$'\e[33m'; C_DIM=$'\e[2m'; C_B=$'\e[1m'; C_0=$'\e[0m'
+else
+  C_G=; C_R=; C_Y=; C_DIM=; C_B=; C_0=
+fi
+
+_say()  { printf '%s\n' "$*"; }
+_ok()   { printf '%s✓%s %s\n' "$C_G" "$C_0" "$*"; }
+_warn() { printf '%s!%s %s\n' "$C_Y" "$C_0" "$*"; }
+_die()  { printf '%s✗%s %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+
+# ── preflight ───────────────────────────────────────────────────────────────
+_need_node() {
+  command -v node >/dev/null 2>&1 || _die "node is not installed. build-tutorials needs Node 20 or newer."
+}
+
+_need_deps() {
+  if [ ! -d "$ROOT/node_modules/repo-tour" ]; then
+    _warn "dependencies are not installed yet — running npm install"
+    ( cd "$ROOT" && npm install ) || _die "npm install failed."
+    _ok "dependencies installed"
+  fi
+}
+
+# _editor_bin — prefers codium (VSCodium), falls back to code (VS Code). Empty if neither.
+_editor_bin() {
+  if command -v codium >/dev/null 2>&1; then printf 'codium'
+  elif command -v code >/dev/null 2>&1; then printf 'code'
+  else printf ''
+  fi
+}
+
+# ── commands ────────────────────────────────────────────────────────────────
+cmd_build() {
+  _need_node; _need_deps
+  ( cd "$ROOT" && npm run build ) && _ok "bundled to dist/"
+}
+
+cmd_test() {
+  _need_node; _need_deps
+  ( cd "$ROOT" && npm test )
+}
+
+cmd_doctor() {
+  _need_node; _need_deps
+  ( cd "$ROOT" && npm run build >/dev/null ) || _die "build failed — cannot run the doctor."
+  node "$ROOT/scripts/doctor-cli.mjs" "${1:-}"
+}
+
+cmd_package() {
+  _need_node; _need_deps
+  ( cd "$ROOT" && npm run package )
+}
+
+cmd_dev() {
+  _need_node; _need_deps
+  ( cd "$ROOT" && npm run build ) || _die "build failed."
+
+  local editor; editor="$(_editor_bin)"
+  if [ -z "$editor" ]; then
+    _die "neither codium nor code is on PATH. Install VS Code or VSCodium and try again."
+  fi
+  if [ "$editor" = codium ]; then _ok "found codium (VSCodium) — using it"
+  else _ok "found code (VS Code) — using it"; fi
+
+  local folder="${1:-}"
+  if [ -z "$folder" ]; then
+    folder="$ROOT/.scratch/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$folder"
+    _say "  ${C_DIM}no folder given — opening a fresh scratch folder:${C_0}"
+    _say "  ${C_DIM}$folder${C_0}"
+  else
+    mkdir -p "$folder" || _die "could not create/use folder: $folder"
+  fi
+
+  _say ""
+  _say "${C_B}build-tutorials dev${C_0} ${C_DIM}$folder${C_0}"
+  _say "${C_DIM}opening the Extension Development Host…${C_0}"
+  "$editor" --new-window --extensionDevelopmentPath="$ROOT" "$folder"
+}
+
+usage() {
+  sed -n '3,15p' "$ROOT/build-tutorials" | sed 's/^# \{0,1\}//'
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift || true
+case "$cmd" in
+  dev)              cmd_dev "${1:-}" ;;
+  build)            cmd_build ;;
+  test)             cmd_test ;;
+  doctor)           cmd_doctor "${1:-}" ;;
+  package)          cmd_package ;;
+  -h|--help|help)   usage ;;
+  *)                _die "unknown command: $cmd (try: dev, build, test, doctor, package)" ;;
+esac

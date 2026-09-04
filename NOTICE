@@ -1,0 +1,21 @@
+Build Tutorials
+Copyright (C) 2026 BMA-Corgea
+
+Licensed under the GNU Affero General Public License, version 3, or (at your option) any
+later version (AGPL-3.0-or-later). See LICENSE for the full text.
+
+Third-party core
+-----------------
+This extension consumes repo-tour (https://github.com/BMA-Corgea/repo-tour), also licensed
+AGPL-3.0-or-later, as its core engine: tree-sitter extraction, the digest pipeline, the LLM
+layer, and the shared skins. repo-tour is loaded at build and run time from a local checkout
+(the buildTutorials.repoTourPath setting) via dynamic import — it is a dependency, not code
+copied into this repository, and this NOTICE does not modify repo-tour's own licensing.
+
+Your AGPL entitlement
+-----------------------
+The AGPL's network-use clause (section 13) means that if you run a modified version of this
+extension where other people can interact with it over a network, they are entitled to that
+modified version's source. Because a local VS Code extension is not, itself, network-facing
+in that sense, this mainly matters if this extension's design changes to add a served
+component later — see README.md's Source link, which is where that offer belongs either way.
