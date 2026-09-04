@@ -9,6 +9,16 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
+- **T-2** (feature) — Extension skeleton, core attach, doctor. 2026-09-04: built on
+  `feature/T-2-skeleton` (commits through `1f5c259` plus a README/NOTICE/packaging follow-up)
+  and self-verified — typecheck, lint, `npm test` (4/4, both under a real DISPLAY and under
+  `xvfb-run -a`), `npm run build`, `./build-tutorials doctor`, `./build-tutorials package`
+  (.vsix), and `./build-tutorials dev` / `./start.sh` (codium opened with the extension,
+  confirmed via process + logs, then closed) all green. **The risky bet paid off**: repo-tour's
+  ESM core, including web-tree-sitter's WASM, loads and runs correctly inside the real VS Code
+  extension host via dynamic `import()` — no architecture change needed, T-3 onward can build
+  on this as specced. Full account: `.autodev/handoffs/T-2.md`. Reported back for
+  review/accept.
 - **T-3** (feature) — The start screen, shared skins, and building the plan with resume — intake
 - **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — intake
 - **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — intake
