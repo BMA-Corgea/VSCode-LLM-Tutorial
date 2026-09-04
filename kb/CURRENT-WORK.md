@@ -23,6 +23,7 @@ here and found via the reference table below.
   routed into T-2…T-10 here + repo-tour T-11…T-13. Waiting on his approval of the set and his
   answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
   thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
+- **T-2** (feature) — Extension skeleton, core attach, and a doctor that proves the host can run it — gate
 
 ## Waiting on
 

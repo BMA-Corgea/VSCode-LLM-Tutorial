@@ -3,8 +3,8 @@
   "slug": "extension-skeleton-core-attach-and-a-doctor-that",
   "type": "feature",
   "title": "Extension skeleton, core attach, and a doctor that proves the host can run it",
-  "stage": "build",
-  "status": "building",
+  "stage": "gate",
+  "status": "awaiting_approval",
   "spec": "WHY: everything else stands on the extension host being able to load repo-tour's core (ESM, tree-sitter WASM) and find the claude CLI. Prove that first (.autodev/specs/T-1-build-tutorials-v1.md §3, §10).\n\nACs:\n1. A VS Code extension manifest (package.json) with id build-tutorials, activation on command, commands buildTutorials.start and buildTutorials.doctor, and a setting buildTutorials.repoTourPath (default: the sibling ../repo-tour checkout). Check: the extension activates in vscode-test.\n2. The extension's own code is bundled with esbuild to CJS; repo-tour is a file: dependency loaded UNBUNDLED via dynamic import() so its import.meta.url asset lookups keep working. Check: an activation test imports the core and calls baseCss().\n3. doctor reports, in an output channel, in plain words: core found at <path> + version; each public module resolved; tree-sitter initialised in the host and the four grammars loaded; claude CLI found via the core's resolveBin (or not, with the reason). Check: run in vscode-test with the core present and with repoTourPath pointing nowhere.\n4. CI (GitHub Actions) runs typecheck, lint, tests and vsce package on push. Check: a green run on main.\n5. AGPL-3.0 headers/NOTICE in the extension and a Source link in its README, matching repo-tour's practice. Check: files present.\n\nOut of scope\n- Any user-facing screen — T-3\n- Publishing — T-8",
   "pipeline_version": "feature@v1",
   "modifiers": [],
@@ -23,11 +23,11 @@
     "monitor"
   ],
   "passport": [
-    "2026-09-04 gate spec_ready cleared by agent:claude(on-behalf:evan,GA-1) on go-ahead GA-1 (\"Let's go ahead and loop through it until these are created a\")",
-    "2026-09-04 advanced refine → queue · refine on unrecorded",
     "2026-09-04 advanced queue → locate · queue on unrecorded",
     "2026-09-04 advanced locate → plan · locate on unrecorded",
-    "2026-09-04 advanced plan → build · plan on unrecorded"
+    "2026-09-04 advanced plan → build · plan on unrecorded",
+    "2026-09-04 advanced build → auto-review · build on unrecorded",
+    "2026-09-04 advanced auto-review → gate · auto-review on unrecorded"
   ],
   "assignees": {},
   "links": {
@@ -78,6 +78,18 @@
       "to": "build",
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-04T23:02:05.233Z"
+    },
+    {
+      "from": "build",
+      "to": "auto-review",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:37:02.294Z"
+    },
+    {
+      "from": "auto-review",
+      "to": "gate",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:35.818Z"
     }
   ],
   "receipts": {
@@ -119,6 +131,22 @@
       "fingerprint": "sha256:7729c984332577a7",
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-04T23:02:05.232Z",
+      "model": "unrecorded"
+    },
+    "build": {
+      "evidence": "commits ccc97bd..4307b8e (8) on feature/T-2-skeleton (worktree ../VSCode-LLM-Tutorial-T-2); npm test 4 passing inside a real @vscode/test-electron host (VS Code 1.136.1) under DISPLAY=:1 and xvfb-run; ./build-tutorials doctor: core found at ../repo-tour v0.1.0, 7/7 modules, 4/4 grammars, claude found; build-tutorials-0.0.1.vsix produced with --no-dependencies (vendoring the core is T-8); coder seat model sonnet",
+      "kind": "other",
+      "fingerprint": "commits ccc97bd..4307b8e (8) on feature/T-2-skeleton (worktree ../VSCode-LLM-Tutorial-T-2); npm test 4 passing inside a real @vscode/test-electron host (VS Code 1.136.1) under DISPLAY=:1 and xvfb-run; ./build-tutorials doctor: core found at ../repo-tour v0.1.0, 7/7 modules, 4/4 grammars, claude found; build-tutorials-0.0.1.vsix produced with --no-dependencies (vendoring the core is T-8); coder seat model sonnet",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:37:02.294Z",
+      "model": "unrecorded"
+    },
+    "auto-review": {
+      "evidence": "review record .autodev/reviews/T-2.md committed as d2adf86 on feature/T-2-skeleton — Verdict PASS: 0 gating; advisory waived (doctor-cli default-arg nuance, grammar-name sync untested, bash scripts lack SPDX, .vscodeignore ships the test bundle, CI green run unverifiable pre-push); loader verified live across repo-tour's T-11 before/after; reviewer seat model sonnet, fresh session",
+      "kind": "other",
+      "fingerprint": "review record .autodev/reviews/T-2.md committed as d2adf86 on feature/T-2-skeleton — Verdict PASS: 0 gating; advisory waived (doctor-cli default-arg nuance, grammar-name sync untested, bash scripts lack SPDX, .vscodeignore ships the test bundle, CI green run unverifiable pre-push); loader verified live across repo-tour's T-11 before/after; reviewer seat model sonnet, fresh session",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-04T23:53:35.817Z",
       "model": "unrecorded"
     }
   }
