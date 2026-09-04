@@ -1,6 +1,8 @@
 .vscode/**
+.vscode-test.mjs
 .vscode-test/**
 .scratch/**
+.claude/**
 .github/**
 .autodev/**
 kb/**
@@ -10,7 +12,6 @@ scripts/**
 esbuild.mjs
 eslint.config.mjs
 tsconfig.json
-*.map
 .gitignore
 **/*.ts
-!dist/**/*.js
+**/*.map

@@ -54,7 +54,7 @@
     "pretest": "npm run build",
     "test": "node scripts/run-tests.mjs",
     "vscode:prepublish": "npm run build",
-    "package": "vsce package"
+    "package": "vsce package --no-dependencies"
   },
   "dependencies": {
     "repo-tour": "file:../repo-tour"
