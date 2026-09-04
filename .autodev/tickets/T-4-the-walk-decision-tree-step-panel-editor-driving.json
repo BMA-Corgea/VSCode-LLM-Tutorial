@@ -1,0 +1,51 @@
+{
+  "id": "T-4",
+  "slug": "the-walk-decision-tree-step-panel-editor-driving",
+  "type": "feature",
+  "title": "The walk — decision tree, step panel, editor driving, and progress that survives reload",
+  "stage": "intake",
+  "status": "triage",
+  "spec": "WHY: .autodev/specs/T-1-build-tutorials-v1.md §5.1, §5.3. Recreate mode only; the panel shows alternatives but does not let the learner pick one (marked 'coming with T-10', where the eye is).\n\nACs:\n1. A native TreeView of chapters → steps with done / current / pending icons; clicking a step makes it current. Check: TreeDataProvider unit tests.\n2. The step panel (webview view) renders question, the author's choice marked among the options, why with its source named (interpret / docstring / not inferable), the witness (or 'no history to show'), Open the file, Check my work (wired in T-5), Next / Previous. Check: rendered HTML assertions per whySource and for a null witness.\n3. Opening a step reveals the target range in the real editor and decorates the load-bearing lines with a TextEditorDecorationType; decorations clear when the step changes. Check: vscode-test asserts the active editor, visible range and decoration count.\n4. Position and per-step status persist in <target>/.repo-tour/build/progress.json; the current build's target folder is remembered in workspaceState so reopening the workspace restores the tree and panel at the same step. Check: state test across a simulated reload.\n5. The step panel implements getState/setState and re-renders from the host's plan after being hidden; it never holds truth of its own. Check: hide/show in vscode-test keeps the step.\n6. Status bar shows 'step 7 / 40 · scaffolded'. Check: status bar item text.\n\nOut of scope\n- Writing files, the dial's effect, checking — T-5\n- Picking an alternative — T-10",
+  "pipeline_version": "feature@v1",
+  "modifiers": [],
+  "pipeline": [
+    "intake",
+    "refine",
+    "queue",
+    "locate",
+    "plan",
+    "build",
+    "auto-review",
+    "gate",
+    "verify",
+    "uat",
+    "release",
+    "monitor"
+  ],
+  "passport": [
+    "2026-09-04 created as feature \"The walk — decision tree, step panel, editor driving, and progress that survives reload\" on feature@v1 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)"
+  ],
+  "assignees": {},
+  "links": {
+    "intent": "T-1"
+  },
+  "depends_on": [
+    "T-3"
+  ],
+  "gates": {
+    "spec_ready": false,
+    "merge": false,
+    "accept": false,
+    "deploy": false,
+    "sp_decide": false,
+    "ex_decide": false,
+    "compliance": false
+  },
+  "overrides": {},
+  "risk": "medium",
+  "loop": {
+    "validator_passed": false,
+    "attempts": 0
+  },
+  "history": []
+}

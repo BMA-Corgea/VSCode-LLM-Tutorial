@@ -78,6 +78,34 @@
       "by": "human:evan",
       "question": null,
       "text": "DECISION Evan 2026-09-04 — DIVERGENCE = REPLAN THE REMAINDER. When the user diverges from the reference repo's decision at step N, the un-walked steps are thrown out and re-derived from the new decision (a Mode-A replan seeded by the Mode-B prefix). Evan explicitly accepted the cost of the plan changing under him: 'The cost doesn't really bother me honestly... that seems like sophistication that we don't need yet. So let's replan the remainder so we get something that functions. If we start selling this or something then maybe.' => a visible replan diff is a LATER concern, not v1. Also: GitHub repo is https://github.com/BMA-Corgea/VSCode-LLM-Tutorial, license AGPL."
+    },
+    {
+      "ts": "2026-09-04T22:36:17.098Z",
+      "phase": "goal",
+      "by": "human:evan",
+      "question": null,
+      "text": "DECISION Evan 2026-09-04 — SHARED CORE WITH repo-tour, AND 'part of the same app' (his words, stronger than a shared library). Both digest a repo; repo-tour renders how-it-works, this renders how-it-got-built. TENSION the spec must resolve: repo-tour already decided 'own pages, NOT a GitHub overlay' (web), while this is a VS Code extension — reconciliation is a headless shared core with two front ends unless Evan wants literally one surface."
+    },
+    {
+      "ts": "2026-09-04T22:36:17.137Z",
+      "phase": "goal",
+      "by": "human:evan",
+      "question": null,
+      "text": "DECISION Evan 2026-09-04 — V1 = the 'recreate this repo as it stands' checkbox path (zero divergence, ground truth checkable against the real repo). CONSTRAINT he attached: v1's architecture must NOT foreclose the other modes — idea-first, divergence/replan, and the dial have to be visibly part of the design from the start, not bolted on later. UI SURFACES settled: start screen = webview editor tab; step panel = webview sidebar view; detour = webview editor tab with embedded editor; decision list = NATIVE tree view; 'this is the line' = native editor decoration; app runs in the real terminal. Extension (not a VSCodium fork, not an own IDE); publish to both MS Marketplace and Open VSX."
+    },
+    {
+      "ts": "2026-09-04T22:36:17.178Z",
+      "phase": "goal",
+      "by": "human:evan",
+      "question": null,
+      "text": "PROCESS Evan 2026-09-04: asked to hold before spec-writing — 'let me put some more mustard on the model and effort before I tell you to get to work on it.' Do NOT begin the spec until he says go; all shaping decisions are captured and ready."
+    },
+    {
+      "ts": "2026-09-04T22:38:15.733Z",
+      "phase": "goal",
+      "by": "human:evan",
+      "question": null,
+      "text": "REQUIREMENT Evan 2026-09-04 (mid-spec): 'just like the repo-tour I want to be able to one shot new css styles so have it modular like that' — a skin/theme system where a new visual style is one file dropped in, matching repo-tour's assets/skins/ pattern."
     }
   ]
 }

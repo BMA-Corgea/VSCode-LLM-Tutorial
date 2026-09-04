@@ -1,0 +1,51 @@
+{
+  "id": "T-3",
+  "slug": "the-start-screen-shared-skins-and-building-the-p",
+  "type": "feature",
+  "title": "The start screen, shared skins, and building the plan with resume",
+  "stage": "intake",
+  "status": "triage",
+  "spec": "WHY: the front door (.autodev/specs/T-1-build-tutorials-v1.md §5.2) and the skin contract (.autodev/specs/T-1-build-tutorials-v1.md §5.7). DEPENDS ON repo-tour T-11 (package exports + injectable asset roots), T-12 (BuildPlan) and T-13 (alternatives) — cross-shop, so not expressible with --after; do not start build until those three are merged.\n\nACs:\n1. A webview editor tab with: idea textbox; 'Just recreate the repo as it stands' checkbox; reference repo field (local path or GitHub URL) required iff the checkbox is ticked; 'Build it in' folder picker requiring an empty or new folder; the three-position dial. Check: form validation tests via the webview's message protocol.\n2. Typing an idea without ticking recreate shows, in the form itself, 'Idea-first builds arrive with T-9 — tick recreate to build from a repo' — no silent decline (repo-tour lesson T-3). Check: DOM assertion.\n3. A GitHub URL is cloned into globalStorageUri/refs/<owner>-<name>; a local path is used in place; a repo whose files are outside TS/JS/TSX/Python is refused with the reason shown in the form. Check: tests with a fixture repo and a Go-only fixture.\n4. Building the plan calls the core's digest + buildPlan + interpret with a progress notification, writes a write-ahead marker <target>/.repo-tour/build/building.json kept current, and resumes from it after a window reload. Check: kill vscode-test mid-build; on restart the marker is picked up and the plan completes.\n5. plan.json is written to <target>/.repo-tour/build/ and validates against the core's schema; cost is shown on completion (metered or 'this provider does not report usage'). Check: schema validation test.\n6. Skins: every webview inlines the core's baseCss() + alternateCss() plus a bridge sheet mapping base tokens to --vscode-* variables under :root:not([data-theme]) so System follows the editor theme; the picker lists SKINS; the choice is stamped into the HTML by the host before first paint and persisted in globalState. Check: a fixture skin dropped into repo-tour's assets/skins/ + one row appears in the webview HTML with no extension change.\n7. Every inlined client script is parsed by new Function in a test (repo-tour lesson: client script in template literals). Check: the parse test.\n\nOut of scope\n- Walking the plan — T-4\n- Mode A / idea-first — T-9\n- A network-served skin — deferred: who=agent:pm why=webviews inline CSS exactly as repo-tour's pages do",
+  "pipeline_version": "feature@v1",
+  "modifiers": [],
+  "pipeline": [
+    "intake",
+    "refine",
+    "queue",
+    "locate",
+    "plan",
+    "build",
+    "auto-review",
+    "gate",
+    "verify",
+    "uat",
+    "release",
+    "monitor"
+  ],
+  "passport": [
+    "2026-09-04 created as feature \"The start screen, shared skins, and building the plan with resume\" on feature@v1 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)"
+  ],
+  "assignees": {},
+  "links": {
+    "intent": "T-1"
+  },
+  "depends_on": [
+    "T-2"
+  ],
+  "gates": {
+    "spec_ready": false,
+    "merge": false,
+    "accept": false,
+    "deploy": false,
+    "sp_decide": false,
+    "ex_decide": false,
+    "compliance": false
+  },
+  "overrides": {},
+  "risk": "medium",
+  "loop": {
+    "validator_passed": false,
+    "attempts": 0
+  },
+  "history": []
+}

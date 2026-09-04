@@ -9,22 +9,34 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
+- **T-3** (feature) — The start screen, shared skins, and building the plan with resume — intake
+- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — intake
+- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — intake
+- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — intake
+- **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — intake
+- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — intake
+- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
+- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
 
-- (nothing in motion yet)
+
+- **T-1 (direction) — Build tutorials v1.** 2026-09-04: shaped with Evan in one session and
+  routed into T-2…T-10 here + repo-tour T-11…T-13. Waiting on his approval of the set and his
+  answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
+  thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
 
 ## Waiting on
 
 <!-- Holds: "waiting at <gate> on <keyholder> since <date>, ping sent to
      <channel>" — no session should discover a hold by archaeology (ruling 24). -->
+- **T-2** — waiting at spec_ready on human:owner since 2026-09-04
 
-- (nothing waiting)
 
 ## Recent past (~15 items / ~30 days)
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-04 **T-1 COMPLETE** — Build tutorials v1 — recreate a repo by its decisions, in VS Code, on repo-tour…
 
-- (nothing completed yet)
 
 ## Reference table (where the past lives)
 

@@ -1,0 +1,5 @@
+{"ts":"2026-09-04T22:49:20.447Z","kind":"stage.advanced","ticket":"T-1","from":"dir-goals","to":"dir-clarify"}
+{"ts":"2026-09-04T22:49:20.492Z","kind":"stage.advanced","ticket":"T-1","from":"dir-clarify","to":"dir-scope"}
+{"ts":"2026-09-04T22:49:20.536Z","kind":"stage.advanced","ticket":"T-1","from":"dir-scope","to":"dir-route"}
+{"ts":"2026-09-04T22:50:48.475Z","kind":"pipeline.complete","ticket":"T-1","at":"dir-route"}
+{"ts":"2026-09-04T22:59:21.039Z","kind":"stage.advanced","ticket":"T-2","from":"intake","to":"refine"}

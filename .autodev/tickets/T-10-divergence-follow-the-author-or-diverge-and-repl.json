@@ -1,0 +1,39 @@
+{
+  "id": "T-10",
+  "slug": "divergence-follow-the-author-or-diverge-and-repl",
+  "type": "direction",
+  "title": "Divergence — follow the author or diverge, and replan the remainder",
+  "stage": "dir-goals",
+  "status": "mandate_new",
+  "spec": "RUNNING START (inherits from T-1; scope at its own dir-goals). Evan, 2026-09-04: 'I point it at a real repo and then I can choose whether to divert by making different decisions or have it guide me to the same decisions the repo author made', and on the cost of replanning: 'The cost doesn't really bother me honestly … let's replan the remainder so we get something that functions.' Design in T-1 spec §2: a divergence is a Mode-A replan seeded by the Mode-B prefix — the un-walked steps are re-derived from the new decision. The data model already carries options + chosen. The visible replan diff is explicitly later. Not scoped yet; depends on T-9's derivation engine.",
+  "pipeline_version": "direction@v2",
+  "modifiers": [],
+  "pipeline": [
+    "dir-goals",
+    "dir-clarify",
+    "dir-scope",
+    "dir-route"
+  ],
+  "passport": [
+    "2026-09-04 created as direction \"Divergence — follow the author or diverge, and replan the remainder\" on direction@v2 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)"
+  ],
+  "assignees": {},
+  "links": {
+    "intent": "T-1"
+  },
+  "gates": {
+    "spec_ready": false,
+    "merge": false,
+    "accept": false,
+    "deploy": false,
+    "sp_decide": false,
+    "ex_decide": false,
+    "compliance": false
+  },
+  "overrides": {},
+  "loop": {
+    "validator_passed": false,
+    "attempts": 0
+  },
+  "history": []
+}

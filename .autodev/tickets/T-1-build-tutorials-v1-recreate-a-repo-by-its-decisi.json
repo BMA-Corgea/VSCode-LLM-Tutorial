@@ -1,0 +1,96 @@
+{
+  "id": "T-1",
+  "slug": "build-tutorials-v1-recreate-a-repo-by-its-decisi",
+  "type": "direction",
+  "title": "Build tutorials v1 — recreate a repo by its decisions, in VS Code, on repo-tour's core",
+  "stage": "dir-route",
+  "status": "complete",
+  "spec": "OBJECTIVE: a VS Code extension that turns an idea into a TUTORIAL instead of a vibecoded app — a paint-by-numbers walkthrough that teaches the DECISIONS behind why a file or repo is shaped the way it is. v1 = recreate-as-it-stands: point it at a real repo and be walked through building it, step by step, with the author's decision at every step shown against the alternatives.\n\nWHY (Evan, verbatim): 'You see how repo-tour interprets a repo and tells you how it works? I want an app that walks me through how to code it and what kinds of decisions go into making a file or repo the way it is. Basically, a paint by numbers to create an app.' The complaint is not that code appears; it is that the reasoning never does. It is the inverse of repo-tour and shares its core — 'part of the same app'.\n\nSUCCESS SHAPE (the 10 criteria in .autodev/specs/T-1-build-tutorials-v1.md §9): from an empty folder and a local TS/JS/Python repo, the start screen yields an ordered decision list covering every source file in dependency order, each step carrying question / options (author's marked) / why / witness / scaffold ranges; automated mode reproduces the reference byte-for-byte; scaffolded stubs parse and a filled stub passes a deterministic structural check; a tutor with the learner-vs-reference diff in context, one transcript per step; a detour that leaves the workspace untouched; skins shared with repo-tour (one CSS file → both front ends); reload-safe; a .vsix that builds; cost reported honestly. Data model complete from day one so Mode A (T-9) and divergence (T-10) are a change of defaults, not new machinery.",
+  "pipeline_version": "direction@v2",
+  "modifiers": [],
+  "pipeline": [
+    "dir-goals",
+    "dir-clarify",
+    "dir-scope",
+    "dir-route"
+  ],
+  "passport": [
+    "2026-09-04 respec'd by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV): dir-goals: the goal doc, from Evan's own words on 2026-09-04",
+    "2026-09-04 advanced dir-goals → dir-clarify · dir-goals on unrecorded",
+    "2026-09-04 advanced dir-clarify → dir-scope · dir-clarify on unrecorded",
+    "2026-09-04 advanced dir-scope → dir-route · dir-scope on unrecorded",
+    "2026-09-04 pipeline complete at dir-route"
+  ],
+  "assignees": {},
+  "links": {},
+  "gates": {
+    "spec_ready": false,
+    "merge": false,
+    "accept": false,
+    "deploy": false,
+    "sp_decide": false,
+    "ex_decide": false,
+    "compliance": false
+  },
+  "overrides": {},
+  "loop": {
+    "validator_passed": true,
+    "attempts": 0,
+    "evidence": "every epic routed: T-2..T-8 filed as feature tickets and T-9/T-10 as direction tickets, all with links.intent=T-1 and --after in dependency order (tracker.mjs list); repo-tour side filed as repo-tour T-11/T-12/T-13; the set is in spec section 8"
+  },
+  "history": [
+    {
+      "from": "dir-goals",
+      "to": "dir-clarify",
+      "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
+      "at": "2026-09-04T22:49:20.447Z"
+    },
+    {
+      "from": "dir-clarify",
+      "to": "dir-scope",
+      "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
+      "at": "2026-09-04T22:49:20.491Z"
+    },
+    {
+      "from": "dir-scope",
+      "to": "dir-route",
+      "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
+      "at": "2026-09-04T22:49:20.535Z"
+    }
+  ],
+  "receipts": {
+    "dir-goals": {
+      "evidence": "goal doc landed on T-1's spec via respec (objective + why + success shape), sourced from Evan's words in .autodev/onboarding.json transcript 2026-09-04 and written up in .autodev/specs/T-1-build-tutorials-v1.md sections 1-2",
+      "kind": "other",
+      "fingerprint": "goal doc landed on T-1's spec via respec (objective + why + success shape), sourced from Evan's words in .autodev/onboarding.json transcript 2026-09-04 and written up in .autodev/specs/T-1-build-tutorials-v1.md sections 1-2",
+      "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
+      "at": "2026-09-04T22:49:20.446Z",
+      "model": "unrecorded"
+    },
+    "dir-clarify": {
+      "evidence": "clarify loop ran live in session 2026-09-04: five questions asked one at a time (who types, divergence, surface, shared core, v1) and each answered and CONFIRMED by Evan; the eleven locked decisions are recorded in spec section 6 and captured write-ahead in .autodev/onboarding.json",
+      "kind": "other",
+      "fingerprint": "clarify loop ran live in session 2026-09-04: five questions asked one at a time (who types, divergence, surface, shared core, v1) and each answered and CONFIRMED by Evan; the eleven locked decisions are recorded in spec section 6 and captured write-ahead in .autodev/onboarding.json",
+      "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
+      "at": "2026-09-04T22:49:20.490Z",
+      "model": "unrecorded"
+    },
+    "dir-scope": {
+      "evidence": "epics scoped with boundaries, consumes/produces and order in spec section 8 (twelve tickets across two shops); the exception question is asked once in section 12 and in the gate message; Evan's answer will be recorded verbatim with tracker.mjs grant when it lands",
+      "kind": "other",
+      "fingerprint": "epics scoped with boundaries, consumes/produces and order in spec section 8 (twelve tickets across two shops); the exception question is asked once in section 12 and in the gate message; Evan's answer will be recorded verbatim with tracker.mjs grant when it lands",
+      "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
+      "at": "2026-09-04T22:49:20.534Z",
+      "model": "unrecorded"
+    },
+    "dir-route": {
+      "evidence": "every epic routed: T-2..T-8 filed as feature tickets and T-9/T-10 as direction tickets, all with links.intent=T-1 and --after in dependency order (tracker.mjs list); repo-tour side filed as repo-tour T-11/T-12/T-13; the set is in spec section 8",
+      "kind": "other",
+      "fingerprint": "every epic routed: T-2..T-8 filed as feature tickets and T-9/T-10 as direction tickets, all with links.intent=T-1 and --after in dependency order (tracker.mjs list); repo-tour side filed as repo-tour T-11/T-12/T-13; the set is in spec section 8",
+      "by": "agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)",
+      "at": "2026-09-04T22:50:48.466Z",
+      "model": "unrecorded"
+    }
+  },
+  "completed": true
+}

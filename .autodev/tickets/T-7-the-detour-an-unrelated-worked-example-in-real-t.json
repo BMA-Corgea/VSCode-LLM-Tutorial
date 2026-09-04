@@ -1,0 +1,51 @@
+{
+  "id": "T-7",
+  "slug": "the-detour-an-unrelated-worked-example-in-real-t",
+  "type": "feature",
+  "title": "The detour — an unrelated worked example, in real tabs, that leaves nothing behind",
+  "stage": "intake",
+  "status": "triage",
+  "spec": "WHY: .autodev/specs/T-1-build-tutorials-v1.md §5.6. Evan asked for the concept to be shown 'on a completely unrelated example that we create', and asked the name not be over-indexed on. Working name: detour.\n\nACs:\n1. 'Explain with an unrelated example' on the step panel asks the model (via the core's runLlm) for a self-contained example of the step's concept in a DIFFERENT domain: ≤ 5 files, ≤ 60 lines each, plus 3–6 narration stops, as JSON; the prompt states the concept and the learner's domain so the example avoids it. Check: prompt test; a schema test on the reply.\n2. Files are written under globalStorageUri/detours/<stepId>/ — never inside the workspace — and opened as real editor tabs; a narrator webview tab walks the stops with reveal + decoration. Check: the workspace tree hash is unchanged after a detour.\n3. 'Back to my build' closes the detour's tabs and narrator, deletes its directory, and restores the step panel at the same step. Check: directory absent; active step unchanged.\n4. The step's transcript records 'detour taken: <title>'. Check: progress.json.\n5. Cached by step id + prompt version so retaking is free; a failed generation says why in the panel. Check: second run makes no LLM call.\n\nOut of scope\n- Runnable detours (a terminal for the example) — deferred: who=agent:pm why=reading a worked example is the ask; running it is a later nicety\n- Detours in Mode A — T-9",
+  "pipeline_version": "feature@v1",
+  "modifiers": [],
+  "pipeline": [
+    "intake",
+    "refine",
+    "queue",
+    "locate",
+    "plan",
+    "build",
+    "auto-review",
+    "gate",
+    "verify",
+    "uat",
+    "release",
+    "monitor"
+  ],
+  "passport": [
+    "2026-09-04 created as feature \"The detour — an unrelated worked example, in real tabs, that leaves nothing behind\" on feature@v1 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)"
+  ],
+  "assignees": {},
+  "links": {
+    "intent": "T-1"
+  },
+  "depends_on": [
+    "T-6"
+  ],
+  "gates": {
+    "spec_ready": false,
+    "merge": false,
+    "accept": false,
+    "deploy": false,
+    "sp_decide": false,
+    "ex_decide": false,
+    "compliance": false
+  },
+  "overrides": {},
+  "risk": "low",
+  "loop": {
+    "validator_passed": false,
+    "attempts": 0
+  },
+  "history": []
+}

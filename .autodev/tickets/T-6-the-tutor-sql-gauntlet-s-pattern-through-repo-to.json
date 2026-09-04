@@ -1,0 +1,51 @@
+{
+  "id": "T-6",
+  "slug": "the-tutor-sql-gauntlet-s-pattern-through-repo-to",
+  "type": "feature",
+  "title": "The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript per step",
+  "stage": "intake",
+  "status": "triage",
+  "spec": "WHY: .autodev/specs/T-1-build-tutorials-v1.md §5.5. Evan: 'I can ask a tutor (like sql-gauntlet) if it doesn't make sense.' DEPENDS ON repo-tour T-13 (AskContext.build).\n\nACs:\n1. A chat under the step panel; sending builds the prompt with the core's buildAskPrompt(messages, ctx) where ctx carries the step (question, options, why), the reference file's meaning, and the unified diff of the learner's current file against the reference. Check: unit test on the context block contents.\n2. One transcript per step, persisted in progress.json; switching steps switches transcripts; returning restores. Check: state test.\n3. Runs through the core's runLlm with the provider/model the core resolves (claude CLI by default); the choice is a setting mirroring repo-tour's. Check: a stubbed provider in tests.\n4. Honest when unreachable: with no provider available the panel says so immediately and never shows a spinner that does not end. Check: test with resolveBin returning null.\n5. Answers render code fences and nothing else as markup (repo-tour's askpanel rule: a model emitting stray angle brackets cannot rewrite the page). Check: escaping test.\n\nOut of scope\n- The detour — T-7\n- Capturing a tutor exchange as a note — deferred: who=agent:pm why=notes are a repo-tour surface; not asked for here",
+  "pipeline_version": "feature@v1",
+  "modifiers": [],
+  "pipeline": [
+    "intake",
+    "refine",
+    "queue",
+    "locate",
+    "plan",
+    "build",
+    "auto-review",
+    "gate",
+    "verify",
+    "uat",
+    "release",
+    "monitor"
+  ],
+  "passport": [
+    "2026-09-04 created as feature \"The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript per step\" on feature@v1 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)"
+  ],
+  "assignees": {},
+  "links": {
+    "intent": "T-1"
+  },
+  "depends_on": [
+    "T-4"
+  ],
+  "gates": {
+    "spec_ready": false,
+    "merge": false,
+    "accept": false,
+    "deploy": false,
+    "sp_decide": false,
+    "ex_decide": false,
+    "compliance": false
+  },
+  "overrides": {},
+  "risk": "low",
+  "loop": {
+    "validator_passed": false,
+    "attempts": 0
+  },
+  "history": []
+}

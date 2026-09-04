@@ -1,0 +1,51 @@
+{
+  "id": "T-5",
+  "slug": "the-dial-manual-scaffolded-automated-with-the-st",
+  "type": "feature",
+  "title": "The dial — manual, scaffolded, automated — with the structural check and a commit per step",
+  "stage": "intake",
+  "status": "triage",
+  "spec": "WHY: .autodev/specs/T-1-build-tutorials-v1.md §5.4, §4.4, §4.5. This is where the learner's hands meet the load-bearing line.\n\nACs:\n1. The dial is global (from the start screen) and overridable per step from the panel; per-step positions are remembered; the global setting never drifts toward automated on its own. Check: state tests.\n2. manual: the extension writes nothing and the panel shows the file's shape (exports, imports) from the plan. Check: target tree unchanged after opening the step.\n3. scaffolded: the file is written with boilerplate ranges from the reference and the core's stubs for load-bearing ranges; the written file parses (zero ERROR nodes) in TS, JS and Python fixtures. Check: parse test on written files.\n4. automated: the reference file is written verbatim and the panel walks each load-bearing range with reveal + decoration and the step's narration. Check: byte equality with the reference; the walk visits every range.\n5. Check my work runs the core's structural check and shows present / missing / extra per symbol in the panel and a ✓ / ✗ on the tree node; a renamed local variable passes; a missing export is named. Check: unit + vscode-test.\n6. Walking every step in automated mode reproduces the reference's source files byte-for-byte; generated / vendored / lockfile files are reproduced from plan.reproduce and never presented as steps. Check: diff -r in the acceptance run on the first target (sql-gauntlet).\n7. Commit per completed step: the target is git-inited if needed; a passed (or automated) step commits its file with the message '<ordinal>: <question> — <chosen option label>'; a setting turns it off. Check: git log on the fixture target.\n\nOut of scope\n- Semantic comparison of bodies — deferred: who=agent:pm why=the check is structural by design (.autodev/specs/T-1-build-tutorials-v1.md §4.4); semantics go to the tutor on request\n- Running the learner's app for them — deferred: who=agent:pm why=the real terminal is theirs; the panel only suggests the command",
+  "pipeline_version": "feature@v1",
+  "modifiers": [],
+  "pipeline": [
+    "intake",
+    "refine",
+    "queue",
+    "locate",
+    "plan",
+    "build",
+    "auto-review",
+    "gate",
+    "verify",
+    "uat",
+    "release",
+    "monitor"
+  ],
+  "passport": [
+    "2026-09-04 created as feature \"The dial — manual, scaffolded, automated — with the structural check and a commit per step\" on feature@v1 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)"
+  ],
+  "assignees": {},
+  "links": {
+    "intent": "T-1"
+  },
+  "depends_on": [
+    "T-4"
+  ],
+  "gates": {
+    "spec_ready": false,
+    "merge": false,
+    "accept": false,
+    "deploy": false,
+    "sp_decide": false,
+    "ex_decide": false,
+    "compliance": false
+  },
+  "overrides": {},
+  "risk": "medium",
+  "loop": {
+    "validator_passed": false,
+    "attempts": 0
+  },
+  "history": []
+}
