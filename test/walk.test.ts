@@ -20,7 +20,17 @@
  *   - that the walk survives its own teardown: dispose the session, open again on the same
  *     target, and the step comes back from `<target>/.repo-tour/build/progress.json` (AC4);
  *   - that `buildTutorials.step.focus` — the command VS Code auto-generates for a contributed
- *     view — exists at all, which is a claim about `package.json`'s wiring, not about TS.
+ *     view — exists at all, which is a claim about `package.json`'s wiring, not about TS;
+ *   - that the step panel's REENTRANCY guard is doing something (T-4 code review, finding 5):
+ *     only a live session makes `step:next` re-enter `setView` mid-handler, so only a real
+ *     host can tell the guard from its absence;
+ *   - that a dial change does NOT reassign `webview.html` (finding 1), which is only
+ *     observable by reading the real webview's page back before and after;
+ *   - that a symlink pointing out of the target folder is not an openable file (security
+ *     review, finding 2) — a claim about `fs.realpathSync` on a real disk;
+ *   - that a malformed `plan.json` reaches the learner instead of escaping as an unhandled
+ *     rejection (finding 2 / security finding 5) — the panel's REAL page is the only place
+ *     the wrong answer it used to give was visible.
  *
  * **What is already covered with no extension host at all, under `test/unit/`** (the same
  * division of labour `test/start.test.ts` draws, and for the same reason — those suites run in
@@ -65,7 +75,7 @@ import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
-import { statusText, type Progress, type StepLike } from '../src/walk/model.js';
+import { statusText, type PlanLike, type Progress, type StepLike } from '../src/walk/model.js';
 import { CHECK_NOTE } from '../src/walk/step-protocol.js';
 import { fixturePlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
@@ -473,6 +483,55 @@ suite('the walk drives the real editor (AC3)', () => {
 
 // ── AC4: the reload drill ─────────────────────────────────────────────────────────────────
 
+suite('two navigations in flight at once (code review finding 3)', () => {
+  teardown(teardownWalk);
+
+  /**
+   * The race: `revealStep` awaits `openTextDocument` and then `showTextDocument`, and the
+   * walk fires one per navigation with nothing serialising them. Press Next twice quickly and
+   * the second step's document — already open, so it resolves from VS Code's cache — can
+   * finish first, letting the FIRST call land afterwards and repaint the older step's
+   * highlight over the newer one. Tree, panel and status bar would then all say step 4 while
+   * the editor showed step 3's file, scrolled to step 3's line.
+   *
+   * **This test is a net, not a proof, and that is deliberate.** With the sequence guard the
+   * last-STARTED call always wins, whatever order the promises settle in — so this can never
+   * fail against correct code. Without it, it fails only on the interleaving where the older
+   * call finishes last, which is why the newer step's file is pre-opened here to make that
+   * interleaving the likely one. A strictly deterministic version would need a serialising
+   * lock in the adapter, and the header of `editor.ts` argues why that trade is worse: it
+   * would make the learner wait for a file they have already moved past.
+   */
+  test('the LAST navigation started is the one on screen, whichever promise settles first', async () => {
+    const dir = newTarget();
+    const { decorator, session } = await openWalk(dir);
+    const plan = session.getView()!.plan;
+    const older = plan.steps.find((step) => step.id === STEPS.handle)!;
+    const newer = plan.steps.find((step) => step.id === STEPS.render)!;
+
+    // Warm VS Code's document cache for the NEWER step only, so its reveal has every chance
+    // to overtake the older one's cold read.
+    await vscode.workspace.openTextDocument(path.join(dir, newer.target.file));
+
+    const first = decorator.revealStep(dir, older);
+    const second = decorator.revealStep(dir, newer);
+    await Promise.all([first, second]);
+
+    const active = vscode.window.activeTextEditor;
+    assert.ok(active, 'a reveal should have left an active editor');
+    assert.equal(
+      active.document.uri.fsPath,
+      path.join(dir, newer.target.file),
+      'the editor must show the step the learner most recently asked for, not the one they left',
+    );
+    assert.equal(
+      decorator.getLastRangeCountForTest(),
+      newer.scaffold.loadBearing.length,
+      'and the decorations on screen must be the newer step\'s, not the older call repainting over them',
+    );
+  });
+});
+
 suite('progress survives the session — the reload drill (AC4)', () => {
   teardown(teardownWalk);
 
@@ -563,6 +622,213 @@ function statusOf(session: NonNullable<ReturnType<ExtensionApi['_walk']['session
   assert.ok(view, 'the walk should have a current step to report');
   return statusText(view.plan, view.progress);
 }
+
+// ── the panel's own wiring: the two review findings only a live host can see ───────────────
+
+suite('the step panel drives the session, and repaints only when the page would change', () => {
+  teardown(teardownWalk);
+
+  /**
+   * The exact failure `src/walk/step-panel.ts`'s identity guard exists to stop, driven the one
+   * way that can produce it (T-4 code review, finding 5 — the guard was correct and untested,
+   * so deleting it failed nothing).
+   *
+   * `step:next` is REENTRANT: `handleStepMessage` resolves the id, calls `effects.goTo`, which
+   * is `WalkSession.goTo`, which persists and refreshes, which calls `setPanel`, which is
+   * `setView` on the panel — all synchronously, before `handleStepMessage` has returned. By
+   * then the panel already holds the step moved TO. The handler then returns its INPUT state
+   * untouched (navigating is entirely an effect), and adopting that unconditionally would put
+   * the step moved FROM back. `step:open` and `step:check` — the only two messages the panel
+   * was previously driven with anywhere in this suite — re-enter nothing, so they cannot see
+   * this at all.
+   *
+   * `step:check` runs first on purpose, so BOTH halves of the overwrite are asserted: the
+   * stale state carries the note as well as the old step, and `setView` has by then correctly
+   * decided the note belongs to the step the learner has left.
+   */
+  test('code review finding 5 — Next pressed IN THE PANEL leaves the panel on the step it moved TO', async () => {
+    const dir = newTarget();
+    const { panel, session } = await openWalk(dir);
+    assert.equal(panel.getStateForTest()?.step.id, STEPS.shape, 'a never-walked target opens on step 1');
+
+    panel.dispatchForTest({ type: 'step:check' });
+    assert.equal(panel.getStateForTest()?.note, CHECK_NOTE, 'the honest reply is on the panel before we navigate');
+
+    panel.dispatchForTest({ type: 'step:next' });
+
+    assert.equal(session.getView()?.step.id, STEPS.file, 'the message really did navigate the session');
+    assert.equal(
+      panel.getStateForTest()?.step.id,
+      STEPS.file,
+      'the panel must hold the step it moved TO — without the identity guard it adopts the handler\'s stale return value and lands a step behind the session, which is an AC5 failure produced by an AC2 message',
+    );
+    assert.equal(
+      panel.getStateForTest()?.note,
+      undefined,
+      'and the note goes with the step it was produced on, rather than being restored along with it',
+    );
+
+    panel.dispatchForTest({ type: 'step:prev' });
+    assert.equal(panel.getStateForTest()?.step.id, STEPS.shape, 'Previous re-enters exactly the same way, and is guarded by the same check');
+  });
+
+  /**
+   * Finding 1, at the only place it is visible: the real webview's own page.
+   *
+   * `renderPage` mints a fresh nonce per call, so re-rendering ALWAYS produces a different
+   * string and VS Code's identical-html short-circuit can never save us — every assignment
+   * tears the iframe down. `WalkSession.setDial` refreshes every surface so the status bar can
+   * show `· scaffolded` (AC6), which pushes the step already on screen back at the panel; the
+   * learner who tabbed into the dial and pressed Down would lose the radio holding focus, and
+   * a second Down would do nothing.
+   *
+   * Asserting on `webview.html` IDENTITY is the whole point — `getStateForTest` cannot see a
+   * repaint, and "the state was right but the page was rebuilt anyway" is exactly the bug.
+   */
+  test('code review finding 1 — a dial change does not reassign the page, but a navigation does', async () => {
+    const dir = newTarget();
+    const { panel } = await openWalk(dir);
+    await vscode.commands.executeCommand(STEP_VIEW_FOCUS);
+    await settle();
+    assert.ok(panel.webview, `the step view did not resolve in this host, so ${STEP_VIEW_FOCUS} proves nothing about what is on screen`);
+
+    const painted = panel.webview.html;
+    assert.match(painted, new RegExp(`data-step-id="${STEPS.shape}"`), 'the page starts on step 1');
+
+    panel.dispatchForTest({ type: 'dial:set', payload: { dial: 'scaffolded' } });
+
+    assert.equal(
+      panel.webview?.html,
+      painted,
+      'the page must not be reassigned for a dial the PAGE already applied itself — a new nonce here means a torn-down iframe, lost keyboard focus and a scroll back to the top',
+    );
+    assert.equal(
+      panel.getStateForTest()?.progress.steps[STEPS.shape]?.dial,
+      'scaffolded',
+      'the host still took the change: what is skipped is the repaint, never the truth',
+    );
+
+    panel.dispatchForTest({ type: 'step:next' });
+    const afterNavigation = panel.webview?.html ?? '';
+    assert.notEqual(afterNavigation, painted, 'a real change to what the page shows must still repaint');
+    assert.match(afterNavigation, new RegExp(`data-step-id="${STEPS.file}"`));
+
+    // Back to the step whose dial was changed while nothing was repainted: this paint is the
+    // first one that has to carry it, and it is what proves the skipped repaint lost nothing.
+    panel.dispatchForTest({ type: 'step:prev' });
+    assert.match(
+      panel.webview?.html ?? '',
+      /id="dial-scaffolded"[^>]*\bchecked\b/,
+      'the next real paint carries the dial the host recorded while it was not painting',
+    );
+  });
+});
+
+// ── code review finding 2 / security finding 5: a plan that cannot be loaded ───────────────
+
+suite('a malformed plan.json is reported, not swallowed', () => {
+  teardown(teardownWalk);
+
+  /**
+   * The failure this closes was invisible in every direction at once. `loadPlan` throws on a
+   * `plan.json` that is not a build plan; the throw escaped `openWalkAt` →
+   * `openWalkOnActivate` → the `void` at the `activate()` call site as an unhandled rejection,
+   * so the walk silently never opened — no notification, not a line in the output channel —
+   * and the step panel, never having been handed a view, fell through to its standing "No
+   * tutorial in this folder yet". A folder with a `plan.json` sitting in it was told there was
+   * no tutorial in it. A silent failure is bad; a silent failure that produces a confident
+   * wrong answer is worse, and the second half is what only the real page can show.
+   */
+  test('code review finding 2 — the panel names the real reason instead of claiming there is no tutorial', async () => {
+    const dir = newTarget();
+    fs.writeFileSync(path.join(dir, '.repo-tour', 'build', 'plan.json'), '{"chapters": "not an array"}\n');
+
+    const api = await getApi();
+    const panel = api._walk.panel();
+    assert.ok(panel, 'the step view provider should have been registered in activate()');
+    await vscode.commands.executeCommand(STEP_VIEW_FOCUS);
+    await settle();
+    assert.ok(panel.webview, `the step view did not resolve in this host, so ${STEP_VIEW_FOCUS} proves nothing about what is on screen`);
+
+    // The line that used to reject. `openAt` is the same funnel activation, the command and a
+    // finished build all go through, so this is that path and not a copy of it.
+    await api._walk.openAt(dir);
+
+    assert.equal(api._walk.session(), undefined, 'a walk that could not be opened must not leave a session behind — least of all the disposed one it replaced');
+    assert.equal(panel.getStateForTest(), undefined, 'and no step state');
+
+    const html = panel.webview?.html ?? '';
+    assert.match(html, /could not be opened/, 'the panel has to say something happened');
+    assert.match(html, /not a build plan/, 'and say what, in the words loadPlan wrote for a person to read');
+    assert.doesNotMatch(
+      html,
+      /No tutorial in this folder yet/,
+      'the confidently wrong message is the half of this finding that a notification alone would not have fixed',
+    );
+
+    // And it is not sticky: the next walk that opens clears it, so a fixed plan.json is not
+    // shadowed by the reason the previous one failed.
+    const good = newTarget();
+    await api._walk.openAt(good);
+    assert.match(panel.webview?.html ?? '', new RegExp(`data-step-id="${STEPS.shape}"`), 'a successful open clears the notice and paints the step');
+  });
+});
+
+// ── security review finding 2: the fs half of path containment ────────────────────────────
+
+suite('a target.file that leaves the folder is not openable', () => {
+  teardown(teardownWalk);
+
+  /**
+   * `src/walk/paths.ts`'s `resolveInsideTarget` is pure `path` arithmetic and refuses
+   * `../../..`; it cannot see a symlink, and it is deliberately not allowed to (`session.ts`
+   * may not import `fs` without breaking the plain-mocha unit bundle — see that file's
+   * header). The `fs` half is `isOpenableFile` in `src/extension.ts`, and this is the case
+   * that separates the two: a path that is textually inside the target and physically is not.
+   *
+   * The plan is the untrusted input here, so the test crafts one — which is the only way this
+   * is reachable at all, since repo-tour's own inventory walker skips symlinks (see the
+   * security review's note on finding 2). It matters now rather than later because T-5 turns
+   * this read gate into a WRITE gate at the same paths.
+   */
+  test('security finding 2 — a symlink inside the target pointing outside it reports fileExists: false', async () => {
+    const dir = newTarget();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-test-outside-'));
+    targets.push(outside);
+    const secret = path.join(outside, 'id_rsa');
+    fs.writeFileSync(secret, 'not yours\n');
+    const escape = path.join(dir, 'escape.ts');
+    fs.symlinkSync(secret, escape);
+
+    const planFile = path.join(dir, '.repo-tour', 'build', 'plan.json');
+    const plan = JSON.parse(fs.readFileSync(planFile, 'utf8')) as PlanLike;
+    const crafted = plan.steps.find((step) => step.id === STEPS.render);
+    assert.ok(crafted, 'the fixture plan should contain the step this test repoints');
+    crafted.target = { file: 'escape.ts' };
+    fs.writeFileSync(planFile, `${JSON.stringify(plan, null, 2)}\n`);
+
+    const { panel } = await openWalk(dir);
+
+    // First, and loudly: an ORDINARY file in this same target is still openable. Without it
+    // the assertion below would also pass if the containment check were simply broken for
+    // everything — which is exactly what happens if the TARGET is not itself realpath'd and
+    // it is reached through a symlinked parent.
+    await goTo(STEPS.handle);
+    assert.equal(panel.getStateForTest()?.fileExists, true, 'an ordinary file in the target is still openable — otherwise this test proves nothing');
+
+    await goTo(STEPS.render);
+    assert.equal(
+      panel.getStateForTest()?.fileExists,
+      false,
+      'statSync follows the link and says "a file"; only realpath says where that file actually is',
+    );
+
+    panel.dispatchForTest({ type: 'step:open' });
+    await settle();
+    assert.equal(editorFor(escape), undefined, 'and the panel\'s own Open the file must not open it either');
+    assert.equal(editorFor(secret), undefined);
+  });
+});
 
 // ── AC5: hidden and shown again ───────────────────────────────────────────────────────────
 

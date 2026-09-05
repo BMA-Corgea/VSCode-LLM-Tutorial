@@ -19,6 +19,16 @@
  *      of markup assertion can see it. Every message the script posts is then fed to the
  *      REAL `parseStepMessage`, so a drift between what the view sends and what the host
  *      accepts fails here rather than silently, in a webview, at run time.
+ *   3. **The review's fixes, asserted as behaviour rather than as code.** The two render caps
+ *      (security finding 3), the total lookups (security finding 5) and the author's-choice
+ *      fallback (code review, finding 6) each get a suite of their own below. Every one
+ *      asserts against a constant `step-view.ts` EXPORTS — `MAX_OPTIONS_RENDERED`,
+ *      `MAX_PLAN_TEXT`, `TRUNCATION_MARKER`, `optionsOmittedMessage`,
+ *      `UNKNOWN_WHY_SOURCE_MESSAGE`, `NOT_TEXT_MESSAGE` — or `model.ts`'s own
+ *      `FALLBACK_DIAL`, never a copy of the value, so retuning a cap moves these tests with
+ *      it while DELETING one fails them. A cap is asserted twice over on purpose: that the
+ *      output shrank, AND that the page says what it left out. A cap that silently swallowed
+ *      content would pass the first assertion on its own, and it would be the wrong fix.
  *
  * The script under test is lifted out of `renderStepHtml`'s own output, never from
  * `stepScript()` alone: `post`/`restore`/`save` come from `src/webview/page.ts`'s bootstrap,
@@ -32,11 +42,12 @@
 import * as assert from 'node:assert/strict';
 import { DIALS } from '../../src/start/request.js';
 import { type SkinsModule } from '../../src/start/view.js';
-import type { PlanLike, StepLike } from '../../src/walk/model.js';
+import { FALLBACK_DIAL, type OptionLike, type PlanLike, type StepLike } from '../../src/walk/model.js';
 import { CHECK_NOTE, parseStepMessage, type StepViewState } from '../../src/walk/step-protocol.js';
 import {
-  AUTHOR_BADGE, FILE_MISSING_MESSAGE, NO_HISTORY_MESSAGE, T10_BADGE,
-  renderNoticeHtml, renderStepHtml, stepScript,
+  AUTHOR_BADGE, FILE_MISSING_MESSAGE, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, NOT_TEXT_MESSAGE,
+  NO_HISTORY_MESSAGE, T10_BADGE, TRUNCATION_MARKER, UNKNOWN_WHY_SOURCE_MESSAGE,
+  optionsOmittedMessage, renderNoticeHtml, renderStepHtml, stepScript,
 } from '../../src/walk/step-view.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
@@ -90,6 +101,39 @@ function optionsList(html: string): string {
 
 function occurrences(html: string, needle: RegExp): number {
   return [...html.matchAll(needle)].length;
+}
+
+/**
+ * A plan field set to something its own TYPE forbids.
+ *
+ * The cast is not the test cheating — it is the test reproducing what the compiler cannot
+ * see. `plan.json` is `JSON.parse`d and cast to `PlanLike`; nothing validates its shape (T-4
+ * security review, finding 5's sibling), so at run time every one of these fields holds
+ * whatever a third-party repo's plan file said. `tsc` believes `whySource` is one of three
+ * strings for exactly the same reason the bug shipped.
+ */
+function poison<T>(value: unknown): T {
+  return value as T;
+}
+
+/** The `<li …>` rows of the options list, as (class, id) pairs — enough to say WHICH option
+ *  the page marked, not merely how many it marked. */
+function optionRows(html: string): Array<{ cls: string; id: string }> {
+  return [...optionsList(html).matchAll(/<li class="(option option-\w+)" data-option-id="([^"]*)"/g)]
+    .map((m) => ({ cls: m[1]!, id: m[2]! }));
+}
+
+/** The text of one option's label span, in row order. */
+function optionLabels(html: string): string[] {
+  return [...optionsList(html).matchAll(/<span class="option-label">([\s\S]*?)<\/span>/g)].map((m) => m[1]!);
+}
+
+/** `count` options that all share ONE long string. Shared on purpose: JS strings are
+ *  immutable and passed by reference, so a hostile-sized plan costs kilobytes to BUILD here
+ *  while still being megabytes to RENDER — which is the asymmetry the cap exists for, and the
+ *  only reason this test can hold a 5,000-option plan in memory at all. */
+function floodOptions(count: number, text: string): OptionLike[] {
+  return Array.from({ length: count }, (_, i) => ({ id: `alt-${i}`, label: text, consequence: text, taken: false }));
 }
 
 suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
@@ -272,6 +316,301 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt; &amp; co'));
   });
 });
+
+suite('renderStepHtml — a hostile plan renders BOUNDED, and says what it left out (security finding 3)', () => {
+  test('a 5,001-option plan draws MAX_OPTIONS_RENDERED rows and counts the rest, accurately', () => {
+    const state = stateAt('st-2-file-parse');
+    const author = { id: 'author', label: 'What the author actually did', consequence: 'the real one', taken: true };
+    const flood = floodOptions(5000, 'an alternative an injected docstring talked the model into');
+    state.step.decision.options = [author, ...flood];
+
+    const html = renderStepHtml(state, FAKE_SKINS);
+    const drawn = occurrences(optionsList(html), /<li /g);
+    assert.equal(drawn, MAX_OPTIONS_RENDERED, 'the list stops at the cap');
+
+    // The half that makes the cap honest rather than a silent swallow: the page SAYS how many
+    // it is not showing, and the number is right — rows drawn plus rows announced is the plan.
+    const omitted = state.step.decision.options.length - MAX_OPTIONS_RENDERED;
+    assert.equal(paragraph(html, 'options-omitted'), optionsOmittedMessage(omitted));
+    assert.equal(drawn + omitted, state.step.decision.options.length, 'the count on the page adds up');
+    assert.ok(paragraph(html, 'options-omitted').startsWith(String(omitted)), 'and it leads with the number');
+  });
+
+  test('the omitted line counts in the singular when exactly one option is left out', () => {
+    const state = stateAt('st-2-file-parse');
+    state.step.decision.options = floodOptions(MAX_OPTIONS_RENDERED + 1, 'one too many');
+
+    const html = renderStepHtml(state, FAKE_SKINS);
+    assert.equal(paragraph(html, 'options-omitted'), optionsOmittedMessage(1));
+    assert.ok(!paragraph(html, 'options-omitted').includes('options'), 'one option, not "1 more options"');
+  });
+
+  test('a plan whose strings are gigantic renders a page bounded BY THE CAPS, not by the plan', () => {
+    // Unbounded, this is the render that hangs the window: `webview.html = ...` is synchronous
+    // on the extension host, and 5,000 options of 40,000 characters each is ~400 MB of markup.
+    const long = 'x'.repeat(MAX_PLAN_TEXT * 2);
+    const state = stateAt('st-2-file-parse');
+    state.step.decision.options = floodOptions(5000, long);
+
+    const chrome = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS).length; // CSS, script, the rest of the body
+    const perOption = 2 * (MAX_PLAN_TEXT + TRUNCATION_MARKER.length) + 500;       // two capped strings and its own tags
+    const uncapped = state.step.decision.options.length * 2 * long.length;        // what this plan used to render
+    const html = renderStepHtml(state, FAKE_SKINS);
+
+    assert.ok(html.length < chrome + MAX_OPTIONS_RENDERED * perOption,
+      `the page is bounded by the caps (${html.length} bytes)`);
+    assert.ok(html.length < uncapped / 100,
+      `and by two orders of magnitude less than the ${Math.round(uncapped / 1e6)} MB this plan used to build`);
+  });
+
+  test('a string past MAX_PLAN_TEXT is cut with a VISIBLE marker, never silently shortened', () => {
+    const state = stateAt('st-2-file-parse');
+    const why = `${'w'.repeat(MAX_PLAN_TEXT)}THIS TAIL IS PAST THE CAP`;
+    state.step.decision.why = why;
+
+    const text = paragraph(renderStepHtml(state, FAKE_SKINS), 'why-text');
+    assert.equal(text.slice(0, MAX_PLAN_TEXT), why.slice(0, MAX_PLAN_TEXT), 'everything up to the cap is shown');
+    assert.ok(text.endsWith(TRUNCATION_MARKER), 'and the cut is admitted where it happened');
+    assert.equal(text.length, MAX_PLAN_TEXT + TRUNCATION_MARKER.length);
+    assert.ok(!text.includes('THIS TAIL IS PAST THE CAP'));
+  });
+
+  test('a string exactly AT the cap is left whole — the boundary is not off by one', () => {
+    const state = stateAt('st-2-file-parse');
+    state.step.decision.why = 'w'.repeat(MAX_PLAN_TEXT);
+
+    const html = renderStepHtml(state, FAKE_SKINS);
+    assert.equal(paragraph(html, 'why-text').length, MAX_PLAN_TEXT);
+    assert.ok(!html.includes(TRUNCATION_MARKER), 'nothing was cut, so nothing claims it was');
+  });
+
+  test('the cap reaches every plan-sourced string on the page, not only `why`', () => {
+    const long = 'y'.repeat(MAX_PLAN_TEXT + 200);
+    const state = stateAt('st-2-file-parse');
+    state.step.decision.question = long;
+    state.step.decision.options[0]!.label = long;
+    state.step.decision.options[0]!.consequence = long;
+    state.step.witness = { sha: 'abc1234def', date: '2026-08-14T09:12:03Z', subject: long };
+
+    const html = renderStepHtml(state, FAKE_SKINS);
+    // Four cuts, four markers — question, label, consequence, witness subject.
+    assert.equal(occurrences(html, new RegExp(TRUNCATION_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')), 4);
+    assert.ok(optionLabels(html)[0]!.endsWith(TRUNCATION_MARKER), 'the option label is cut and says so');
+    assert.ok(paragraph(html, 'witness-text').includes(TRUNCATION_MARKER), 'so is a very long commit subject');
+  });
+
+  test('NEITHER cap can fire on a real plan — the whole fixture renders untouched', () => {
+    // The point of the numbers. The fixture is schema-validated against repo-tour's REAL
+    // build-plan schema in walk-model.test.ts, so "under the cap" here is a claim about a
+    // legitimate plan, not about a convenient one.
+    const plan = fixturePlan();
+    for (const step of plan.steps) {
+      assert.ok(step.decision.options.length <= MAX_OPTIONS_RENDERED, `${step.id}: option count is under the cap`);
+      const strings = [
+        step.decision.question, step.decision.why,
+        ...step.decision.options.flatMap((o) => [o.label, o.consequence]),
+      ];
+      for (const s of strings) assert.ok(s.length <= MAX_PLAN_TEXT, `${step.id}: "${s.slice(0, 40)}…" is under the cap`);
+
+      const html = renderStepHtml(stateAt(step.id), FAKE_SKINS);
+      assert.ok(!html.includes(TRUNCATION_MARKER), `${step.id} renders with nothing cut`);
+      assert.ok(!html.includes('<p class="options-omitted">'), `${step.id} renders with nothing left out`);
+    }
+
+    // And the margin is not incidental. repo-tour's interpreter prompt asks for "exactly two
+    // OTHER reasonable ways" beside the author's own option, so THREE is the most options a
+    // legitimate plan carries (the real 61-step sql-gauntlet plan carries one, on every step).
+    assert.ok(MAX_OPTIONS_RENDERED >= 3 * 4, 'four times the widest legitimate step, at least');
+    // The longest string a plan can honestly carry is a docstring. Across the 621 doc comments
+    // in the three repos on hand the median is 146 characters and the longest — step-view.ts's
+    // own header — is 5,121; repo-tour's only clamp on anything, SUMMARY_MAX, is 400.
+    const LONGEST_REAL_DOC_COMMENT = 5121;
+    assert.ok(MAX_PLAN_TEXT > LONGEST_REAL_DOC_COMMENT * 2, 'twice the longest real doc comment, at least');
+  });
+});
+
+suite('renderStepHtml — every plan lookup is TOTAL: no throw from a render nobody hears (security finding 5)', () => {
+  test('an unrecognised whySource says so out loud — including the Object.prototype names', () => {
+    // `'constructor'`, `'toString'` and `'__proto__'` are the sharp ones: a plain index does
+    // not return `undefined` for them, it returns an inherited FUNCTION or OBJECT, which then
+    // reaches `escapeHtml` and throws `.replace is not a function` — inside a promise the
+    // activation path voids, so the panel simply never appears and nobody is told why.
+    for (const source of ['nonsense', 'constructor', 'toString', '__proto__', 'valueOf', '', 42, null, undefined, {}]) {
+      const state = stateAt('st-2-file-parse');
+      state.step.decision.whySource = poison(source);
+
+      let html = '';
+      assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); }, `whySource ${JSON.stringify(source)} threw`);
+      assert.equal(paragraph(html, 'why-source'), UNKNOWN_WHY_SOURCE_MESSAGE, `whySource ${JSON.stringify(source)}`);
+    }
+  });
+
+  test('the three real sources are unaffected — the fallback is a fallback, not a replacement', () => {
+    // Guards against "fixing" the lookup by making it always answer the honest line.
+    assert.equal(paragraph(renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS), 'why-source'), SOURCE_LABEL.interpret);
+    assert.equal(paragraph(renderStepHtml(stateAt('st-3-symbol-handle'), FAKE_SKINS), 'why-source'), SOURCE_LABEL.docstring);
+    assert.equal(paragraph(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS), 'why-source'), SOURCE_LABEL.none);
+  });
+
+  test('a plan whose strings are not strings renders NOT_TEXT_MESSAGE, never a throw', () => {
+    const state = stateAt('st-4-symbol-render');
+    state.step.decision.question = poison(null);
+    state.step.decision.why = poison(42);
+    state.step.decision.options[0]!.label = poison(undefined);
+    state.step.decision.options[1]!.consequence = poison({ toString: () => 'not a string' });
+
+    let html = '';
+    assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); });
+    assert.ok(html.includes(`<h1>${NOT_TEXT_MESSAGE}</h1>`), 'the question');
+    assert.equal(paragraph(html, 'why-text'), NOT_TEXT_MESSAGE, 'the why');
+    assert.equal(optionLabels(html)[0], NOT_TEXT_MESSAGE, 'an option label — this one used to throw on `.trim()`');
+    assert.ok(optionsList(html).includes(`<p class="option-consequence">${NOT_TEXT_MESSAGE}</p>`), 'a consequence');
+    assert.ok(!html.includes('>undefined<'), 'and never the word "undefined" dressed up as the plan\'s own text');
+  });
+
+  test('an id that is not a string becomes an EMPTY attribute, not an invented key', () => {
+    const state = stateAt('st-4-symbol-render');
+    state.step.id = poison(undefined);
+    state.step.decision.options[0]!.id = poison(7);
+
+    let html = '';
+    assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); });
+    assert.ok(html.includes('<main id="step-main" data-step-id="">'), 'no id is no id');
+    assert.equal(optionRows(html)[0]!.id, '', 'and an option with no usable id carries none');
+  });
+
+  test('a witness whose sha is not a usable string falls back to NO_HISTORY_MESSAGE', () => {
+    // `.slice(0, 7)` on a number or an object is the throw; a witness with no usable sha has
+    // nothing to show, which is the sentence this page already has for exactly that case.
+    for (const sha of [42, {}, [], true, '']) {
+      const state = stateAt('st-2-file-parse');
+      state.step.witness = poison({ sha, date: '2026-08-14T09:12:03Z', subject: 'a subject' });
+
+      let html = '';
+      assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); }, `sha ${JSON.stringify(sha)} threw`);
+      assert.equal(paragraph(html, 'witness-text'), NO_HISTORY_MESSAGE);
+    }
+  });
+
+  test('a witness with a non-string subject or date still renders one honest sentence', () => {
+    const state = stateAt('st-2-file-parse');
+    state.step.witness = poison({ sha: 'abc1234def5678', date: 99, subject: { nope: true } });
+
+    let html = '';
+    assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); });
+    const text = paragraph(html, 'witness-text');
+    assert.ok(text.includes('abc1234'), 'the short sha it really does have');
+    assert.ok(text.includes(NOT_TEXT_MESSAGE), 'and an honest placeholder where the plan had no text');
+    assert.ok(!text.includes('[object Object]'), 'never a coerced object');
+  });
+
+  test('a step id naming an Object.prototype member still checks exactly one dial', () => {
+    // `progress.steps['constructor']` is not `undefined` — it is a function off the prototype.
+    for (const id of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      const state = stateAt('st-2-file-parse');
+      state.step.id = id;
+
+      let html = '';
+      assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); }, `step id ${id} threw`);
+      assert.match(html, new RegExp(`id="dial-${FALLBACK_DIAL}" value="${FALLBACK_DIAL}" checked>`), `step id ${id}`);
+      assert.equal(occurrences(html, / checked>/g), 1, `step id ${id}: one position checked, never none`);
+    }
+  });
+
+  test('a dial value the plan invented checks FALLBACK_DIAL rather than leaving the fieldset blank', () => {
+    const state = stateAt('st-2-file-parse');
+    state.progress.steps[state.step.id] = poison({ status: 'pending', dial: 'turbo' });
+
+    const html = renderStepHtml(state, FAKE_SKINS);
+    assert.equal(occurrences(html, / checked>/g), 1, 'a fieldset with nothing checked would say nothing at all');
+    assert.match(html, new RegExp(`id="dial-${FALLBACK_DIAL}" value="${FALLBACK_DIAL}" checked>`));
+    assert.ok(!html.includes('turbo'), 'and the invented value is not echoed as though it were a position');
+  });
+
+  test('the fallback dial is model.ts\'s exported constant — the local copy is gone', () => {
+    // T-4 code review, the quality row: `FALLBACK_DIAL` was duplicated between model.ts and
+    // step-view.ts, both inside this ticket's own boundary. Asserted against the EXPORT, so a
+    // change to model.ts moves this test with the page rather than leaving the two disagreeing.
+    const html = renderStepHtml(stateAt('st-4-symbol-render'), FAKE_SKINS);
+    assert.match(html, new RegExp(`id="dial-${FALLBACK_DIAL}" value="${FALLBACK_DIAL}" checked>`));
+    assert.equal(occurrences(html, / checked>/g), 1);
+  });
+});
+
+suite("renderStepHtml — the author's choice is marked from `taken` OR `authorChoice` (code review, finding 6)", () => {
+  test('a plan with no `taken` anywhere still marks exactly one option — the one authorChoice names', () => {
+    // Version skew, or a hand-edited plan. Without the fallback nothing is marked, every
+    // option wears a "coming with T-10" badge, and AC2 is silently unmet on a page that
+    // otherwise looks perfectly fine.
+    const state = stateAt('st-4-symbol-render');
+    const options = state.step.decision.options;
+    assert.equal(options.length, 3, 'the fixture step this test needs');
+    for (const opt of options) opt.taken = false;
+    state.step.decision.authorChoice = options[1]!.id;
+
+    const rows = optionRows(renderStepHtml(state, FAKE_SKINS));
+    const marked = rows.filter((r) => r.cls === 'option option-taken');
+    assert.equal(marked.length, 1, 'exactly one option is marked');
+    assert.equal(marked[0]!.id, options[1]!.id, 'and it is the one the plan named');
+    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), new RegExp(T10_BADGE, 'g')), 2,
+      'the other two are still badged for T-10');
+  });
+
+  test('`taken` wins when the two fields disagree — one row marked, never two', () => {
+    const state = stateAt('st-4-symbol-render');
+    const options = state.step.decision.options;
+    assert.equal(options.filter((o) => o.taken).length, 1, 'the fixture has exactly one taken option');
+    state.step.decision.authorChoice = options[2]!.id; // points somewhere else entirely
+
+    const rows = optionRows(renderStepHtml(state, FAKE_SKINS));
+    const marked = rows.filter((r) => r.cls === 'option option-taken');
+    assert.equal(marked.length, 1, 'the fallback never marks a SECOND option');
+    assert.equal(marked[0]!.id, options[0]!.id, '`taken` is still what a real plan is read by');
+  });
+
+  test('an authorChoice that names no option marks nothing — the page does not guess', () => {
+    const state = stateAt('st-4-symbol-render');
+    for (const opt of state.step.decision.options) opt.taken = false;
+    state.step.decision.authorChoice = 'an-option-this-plan-does-not-contain';
+
+    const list = optionsList(renderStepHtml(state, FAKE_SKINS));
+    assert.equal(occurrences(list, /option option-taken/g), 0, 'marking an arbitrary row would be a confident lie');
+    assert.equal(occurrences(list, new RegExp(T10_BADGE, 'g')), 3, 'so all three are honestly badged for T-10');
+  });
+
+  test('a non-string authorChoice marks nothing rather than matching an id that is also missing', () => {
+    const state = stateAt('st-4-symbol-render');
+    for (const opt of state.step.decision.options) opt.taken = false;
+    state.step.decision.authorChoice = poison(undefined);
+    state.step.decision.options[0]!.id = poison(undefined);
+
+    let html = '';
+    assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); });
+    assert.equal(occurrences(optionsList(html), /option option-taken/g), 0, '"" must never match ""');
+  });
+
+  test("AC2 outranks the cap: the author's own option is drawn even when buried past it", () => {
+    // The interaction between the two fixes. A hostile plan that put five thousand
+    // alternatives in front of the author's own option would otherwise meet the security cap
+    // by breaking the acceptance criterion it was capping.
+    const state = stateAt('st-2-file-parse');
+    const author = { id: 'author', label: 'What the author actually did', consequence: 'the real one', taken: true };
+    state.step.decision.options = [...floodOptions(MAX_OPTIONS_RENDERED + 40, 'a decoy'), author];
+
+    const html = renderStepHtml(state, FAKE_SKINS);
+    const rows = optionRows(html);
+    assert.equal(rows.length, MAX_OPTIONS_RENDERED, 'the cap still holds');
+
+    const marked = rows.filter((r) => r.cls === 'option option-taken');
+    assert.equal(marked.length, 1, "the author's choice is still marked (AC2)");
+    assert.equal(marked[0]!.id, 'author');
+    assert.ok(optionsList(html).includes('the real one'), 'with its own consequence, not a decoy\'s');
+    assert.equal(paragraph(html, 'options-omitted'),
+      optionsOmittedMessage(state.step.decision.options.length - MAX_OPTIONS_RENDERED),
+      'and the count of what was left out is still right');
+  });
+});
+
 
 // ── a minimal, dependency-free fake DOM: just enough of document/window/acquireVsCodeApi
 // for THIS script. Deliberately not jsdom — the goal is to run the exact shipped code with

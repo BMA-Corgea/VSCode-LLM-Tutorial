@@ -493,8 +493,15 @@ suite('writeJsonAtomic (T-3 rework, review finding 2)', () => {
     // plain `fs.writeFileSync(dest, ...)` — what this replaced — would leave `dest` behind,
     // so this assertion is what fails if the fix is reverted.
     assert.equal(fs.existsSync(dest), false, 'the destination must not exist at all after a failed rename');
+    // The temp file is found by SUFFIX, not by name: its name now carries random bytes
+    // (T-4 security review, finding 4 — a repository can commit `plan.json.tmp` as a symlink,
+    // git recreates it on clone, and `writeFileSync` follows it, so a predictable name meant
+    // an attacker-chosen file was truncated and overwritten on the first save).
+    const leftovers = fs.readdirSync(dir).filter((name) => name.endsWith('.tmp'));
+    assert.equal(leftovers.length, 1, 'exactly one temp file should hold the interrupted write');
+    assert.notEqual(leftovers[0], 'plan.json.tmp', 'the temp name must NOT be predictable');
     assert.deepEqual(
-      JSON.parse(fs.readFileSync(`${dest}.tmp`, 'utf8')),
+      JSON.parse(fs.readFileSync(path.join(dir, leftovers[0]!), 'utf8')),
       { chapters: [1, 2, 3] },
       'the content was written COMPLETELY to a temp file first, and only then renamed',
     );
@@ -505,7 +512,11 @@ suite('writeJsonAtomic (T-3 rework, review finding 2)', () => {
     const dest = path.join(dir, 'nested', 'plan.json');
     writeJsonAtomic(dest, { chapters: [1] });
     assert.deepEqual(JSON.parse(fs.readFileSync(dest, 'utf8')), { chapters: [1] });
-    assert.equal(fs.existsSync(`${dest}.tmp`), false, 'the temp file is renamed away, not left behind');
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(dest)).filter((name) => name.endsWith('.tmp')),
+      [],
+      'the temp file is renamed away, not left behind — checked by suffix, since the name is random',
+    );
   });
 });
 

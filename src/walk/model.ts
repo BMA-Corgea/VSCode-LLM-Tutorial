@@ -168,9 +168,22 @@ export function treeModel(plan: PlanLike, progress: Progress): TreeChapterNode[]
     if (list) list.push(node);
     else byChapter.set(step.chapter, [node]);
   }
-  return plan.chapters
+  const declared = plan.chapters
     .map((chapter): TreeChapterNode => ({ key: chapter.key, title: chapter.title, subtitle: chapter.subtitle, steps: byChapter.get(chapter.key) ?? [] }))
     .filter((chapter) => chapter.steps.length > 0);
+
+  // Steps whose `chapter` names nothing in `plan.chapters` get a chapter of their own rather
+  // than vanishing (T-4 code review, finding 7). They were previously dropped silently, which
+  // produced the one tree state that is worse than an ugly one: the learner is ON a step —
+  // Next/Previous reach it, the panel renders it — that the tree does not contain, so the
+  // tree stops agreeing with everything else on screen. A real plan has no orphans; a stale
+  // or hand-edited one can, and an honest odd-looking chapter beats a silent hole.
+  const declaredKeys = new Set(plan.chapters.map((chapter) => chapter.key));
+  const orphans = [...byChapter.entries()]
+    .filter(([key, steps]) => !declaredKeys.has(key) && steps.length > 0)
+    .map(([key, steps]): TreeChapterNode => ({ key, title: key, subtitle: 'not listed in this plan\u2019s chapters', steps }));
+
+  return [...declared, ...orphans];
 }
 
 // ── the status bar (AC6) ─────────────────────────────────────────────────────────────────────
@@ -180,7 +193,7 @@ export function treeModel(plan: PlanLike, progress: Progress): TreeChapterNode[]
  *  a step has no per-step override recorded yet (T-5 threads the real global default through
  *  `request.json`; T-4 does not read that file, so "manual" — never built, nothing to type —
  *  is the fallback that can never overstate what has actually happened to this step). */
-const FALLBACK_DIAL: Dial = 'manual';
+export const FALLBACK_DIAL: Dial = 'manual';
 
 /** "step 7 / 40 · scaffolded" (AC6) — 1-indexed against the plan's own ordinal order. */
 export function statusText(plan: PlanLike, progress: Progress): string {

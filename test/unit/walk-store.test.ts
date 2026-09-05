@@ -57,6 +57,10 @@ function progressPath(target: string): string {
   return path.join(buildDir(target), 'progress.json');
 }
 
+function planPath(target: string): string {
+  return path.join(buildDir(target), 'plan.json');
+}
+
 function lineCount(text: string): number {
   return (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n').length;
 }
@@ -82,6 +86,48 @@ suite('buildDir / hasPlan / loadPlan — is there a build in this folder at all?
 
   test('loadPlan throws when there is no plan — callers are expected to have asked hasPlan first', () => {
     assert.throws(() => loadPlan(tmpDir()), 'a missing plan is exceptional here, unlike missing progress');
+  });
+});
+
+suite('loadPlan — a plan that is not a plan fails LOUDLY, not deep inside a render', () => {
+  // The asymmetry with `loadProgress` above is deliberate and is the whole point. Missing or
+  // malformed PROGRESS is an ordinary state — a build nobody has walked yet — so it degrades
+  // to `emptyProgress`. A malformed PLAN is not: there is nothing to walk, and pretending
+  // otherwise produced the worst version of the failure. Before the shape check, `{}` reached
+  // `orderedSteps` as "plan.steps is not iterable" and `null` reached `treeModel` as "Cannot
+  // read properties of null" — thrown from inside a render, out of a `void`ed activation
+  // promise, where nothing was listening. The walk silently never opened, and the panel said
+  // "No tutorial in this folder yet" with a plan.json sitting right there.
+  for (const [label, content] of [
+    ['an empty object', '{}'],
+    ['null', 'null'],
+    ['an array', '[]'],
+    ['steps present but chapters missing', '{"steps":[]}'],
+    ['chapters present but steps missing', '{"chapters":[]}'],
+    ['steps that is not an array', '{"chapters":[],"steps":{}}'],
+  ] as const) {
+    test(`${label} throws a message written for a person to read`, () => {
+      const target = fixtureTarget();
+      fs.writeFileSync(planPath(target), content);
+      assert.throws(() => loadPlan(target), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /not a build plan/, 'the message has to explain itself — it is shown in the panel');
+        return true;
+      });
+    });
+  }
+
+  test('unparseable JSON still throws (the read itself is allowed to fail)', () => {
+    const target = fixtureTarget();
+    fs.writeFileSync(planPath(target), '{"chapters":[],"steps":[');
+    assert.throws(() => loadPlan(target));
+  });
+
+  test('a real plan loads unchanged (discriminates against the guard being too greedy)', () => {
+    const target = fixtureTarget();
+    const plan = loadPlan(target);
+    assert.equal(plan.steps.length, 4);
+    assert.equal(plan.chapters.length, 2);
   });
 });
 

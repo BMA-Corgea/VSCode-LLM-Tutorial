@@ -62,11 +62,42 @@
  * and the plan being stale relative to the file it describes, which is also why every line
  * number is clamped to the document rather than trusted: repo-tour plans are regenerated, not
  * repaired, so a plan can legitimately outlive the file it was computed from.
+ *
+ * And `target.file` is not trusted to stay inside the target folder either: it is resolved
+ * through `resolveInsideTarget` (`./paths.ts`), never `path.join`, because
+ * `path.join('/home/you/repo', '../../../.ssh/id_rsa')` is a real path to somebody's private
+ * key and this reveal happens automatically on activation. `WalkSession` performs the same
+ * check before it ever calls in — a step that escapes reports `fileExists: false` and is never
+ * revealed at all — and the check is repeated HERE anyway, deliberately: `openFile` reaches
+ * this method by a second route, this class is public and takes a raw `target` and `StepLike`
+ * from whoever calls it, and a containment check that exists in exactly one caller is one
+ * refactor away from not existing. Security review finding 2.
+ *
+ * ## Concurrent reveals, and why there is a sequence number
+ *
+ * `revealStep` awaits twice and nothing serialises it, while `WalkSession.refresh` fires one
+ * per navigation — so pressing Next twice quickly starts two. They do NOT finish in order:
+ * step 4's file may already be open, so its `openTextDocument` resolves from VS Code's cache
+ * in the same tick, while step 3's is cold disk I/O. Step 3 therefore lands LAST and wins
+ * every assignment below it — `showTextDocument` pulls the older step's file to the front,
+ * the `lastEditor !== editor` branch calls `clear()` over step 4's fresh highlight, step 3's
+ * ranges get painted, and `getLastRangeCountForTest` ends up describing the stale call. The
+ * tree, the panel and the status bar all say step 4; the editor shows step 3, scrolled to
+ * step 3's line, highlighted. The failed-open path is worse still: a stale reveal's
+ * `catch { this.clear() }` erases a NEWER step's decorations for a file that has nothing to
+ * do with it.
+ *
+ * `revealSeq` is the fix (code review finding 3). Each call claims a number before it can
+ * await, and re-checks after every await: if a newer call has started, this one is a reveal
+ * the learner has already navigated past, and the correct thing for it to do is nothing at
+ * all. A counter rather than a queue or a lock because a superseded reveal has no value —
+ * making the learner wait for step 3 to finish opening before step 4 may start would be
+ * slower AND still show them a file they have moved on from.
  */
 
-import path from 'node:path';
 import * as vscode from 'vscode';
 import type { RangeLike, StepLike } from './model.js';
+import { resolveInsideTarget } from './paths.js';
 
 /**
  * Which step kinds get their load-bearing lines highlighted (plan step 4: "decorate every
@@ -85,8 +116,24 @@ const DECORATED_KINDS: ReadonlySet<StepLike['kind']> = new Set<StepLike['kind']>
  * `vscode.Position` with a negative line THROWS ("Illegal value for line"), and one past the
  * end quietly addresses nothing. `lineCount` is at least 1 even for an empty document, so the
  * result is always a line that exists.
+ *
+ * The `line: unknown` and the integer gate are code review finding 8, and the parameter type
+ * is deliberately wider than `RangeLike` claims because `RangeLike` is a CAST, not a
+ * validation: `plan.json` is `JSON.parse`d and asserted into shape, so `startLine` can hold
+ * anything JSON can hold, and the old signature's `number` was a promise nobody had checked.
+ * `Math.max('12abc', 1)` is `NaN`; `NaN < 0` is false, so `vscode.Position`'s own guard waves
+ * it straight through; and `doc.lineAt(NaN)` then throws from inside a promise this class's
+ * caller has already `void`-ed — a step that silently never reveals, with nothing logged and
+ * nothing on screen to explain it. A fraction and `Infinity` are no better as line numbers
+ * (one addresses a position between two lines, the other clamps to the last line as though it
+ * had been asked for), so `Number.isInteger` rejects all three with one check.
+ *
+ * The fallback is line 1, which is `0` after the conversion — the same answer `revealLine`
+ * already gives for a step that names no line at all. The top of the file is the honest
+ * "somewhere in here"; guessing a number would be worse than admitting we have none.
  */
-function toZeroBased(line: number, lineCount: number): number {
+function toZeroBased(line: unknown, lineCount: number): number {
+  if (typeof line !== 'number' || !Number.isInteger(line)) return 0;
   return Math.min(Math.max(line, 1), lineCount) - 1;
 }
 
@@ -135,6 +182,15 @@ export class StepDecorator {
 
   private lastRangeCount = 0;
 
+  /**
+   * Monotonic, bumped at the top of every `revealStep` — the guard against two navigations
+   * overlapping (code review finding 3; the header's "Concurrent reveals" section has the
+   * failure in full). It is never reset, not even by `clear()` or `dispose()`: its only job is
+   * to be DIFFERENT from the number an in-flight call is holding, and a reset is precisely how
+   * a stale call would find its number valid again and resume painting.
+   */
+  private revealSeq = 0;
+
   constructor() {
     this.decoration = vscode.window.createTextEditorDecorationType({
       // A theme colour, not a literal: the highlight has to be legible in a light theme, a
@@ -160,21 +216,51 @@ export class StepDecorator {
    * in it is its own small insult.
    */
   async revealStep(target: string, step: StepLike, opts: { preserveFocus?: boolean } = {}): Promise<void> {
-    let editor: vscode.TextEditor;
-    try {
-      const doc = await vscode.workspace.openTextDocument(path.join(target, step.target.file));
-      editor = await vscode.window.showTextDocument(doc, {
-        preserveFocus: opts.preserveFocus ?? true,
-        viewColumn: vscode.ViewColumn.One,
-      });
-    } catch {
-      // A directory, a sentinel like `@misc`, a file deleted since the check, a binary VS
-      // Code will not open as text. The step still CHANGED, so the previous step's highlight
-      // has to go — leaving it up would be pointing at the wrong code.
+    // Claimed before anything can await, so every check below is asking one question: has the
+    // learner navigated past this reveal while it was waiting on the disk? If they have, this
+    // call must touch nothing — not the front-most editor, not the decorations, not the
+    // bookkeeping the test seam reads.
+    const seq = ++this.revealSeq;
+
+    // Containment, not `path.join`. `null` means the plan named something outside the target
+    // folder, which is not a file we will open at any point, on any code path. Nothing has
+    // awaited yet, so this call is still the newest one and the clear is unconditionally
+    // right: the step DID change, and the previous step's highlight would now be pointing at
+    // the wrong code.
+    const absPath = resolveInsideTarget(target, step.target.file);
+    if (absPath === null) {
       this.clear();
       return;
     }
 
+    let editor: vscode.TextEditor;
+    try {
+      const doc = await vscode.workspace.openTextDocument(absPath);
+      // The bail-out that matters most: `showTextDocument` is what pulls a file to the FRONT,
+      // so a superseded reveal must never reach it. This is the exact line that stops step 3
+      // (cold, slow) from yanking the editor back off step 4 (already cached, so it finished
+      // first).
+      if (seq !== this.revealSeq) return;
+      editor = await vscode.window.showTextDocument(doc, {
+        preserveFocus: opts.preserveFocus ?? true,
+        viewColumn: vscode.ViewColumn.One,
+      });
+      if (seq !== this.revealSeq) return;
+    } catch {
+      // A directory, a sentinel like `@misc`, a file deleted since the check, a binary VS
+      // Code will not open as text. The step still CHANGED, so the previous step's highlight
+      // has to go — leaving it up would be pointing at the wrong code.
+      //
+      // Unless a newer reveal has started, in which case the highlight now on screen is ITS
+      // highlight, for a file this failure has nothing to do with, and wiping it would be this
+      // call's parting shot at a step the learner is currently reading.
+      if (seq !== this.revealSeq) return;
+      this.clear();
+      return;
+    }
+
+    // Everything from here down is synchronous, which is why there is no third check: this
+    // call cannot be overtaken mid-paint. Anything added below that AWAITS needs one.
     const doc = editor.document;
     const line = toZeroBased(revealLine(step), doc.lineCount);
     editor.revealRange(

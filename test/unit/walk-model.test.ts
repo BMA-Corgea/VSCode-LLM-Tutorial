@@ -206,11 +206,23 @@ suite('treeModel — the decision tree (AC1)', () => {
     assert.deepEqual(plan.steps.map((s) => s.id), handedOver, 'treeModel must sort a copy, never the plan it was given');
   });
 
-  test('a step whose chapter matches no chapter key is dropped rather than orphaned into the tree', () => {
+  // REVERSED on review (T-4 code review, finding 7). This suite previously pinned the
+  // opposite — that an orphan step is dropped — and the reviewer was right that dropping is
+  // the worse of the two behaviours. An orphan step is still reachable by Next/Previous and
+  // still renders in the panel, so dropping it produces the one tree state worse than an
+  // ugly one: the learner is standing ON a step the tree does not contain, and the tree
+  // silently stops agreeing with the panel and the status bar. A real plan has no orphans;
+  // a stale or hand-edited one can, and an odd-looking chapter is the honest answer.
+  test('a step whose chapter matches no chapter key gets a chapter of its own, rather than vanishing', () => {
     const plan = fixturePlan();
     const orphan: StepLike = { ...stepById(plan, 'st-4-symbol-render'), id: 'st-orphan', chapter: 'ghost' };
     const tree = treeModel({ ...plan, steps: [...plan.steps, orphan] }, emptyProgress(plan));
-    assert.deepEqual(tree.flatMap((c) => c.steps).map((s) => s.id), IDS);
+
+    assert.deepEqual(tree.flatMap((c) => c.steps).map((s) => s.id), [...IDS, 'st-orphan'], 'every step in the plan is somewhere in the tree');
+    const ghost = tree.find((c) => c.key === 'ghost');
+    assert.ok(ghost, 'the orphan gets its own chapter node');
+    assert.equal(ghost.steps.length, 1);
+    assert.match(ghost.subtitle, /not listed/, 'and that chapter says plainly why it looks odd');
   });
 });
 

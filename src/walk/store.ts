@@ -29,10 +29,25 @@ export function hasPlan(target: string): boolean {
   return fs.existsSync(planPath(target));
 }
 
-/** Throws if there is no plan at `target` — callers are expected to have checked `hasPlan`
- *  first; a plan that fails to parse is a genuinely exceptional, not a "nothing to do", case. */
+/**
+ * Throws if there is no plan at `target`, if it does not parse, or if what parsed is not
+ * shaped like a plan — callers are expected to have checked `hasPlan` first, and to CATCH
+ * (see `src/extension.ts`, which turns a throw here into a visible notice).
+ *
+ * The shape check earns its place by moving the failure (T-4 code + security review). Without
+ * it, `{}` reached `orderedSteps` as `plan.steps is not iterable` and `null` reached
+ * `treeModel` as `Cannot read properties of null` — thrown deep inside a render, from a
+ * `void`ed activation promise, where nothing was listening. Same class as `progress.json`'s,
+ * and the same reasoning: this is read on activation, before anything is on screen, so an
+ * unhandled throw here is invisible rather than loud. The message is written to be shown to
+ * a person, because it is.
+ */
 export function loadPlan(target: string): PlanLike {
-  return JSON.parse(fs.readFileSync(planPath(target), 'utf8')) as PlanLike;
+  const raw: unknown = JSON.parse(fs.readFileSync(planPath(target), 'utf8'));
+  if (!isRecord(raw) || !Array.isArray(raw['steps']) || !Array.isArray(raw['chapters'])) {
+    throw new Error('plan.json is not a build plan (it needs a "chapters" array and a "steps" array) — rebuild it with Build Tutorials: Start');
+  }
+  return raw as unknown as PlanLike;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

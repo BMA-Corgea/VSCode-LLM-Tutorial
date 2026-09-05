@@ -21,6 +21,7 @@ import {
 } from './start/build.js';
 import type { BuildRequest } from './start/request.js';
 import { StepDecorator } from './walk/editor.js';
+import { resolveInsideTarget } from './walk/paths.js';
 import { WalkSession, type WalkAdapters } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
@@ -258,16 +259,37 @@ let walkSession: WalkSession | undefined;
 let walkSkins: StartPanelDeps['skins'] | undefined;
 
 /**
- * `fs.statSync(...).isFile()`, NOT `fs.existsSync` — the distinction is load-bearing, not
- * pedantry. A `shape` step's `target.file` is a DIRECTORY (`public`, `tools`) or the synthetic
- * `@misc` sentinel, and `existsSync` answers `true` for a directory, which would enable the
- * panel's *Open the file* button on something `openTextDocument` then rejects. In the one
- * large real plan we have that is 5 steps out of 61 — not an edge case. See
- * `kb/wiki/repo-tour-plan-shapes.md`.
+ * Two questions, both of which have to answer yes before the walk will open a path.
+ *
+ * **Is it a FILE?** `fs.statSync(...).isFile()`, NOT `fs.existsSync` — the distinction is
+ * load-bearing, not pedantry. A `shape` step's `target.file` is a DIRECTORY (`public`,
+ * `tools`) or the synthetic `@misc` sentinel, and `existsSync` answers `true` for a directory,
+ * which would enable the panel's *Open the file* button on something `openTextDocument` then
+ * rejects. In the one large real plan we have that is 5 steps out of 61 — not an edge case.
+ * See `kb/wiki/repo-tour-plan-shapes.md`.
+ *
+ * **Is it really INSIDE the target?** `src/walk/paths.ts`'s `resolveInsideTarget` already
+ * refuses a `target.file` that spells its way out (`../../..`), and `src/walk/session.ts`
+ * calls it before this adapter is ever consulted — but that check is pure `path` arithmetic,
+ * by design: `session.ts` cannot import `fs` without breaking the plain-mocha unit bundle, and
+ * a symlink is invisible to string arithmetic anyway. `<target>/notes.md` symlinked to
+ * `~/.ssh/id_rsa` passes containment on its name and is somebody's private key on the disk.
+ * The `fs` half therefore lives here, where `fs` already does: `realpathSync` both sides —
+ * the TARGET as well as the file, because a target reached through a symlinked parent
+ * (`/tmp` on some systems, a bind mount, a home directory that is a link) would otherwise put
+ * every legitimate file "outside" itself and disable the whole walk — and require the real
+ * path to still be inside the real target (security review, finding 2).
+ *
+ * A `false` here is not an error and is never reported: it means exactly what it means
+ * everywhere else in the walk, "there is nothing to open for this step", which every surface
+ * already renders honestly. The learner did not write the plan and has nothing to fix in it.
+ * It matters now rather than later because **T-5 writes the learner's files at these same
+ * paths**, which turns this read gate into a write gate one ticket from here.
  */
-function isOpenableFile(absPath: string): boolean {
+function isOpenableFile(target: string, absPath: string): boolean {
   try {
-    return fs.statSync(absPath).isFile();
+    if (!fs.statSync(absPath).isFile()) return false;
+    return resolveInsideTarget(fs.realpathSync(target), fs.realpathSync(absPath)) !== null;
   } catch {
     return false;
   }
@@ -284,11 +306,50 @@ function walkAdaptersFor(target: string): WalkAdapters {
     clearEditor: () => walkDecorator?.clear(),
     // The one place focus is taken: the learner pressed *Open the file* and asked to go there.
     openFile: (view) => { void walkDecorator?.revealStep(target, view.step, { preserveFocus: false }); },
-    fileExists: isOpenableFile,
+    // Closed over `target`, which is the only reason this adapter can answer the containment
+    // half at all — `WalkAdapters.fileExists` is handed an absolute path and nothing else.
+    fileExists: (absPath) => isOpenableFile(target, absPath),
     loadPlan,
     loadProgress,
     saveProgress,
+    // The walk's channel for a failure the LEARNER has to know about — today, a
+    // `progress.json` that cannot be written (a read-only checkout, a full disk), which costs
+    // them their place in the tutorial next time they open the folder without costing them
+    // anything now (T-4 code review, finding 4; the wording is composed in `session.ts`,
+    // which is the only thing that knows what actually failed). Surfaced the same two ways
+    // `reportOutcome` surfaces a failed build: the output channel for whoever diagnoses it,
+    // and a notification for whoever is looking at the editor rather than at a log. The
+    // session reports each standing condition once per session, so this cannot become a
+    // notification per click.
+    reportError: (message) => { reportWalkFailure(message); },
   };
+}
+
+/**
+ * The walk's one failure channel, and the answer to "the walk silently never opens" (T-4 code
+ * review finding 2 / security review finding 5).
+ *
+ * All three ways a walk opens — activation, `buildTutorials.openWalk`, and the moment a build
+ * finishes — run the same synchronous `WalkSession.open`, and `loadPlan` THROWS on a
+ * `plan.json` that is not a build plan. Every one of those call sites is an `async` function
+ * whose promise is `void`ed, so the throw became an unhandled rejection: no notification, no
+ * output-channel line, nothing in the UI at all, and a panel confidently reading "No tutorial
+ * in this folder yet" over a folder that visibly has one. Three surfaces, because each covers
+ * a person the others miss: the output channel for whoever is diagnosing it later, a
+ * notification for whoever is looking at their code right now, and `StepViewProvider.setNotice`
+ * for whoever opens the Build Tutorials container afterwards and finds it — the only one of
+ * the three that is still there in five minutes' time.
+ *
+ * `panelNotice` is OPTIONAL because the other caller must not pass one. `WalkAdapters.
+ * reportError` (a `progress.json` that will not save, code review finding 4) is a failure
+ * ALONGSIDE a walk that is working perfectly well — the panel is showing a live step, and
+ * replacing that step with a notice would take the tutorial away to complain about a file. A
+ * notice belongs here only when there is genuinely nothing else for the panel to show.
+ */
+function reportWalkFailure(message: string, panelNotice?: string): void {
+  getOutputChannel().appendLine(`walk: ${message}`);
+  if (panelNotice !== undefined) walkPanel?.setNotice(panelNotice);
+  void vscode.window.showErrorMessage(`Build Tutorials: ${message}`);
 }
 
 /** The spec's rule, verbatim: the walk opens for any workspace folder that contains
@@ -298,11 +359,35 @@ function folderWithPlan(): string | undefined {
   return vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath).find(hasPlan);
 }
 
-/** Always replaces: after a REBUILD the plan on disk is a different plan, so re-reading it is
- *  the point, not waste. */
+/**
+ * Always replaces: after a REBUILD the plan on disk is a different plan, so re-reading it is
+ * the point, not waste.
+ *
+ * The `try` is here rather than at each of the three call sites deliberately — it is the one
+ * funnel every way of opening a walk already goes through, so a FOURTH entry point added later
+ * inherits the handling instead of quietly reintroducing the silent failure. `loadPlan` is the
+ * throw it is written for (a malformed `plan.json`), but everything `WalkSession.open` does
+ * synchronously is inside it, because "the walk did not open and nobody was told" is the
+ * failure being closed, not "this one function threw".
+ *
+ * `walkSession` is cleared BEFORE the attempt, not merely reassigned after it. The old code
+ * left the disposed session in the variable when `open` threw, so `deps.session()` went on
+ * handing the step panel a session whose every method is a no-op — a walk that answers clicks
+ * with silence, which is precisely the symptom this whole fix exists to remove.
+ */
 function openWalkAt(target: string): void {
   walkSession?.dispose();
-  walkSession = WalkSession.open(target, walkAdaptersFor(target));
+  walkSession = undefined;
+  try {
+    walkSession = WalkSession.open(target, walkAdaptersFor(target));
+    walkPanel?.setNotice(undefined);
+  } catch (error) {
+    const reason = error instanceof Error && error.message.length > 0 ? error.message : String(error);
+    reportWalkFailure(
+      `the tutorial in ${target} could not be opened: ${reason}`,
+      `This folder's tutorial could not be opened. ${reason}`,
+    );
+  }
 }
 
 /** Loaded once, lazily, and never retried in a loop: a missing core is a standing condition
@@ -327,6 +412,11 @@ function registerWalk(context: vscode.ExtensionContext): void {
     walkTree,
     walkDecorator,
     walkStatus,
+    // The provider itself, ONE entry for the window's whole life. It owns the listeners it
+    // hooks in `resolveWebviewView` and replaces them on each re-resolve, rather than
+    // appending three more of them here every time the view is dragged to another container
+    // (T-4 code review, finding 9).
+    walkPanel,
     vscode.window.registerTreeDataProvider('buildTutorials.decisions', walkTree),
     // No `webviewOptions.retainContextWhenHidden`: VS Code's default is `false`, and false is
     // exactly what AC5 asks for — a hidden view is torn down and re-rendered FROM THE HOST

@@ -23,14 +23,17 @@
  * lives behind this interface and is exercised from `test/walk.test.ts` instead, the same
  * split `src/start/{protocol,view}.ts` versus `src/start/panel.ts` already draws.
  *
- * Three things about the shape below are worth reading before changing it:
+ * Four things about the shape below are worth reading before changing it:
  *
  *   - **`refresh` is the only way state leaves this object.** Every public method mutates
- *     `progress`, persists if it changed, and then calls `refresh` — there is no second path
- *     that pushes to one surface and not the others, so the tree, the panel and the status bar
- *     cannot drift apart. That is also why `WalkView` bundles `plan`, `progress`, `step` and
- *     `fileExists` into one value rather than four `set*` calls: a surface is handed one
- *     consistent snapshot, never a half-updated pair of them.
+ *     `progress` and then hands off to `commit`, which persists and pushes — there is no
+ *     second path that writes without pushing, and none that pushes to one surface and not
+ *     the others, so the tree, the panel and the status bar cannot drift apart. That is also
+ *     why `WalkView` bundles `plan`, `progress`, `step` and `fileExists` into one value rather
+ *     than four `set*` calls: a surface is handed one consistent snapshot, never a
+ *     half-updated pair of them. **A failed WRITE may not suspend that rule** — see `commit`,
+ *     and code review finding 4, which was exactly the session advancing while every surface
+ *     went on showing the step before it.
  *   - **`refresh` takes `revealEditor` as a parameter.** Real navigation (`open`, `goTo`,
  *     and so `next`/`prev`) reveals and decorates the target range; `setDial` and `markDone`
  *     refresh the tree, the panel and the status bar but skip the reveal. Re-centring the
@@ -44,6 +47,15 @@
  *     step whose file is not there yet gets `clearEditor()` (drop the previous step's
  *     decorations, leave the editor alone) and the panel says why, honestly, where the eye
  *     already is (conventions.md: never a silent no-op).
+ *   - **A `target.file` that escapes the target folder is not openable either.**
+ *     `resolveInsideTarget` (`./paths.ts`), never `path.join`, is what turns a step's relative
+ *     path into an absolute one; a `null` from it means the plan pointed OUTSIDE the folder
+ *     the learner is working in, and this code runs automatically on activation, so there is
+ *     no gesture at all between a crafted `plan.json` and an opened file (security review
+ *     finding 2). That answer collapses into `fileExists: false` on purpose rather than
+ *     growing a state of its own: "there is nothing to open here" is already a case every
+ *     surface downstream renders honestly, and the learner — who did not write the plan and
+ *     has nothing to fix in it — is shown no error for it.
  *
  * **The reload drill (AC4) is the point of the whole design.** Nothing here is cached beyond
  * one instance's lifetime and nothing is memoised across instances: `open` reads the plan and
@@ -54,7 +66,6 @@
  * The session is a view onto that file, never its owner.
  */
 
-import path from 'node:path';
 import type { Dial } from '../start/request.js';
 import {
   currentStep,
@@ -72,6 +83,7 @@ import {
   type Progress,
   type StepLike,
 } from './model.js';
+import { resolveInsideTarget } from './paths.js';
 
 /**
  * One consistent snapshot of "where the walk is", as every surface sees it. Structurally this
@@ -125,6 +137,10 @@ export interface WalkAdapters {
   loadPlan(target: string): PlanLike;
   loadProgress(target: string, plan: PlanLike): Progress;
   saveProgress(target: string, progress: Progress): void;
+  /** A failure the learner needs to know about, in their words — `src/extension.ts` routes it
+   *  to the output channel and a notification. Never called for anything they can fix by
+   *  waiting; a walk that has stopped saving is not that. */
+  reportError(message: string): void;
 }
 
 export class WalkSession {
@@ -133,6 +149,10 @@ export class WalkSession {
   /** See `dispose`: a torn-down session must not answer a stale click by driving surfaces
    *  that now belong to a different target's session. */
   private disposed = false;
+  /** See `reportPersistFailure`: a folder that cannot be written to does not fail once, it
+   *  fails on every click, so the learner is told once and is not asked to dismiss a
+   *  notification per navigation for the rest of the walk. */
+  private persistReported = false;
 
   private constructor(
     public readonly target: string,
@@ -188,8 +208,7 @@ export class WalkSession {
   goTo(stepId: string): void {
     if (this.disposed || !this.hasStep(stepId)) return;
     this.progress = setCurrent(this.progress, stepId);
-    this.persist();
-    this.refresh(true);
+    this.commit(true);
   }
 
   /** The next step by ordinal, or nothing at all at the end of the plan — no wraparound. */
@@ -214,8 +233,7 @@ export class WalkSession {
   setDial(stepId: string, dial: Dial): void {
     if (this.disposed || !this.hasStep(stepId)) return;
     this.progress = setDialIn(this.progress, stepId, dial);
-    this.persist();
-    this.refresh(false);
+    this.commit(false);
   }
 
   /**
@@ -226,8 +244,7 @@ export class WalkSession {
   markDone(stepId: string): void {
     if (this.disposed || !this.hasStep(stepId)) return;
     this.progress = markDoneIn(this.progress, stepId);
-    this.persist();
-    this.refresh(false);
+    this.commit(false);
   }
 
   /**
@@ -274,6 +291,75 @@ export class WalkSession {
     this.adapters.setStatus('');
   }
 
+  // ── write, then push, then complain ────────────────────────────────────────────────────
+
+  /**
+   * Every mutator above ends here, and the ORDER of these three lines is code review finding
+   * 4's fix. Read it before reordering them.
+   *
+   * The bug it closes: `goTo` used to mutate `this.progress`, call `saveProgress`, and only
+   * then `refresh`. A write can genuinely fail — a read-only target folder, a full disk, sync
+   * or anti-virus software holding the rename open — and the throw travelled out through
+   * `handleStepMessage`, `onMessage` and the webview's `onDidReceiveMessage` listener, where
+   * VS Code logs it and shows the learner NOTHING. The session had already advanced; not one
+   * surface had been told. So the page still read step 1 while the session sat on step 2, the
+   * learner pressed Next again, and the session went to step 3 behind a page that had never
+   * moved. One failed `fs.rename` suspended every rule this file states about the tree, the
+   * panel, the status bar and the editor never disagreeing.
+   *
+   * The navigation is KEPT rather than rolled back. It is what the learner just asked for,
+   * they watched themselves ask for it, and the walk works perfectly well from memory — what
+   * they have actually lost is the walk REMEMBERING where they are the next time they open
+   * the folder, which is what the message says and all it says. Rolling back would refuse
+   * them a step they are entitled to in order to protect a file that is not writable anyway.
+   *
+   * `refresh` runs BEFORE `reportError`, so the surfaces are already in agreement by the time
+   * anything is put in front of anyone — which also means an adapter that misbehaves inside
+   * the report cannot re-open the very desync this method exists to close.
+   */
+  private commit(revealEditor: boolean): void {
+    const failure = this.persist();
+    this.refresh(revealEditor);
+    if (failure !== undefined) this.reportPersistFailure(failure);
+  }
+
+  /**
+   * Writes the progress and NEVER throws: it returns the reason the write failed, or
+   * `undefined`. Returning the reason rather than reporting it from in here is exactly what
+   * lets `commit` put the refresh first; see there.
+   */
+  private persist(): string | undefined {
+    try {
+      this.adapters.saveProgress(this.target, this.progress);
+      return undefined;
+    } catch (err) {
+      return err instanceof Error && err.message.length > 0 ? err.message : String(err);
+    }
+  }
+
+  /**
+   * ONCE per session, never once per click. A folder that cannot be written to does not fail
+   * once: it fails on every navigation, every dial change and every step marked done, and a
+   * learner walking the 61-step plan we have would spend the tutorial dismissing notifications
+   * instead of reading code. The condition is a standing one, so it is stated once, plainly,
+   * and then endured quietly — the walk itself keeps working the whole time, which is the
+   * point of keeping the navigation in `commit`.
+   *
+   * Worded for the learner rather than for us: it names the folder, says what they have
+   * actually lost (their place, next time — not their work, and not this session), and carries
+   * the underlying reason at the tail for the output channel, where whoever diagnoses a
+   * read-only checkout or a full disk will go looking.
+   */
+  private reportPersistFailure(reason: string): void {
+    if (this.persistReported) return;
+    this.persistReported = true;
+    this.adapters.reportError(
+      `Could not save your progress in ${this.target}. The walk still works, but it will not `
+      + 'remember which step you are on the next time you open this folder — the folder may be '
+      + `read-only, or the disk full. (${reason})`,
+    );
+  }
+
   // ── the single push point ──────────────────────────────────────────────────────────────
 
   /**
@@ -300,20 +386,27 @@ export class WalkSession {
   private buildView(): WalkView | undefined {
     const step = currentStep(this.plan, this.progress);
     if (!step) return undefined;
+    // `resolveInsideTarget`, NOT `path.join` — security review finding 2, argued in full in
+    // `./paths.ts`. `path.join('/home/you/repo', '../../../.ssh/id_rsa')` is a perfectly real
+    // path to somebody's private key, and `refresh(true)` reveals the current step's file on
+    // activation, so the old code needed no click at all between a crafted `plan.json` and an
+    // open editor tab. A `null` here is "there is nothing to open", which every surface
+    // already knows how to render honestly (`fileExists: false` is the ordinary state of a
+    // file T-5 has not written yet), so the escape is a dead end rather than an error thrown
+    // at a learner who did not write the plan. Note `fileExists` is not even ASKED about an
+    // escaping path: the adapter is `fs.statSync` on the real filesystem, and a containment
+    // check that consults the disk first is a containment check that already lost.
+    const absPath = resolveInsideTarget(this.target, step.target.file);
     return {
       plan: this.plan,
       progress: this.progress,
       step,
-      fileExists: this.adapters.fileExists(path.join(this.target, step.target.file)),
+      fileExists: absPath !== null && this.adapters.fileExists(absPath),
     };
   }
 
   private hasStep(stepId: string): boolean {
     return this.plan.steps.some((s) => s.id === stepId);
-  }
-
-  private persist(): void {
-    this.adapters.saveProgress(this.target, this.progress);
   }
 
   /**

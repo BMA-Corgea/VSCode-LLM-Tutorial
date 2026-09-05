@@ -38,6 +38,14 @@
  *     step comes back, read through `loadProgress` rather than remembered. The fake hands back
  *     a CLONE of what was stored, exactly as `JSON.parse` would, so a reload that "passes"
  *     only because two sessions share one object in memory cannot pass here.
+ *   - **A `target.file` that escapes the target folder is not openable.** `fileExists` is
+ *     never even ASKED about an escaping path — a containment check that consults the disk
+ *     first has already lost — nothing is revealed, and the view reports `fileExists: false`,
+ *     the same honest "there is nothing to open here" a file T-5 has not written yet gets. No
+ *     error reaches a learner who did not write the plan and cannot fix it.
+ *   - **A failed write may not desynchronise the surfaces from the session.** `saveProgress`
+ *     throwing keeps the navigation the learner asked for, still refreshes the tree, the panel
+ *     and the status bar, and reports ONCE per session however many times it goes on failing.
  *   - **The empty cases are honest.** A plan with no steps pushes `undefined` to the tree and
  *     the panel and the EMPTY string to the status bar — never `step 1 / 0 · manual`, a number
  *     invented to fill a slot. A disposed session clears all four surfaces, is idempotent, and
@@ -74,7 +82,8 @@ type Call =
   | { fn: 'setStatus'; text: string }
   | { fn: 'revealEditor'; view: WalkView }
   | { fn: 'clearEditor' }
-  | { fn: 'openFile'; view: WalkView };
+  | { fn: 'openFile'; view: WalkView }
+  | { fn: 'reportError'; message: string };
 
 interface Fake {
   adapters: WalkAdapters;
@@ -94,6 +103,10 @@ interface FakeOptions {
   progress?: Progress;
   /** Step target paths (relative to `TARGET`) that do NOT exist — everything else does. */
   missing?: string[];
+  /** Make every `saveProgress` throw, the way a read-only target folder, a full disk or sync
+   *  software holding the rename does. Nothing is stored, so `stored()` keeps showing what was
+   *  last written successfully — which is exactly what the learner gets back on reload. */
+  saveFails?: boolean;
 }
 
 function fakeAdapters(options: FakeOptions = {}): Fake {
@@ -110,6 +123,7 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
     revealEditor: (view) => { log.push({ fn: 'revealEditor', view }); },
     clearEditor: () => { log.push({ fn: 'clearEditor' }); },
     openFile: (view) => { log.push({ fn: 'openFile', view }); },
+    reportError: (message) => { log.push({ fn: 'reportError', message }); },
     fileExists: (absPath) => {
       log.push({ fn: 'fileExists', absPath });
       return !missing.has(absPath);
@@ -126,7 +140,11 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
       return found ? structuredClone(found) : emptyProgress(forPlan);
     },
     saveProgress: (target, progress) => {
+      // Logged BEFORE it can throw, deliberately: the real writer fails at the rename, having
+      // already been asked to write, and a test that could not see the attempt could not tell
+      // "the write failed" apart from "the write was never made".
       log.push({ fn: 'saveProgress', target, progress });
+      if (options.saveFails) throw new Error('EACCES: permission denied, rename \'progress.json.tmp\'');
       saved.set(target, structuredClone(progress));
     },
   };
@@ -166,6 +184,22 @@ function opened(options: FakeOptions = {}): { session: WalkSession; fake: Fake; 
 /** A plan whose chapters produced no steps at all — legal, and reachable. */
 function emptyPlan(): PlanLike {
   return { ...fixturePlan(), steps: [] };
+}
+
+/**
+ * `fixturePlan()` with the CURRENT step's `target.file` rewritten to whatever is asked for.
+ * `plan.json` is `JSON.parse`d and cast into shape, never validated, so any string at all can
+ * genuinely arrive in that slot — and `fixtureProgress` parks the walk on exactly this step,
+ * so whatever is written here is what activation tries to open, with no click in between.
+ */
+function planTargeting(file: string): PlanLike {
+  const plan = fixturePlan();
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => (
+      step.id === 'st-2-file-parse' ? { ...step, target: { ...step.target, file } } : step
+    )),
+  };
 }
 
 suite('WalkSession.open — loaded through the adapters, pushed to every surface', () => {
@@ -240,6 +274,56 @@ suite('WalkSession.open — loaded through the adapters, pushed to every surface
     const fake = fakeAdapters({ plan, progress: setCurrent(emptyProgress(plan), 'st-3-symbol-handle') });
 
     assert.equal(WalkSession.open(TARGET, fake.adapters).getView()?.step.id, 'st-3-symbol-handle');
+  });
+});
+
+suite('a target.file that escapes the target folder (security review finding 2)', () => {
+  test('a `..` path is not openable at all: the disk is never asked, nothing is revealed, the view says false', () => {
+    const plan = planTargeting('../../../.ssh/id_rsa');
+    const fake = fakeAdapters({ plan, progress: fixtureProgress(plan) });
+    const session = WalkSession.open(TARGET, fake.adapters);
+
+    assert.deepEqual(pick(fake, 'fileExists'), [],
+      'refused by `path` alone — a containment check that consults the filesystem first is one that has already lost');
+    assert.deepEqual(pick(fake, 'revealEditor'), [],
+      '`path.join` would have made that a real path to somebody\'s private key, and this reveal runs on activation with no gesture in between');
+    assert.deepEqual(fake.names(), [
+      'loadPlan', 'loadProgress', 'setTree', 'setPanel', 'setStatus', 'clearEditor',
+    ], 'exactly the shape of a step whose file is not there — the escape is a dead end, not a state of its own');
+    assert.equal(session.getView()?.fileExists, false);
+    assert.deepEqual(pushedSteps(fake, 'setPanel'), ['st-2-file-parse'],
+      'the step is still shown: only its file is unreachable, and the panel already says that honestly');
+    assert.deepEqual(pick(fake, 'reportError'), [],
+      'the learner did not write the plan and has nothing to fix in it, so nothing is put in front of them');
+  });
+
+  test('an ABSOLUTE target.file is out too, rather than being quietly re-rooted under the target', () => {
+    const plan = planTargeting('/etc/passwd');
+    const fake = fakeAdapters({ plan, progress: fixtureProgress(plan) });
+    const session = WalkSession.open(TARGET, fake.adapters);
+
+    assert.deepEqual(pick(fake, 'fileExists'), []);
+    assert.equal(session.getView()?.fileExists, false,
+      '`path.join` swallowed this into `<target>/etc/passwd` — harmless by accident, and no kind of check');
+  });
+
+  test('the panel\'s Open the file button cannot be talked into opening one either', () => {
+    const { session, fake } = opened({ plan: planTargeting('../../../.ssh/id_rsa') });
+    session.openFile();
+
+    assert.deepEqual(fake.log, [],
+      'a `step:open` message arriving anyway must not become the one gesture that opens it');
+  });
+
+  test('a `..` that stays INSIDE the target still opens — this is containment, not a ban on the characters', () => {
+    const plan = planTargeting('src/api/../parse.ts');
+    const fake = fakeAdapters({ plan, progress: fixtureProgress(plan) });
+    const session = WalkSession.open(TARGET, fake.adapters);
+
+    assert.deepEqual(pick(fake, 'fileExists').map((call) => call.absPath), [path.join(TARGET, 'src/parse.ts')],
+      'normalised to where it actually points and asked about THAT — a substring test for `..` would have rejected a legal path');
+    assert.equal(session.getView()?.fileExists, true);
+    assert.equal(pick(fake, 'revealEditor').length, 1, 'and it is revealed like any other step');
   });
 });
 
@@ -375,6 +459,68 @@ suite('setDial / markDone — the same push, deliberately WITHOUT a reveal', () 
     assert.equal(session.getView()?.step.id, 'st-2-file-parse');
     assert.equal(pick(fake, 'setStatus')[0]?.text, 'step 2 / 4 · scaffolded', 'the status bar shows the CURRENT step\'s dial');
     assert.equal(fake.stored()?.steps['st-4-symbol-render']?.dial, 'automated');
+  });
+});
+
+suite('a saveProgress that throws — the surfaces may never be left disagreeing (code review finding 4)', () => {
+  test('the navigation stands, every surface is still refreshed, and the report comes last', () => {
+    const plan = fixturePlan();
+    const fake = fakeAdapters({ plan, progress: fixtureProgress(plan), saveFails: true });
+    const session = WalkSession.open(TARGET, fake.adapters);
+    fake.clearLog();
+
+    assert.doesNotThrow(() => { session.goTo('st-3-symbol-handle'); },
+      'the throw used to escape through handleStepMessage into onDidReceiveMessage, where VS Code logs it and shows nothing');
+
+    assert.deepEqual(fake.names(), [
+      'saveProgress', 'fileExists', 'setTree', 'setPanel', 'setStatus', 'revealEditor', 'reportError',
+    ], 'the write is attempted, every surface is pushed ANYWAY, and only then is anyone told — so the surfaces already agree by the time they see it');
+    assert.equal(session.getView()?.step.id, 'st-3-symbol-handle',
+      'the navigation is what the learner asked for and it stands; what they lost is the walk remembering it');
+    assert.deepEqual(pushedSteps(fake, 'setTree'), ['st-3-symbol-handle']);
+    assert.deepEqual(pushedSteps(fake, 'setPanel'), ['st-3-symbol-handle'],
+      'the bug: the session on step 3 while the page still read step 2, and the next click moving it to step 4');
+    assert.equal(pick(fake, 'setStatus')[0]?.text, 'step 3 / 4 · manual');
+    assert.equal(pick(fake, 'revealEditor')[0]?.view.step.id, 'st-3-symbol-handle');
+  });
+
+  test('the message names the folder and says what was actually lost', () => {
+    const { session, fake } = opened({ saveFails: true });
+    session.next();
+
+    const message = pick(fake, 'reportError')[0]?.message ?? '';
+    assert.match(message, /Could not save your progress/, 'in the learner\'s words, not a stack trace');
+    assert.ok(message.includes(TARGET), 'which folder — a window can have several open');
+    assert.match(message, /will not remember/,
+      'what they lost is their PLACE next time, not their work and not this session — the walk keeps working');
+    assert.match(message, /EACCES/, 'and the underlying reason rides along for the output channel');
+  });
+
+  test('reported ONCE per session, not once per click — a read-only folder is not a notification storm', () => {
+    const { session, fake } = opened({ saveFails: true });
+
+    session.next();
+    session.next();
+    session.prev();
+    session.setDial('st-2-file-parse', 'automated');
+    session.markDone('st-2-file-parse');
+
+    assert.equal(pick(fake, 'saveProgress').length, 5, 'every one of those really did try to write, and really did fail');
+    assert.equal(pick(fake, 'setStatus').length, 5, 'and every one of them still refreshed the surfaces');
+    assert.equal(pick(fake, 'reportError').length, 1,
+      'the condition is standing, so it is stated once and then endured quietly — 61 steps of dismissing the same dialog is not a walk');
+  });
+
+  test('and the walk really does forget: a reload comes back where the last SUCCESSFUL write left it', () => {
+    const plan = fixturePlan();
+    const fake = fakeAdapters({ plan, progress: fixtureProgress(plan), saveFails: true });
+    const first = WalkSession.open(TARGET, fake.adapters);
+    first.goTo('st-4-symbol-render');
+    first.dispose();
+
+    assert.deepEqual(fake.stored(), fixtureProgress(plan), 'a failed write leaves the file exactly as it was');
+    assert.equal(WalkSession.open(TARGET, fake.adapters).getView()?.step.id, 'st-2-file-parse',
+      'exactly what the message promises — the session moved, the file did not, so the next open is where the file says');
   });
 });
 
