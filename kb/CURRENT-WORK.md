@@ -30,7 +30,7 @@ here and found via the reference table below.
 - **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
 
 
-- **T-1 (direction) — Build tutorials v1.** 2026-09-04: shaped with Evan in one session and
+- **T-1 (direction) — Build tutorials v1.** 2026-09-04: shaped with the owner in one session and
   routed into T-2…T-10 here + repo-tour T-11…T-13. Waiting on his approval of the set and his
   answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
   thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
@@ -41,7 +41,7 @@ here and found via the reference table below.
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
 
-- **Wound down 2026-09-05 (night), at Evan's request.** T-4 (the walk) builder asked to stop at a clean point and write a resumable handoff — read `.autodev/handoffs/T-4.md` first tomorrow, then `tracker.mjs next T-4`. T-5…T-8 parked at `plan` (T-6 after T-5, not parallel). Nothing else in flight; repo-tour side complete.
+- **Wound down 2026-09-05 (night), at the owner's request.** T-4 (the walk) builder asked to stop at a clean point and write a resumable handoff — read `.autodev/handoffs/T-4.md` first tomorrow, then `tracker.mjs next T-4`. T-5…T-8 parked at `plan` (T-6 after T-5, not parallel). Nothing else in flight; repo-tour side complete.
 
 ## Waiting on
 
