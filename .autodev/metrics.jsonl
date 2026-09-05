@@ -24,3 +24,6 @@
 {"ts":"2026-09-05T03:40:46.899Z","kind":"stage.advanced","ticket":"T-4","from":"refine","to":"queue"}
 {"ts":"2026-09-05T03:40:46.972Z","kind":"stage.advanced","ticket":"T-4","from":"queue","to":"locate"}
 {"ts":"2026-09-05T03:40:47.159Z","kind":"stage.advanced","ticket":"T-4","from":"locate","to":"plan"}
+{"ts":"2026-09-05T04:00:05.328Z","kind":"stage.loopback","ticket":"T-3","from":"auto-review","to":"build","attempts":1,"no_progress_streak":1,"stuck":false}
+{"ts":"2026-09-05T04:19:00.537Z","kind":"stage.advanced","ticket":"T-3","from":"build","to":"auto-review"}
+{"ts":"2026-09-05T04:40:33.129Z","kind":"stage.advanced","ticket":"T-3","from":"auto-review","to":"gate"}
