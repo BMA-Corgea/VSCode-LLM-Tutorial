@@ -20,7 +20,8 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onCommand:buildTutorials.start",
-    "onCommand:buildTutorials.doctor"
+    "onCommand:buildTutorials.doctor",
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [
