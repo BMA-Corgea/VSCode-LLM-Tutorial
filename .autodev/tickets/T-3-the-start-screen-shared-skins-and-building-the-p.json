@@ -3,8 +3,8 @@
   "slug": "the-start-screen-shared-skins-and-building-the-p",
   "type": "feature",
   "title": "The start screen, shared skins, and building the plan with resume",
-  "stage": "plan",
-  "status": "planning",
+  "stage": "auto-review",
+  "status": "in_review",
   "spec": "WHY: the front door (.autodev/specs/T-1-build-tutorials-v1.md §5.2) and the skin contract (.autodev/specs/T-1-build-tutorials-v1.md §5.7). DEPENDS ON repo-tour T-11 (package exports + injectable asset roots), T-12 (BuildPlan) and T-13 (alternatives) — cross-shop, so not expressible with --after; do not start build until those three are merged.\n\nACs:\n1. A webview editor tab with: idea textbox; 'Just recreate the repo as it stands' checkbox; reference repo field (local path or GitHub URL) required iff the checkbox is ticked; 'Build it in' folder picker requiring an empty or new folder; the three-position dial. Check: form validation tests via the webview's message protocol.\n2. Typing an idea without ticking recreate shows, in the form itself, 'Idea-first builds arrive with T-9 — tick recreate to build from a repo' — no silent decline (repo-tour lesson T-3). Check: DOM assertion.\n3. A GitHub URL is cloned into globalStorageUri/refs/<owner>-<name>; a local path is used in place; a repo whose files are outside TS/JS/TSX/Python is refused with the reason shown in the form. Check: tests with a fixture repo and a Go-only fixture.\n4. Building the plan calls the core's digest + buildPlan + interpret with a progress notification, writes a write-ahead marker <target>/.repo-tour/build/building.json kept current, and resumes from it after a window reload. Check: kill vscode-test mid-build; on restart the marker is picked up and the plan completes.\n5. plan.json is written to <target>/.repo-tour/build/ and validates against the core's schema; cost is shown on completion (metered or 'this provider does not report usage'). Check: schema validation test.\n6. Skins: every webview inlines the core's baseCss() + alternateCss() plus a bridge sheet mapping base tokens to --vscode-* variables under :root:not([data-theme]) so System follows the editor theme; the picker lists SKINS; the choice is stamped into the HTML by the host before first paint and persisted in globalState. Check: a fixture skin dropped into repo-tour's assets/skins/ + one row appears in the webview HTML with no extension change.\n7. Every inlined client script is parsed by new Function in a test (repo-tour lesson: client script in template literals). Check: the parse test.\n\nOut of scope\n- Walking the plan — T-4\n- Mode A / idea-first — T-9\n- A network-served skin — deferred: who=agent:pm why=webviews inline CSS exactly as repo-tour's pages do",
   "pipeline_version": "feature@v1",
   "modifiers": [],
@@ -23,11 +23,11 @@
     "monitor"
   ],
   "passport": [
-    "2026-09-05 waiting at gate spec_ready (keyholder human:owner) since 2026-09-05",
-    "2026-09-05 gate spec_ready cleared by agent:claude(on-behalf:evan,GA-1) on go-ahead GA-1 (\"Let's go ahead and loop through it until these are created a\")",
     "2026-09-05 advanced refine → queue · refine on unrecorded",
     "2026-09-05 advanced queue → locate · queue on unrecorded",
-    "2026-09-05 advanced locate → plan · locate on unrecorded"
+    "2026-09-05 advanced locate → plan · locate on unrecorded",
+    "2026-09-05 advanced plan → build · plan on unrecorded",
+    "2026-09-05 advanced build → auto-review · build on unrecorded"
   ],
   "assignees": {},
   "links": {
@@ -75,6 +75,18 @@
       "to": "plan",
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-05T00:03:30.927Z"
+    },
+    {
+      "from": "plan",
+      "to": "build",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T02:18:49.731Z"
+    },
+    {
+      "from": "build",
+      "to": "auto-review",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T03:38:05.814Z"
     }
   ],
   "receipts": {
@@ -108,6 +120,22 @@
       "fingerprint": "sha256:1ee921f29bb5521c",
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-05T00:03:30.924Z",
+      "model": "unrecorded"
+    },
+    "plan": {
+      "evidence": ".autodev/plans/T-3.md",
+      "kind": "file",
+      "fingerprint": "sha256:06af68d5b4f7d5d7",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T02:18:49.720Z",
+      "model": "unrecorded"
+    },
+    "build": {
+      "evidence": "commits a7bca0a 7b1d02d 9b20d87 7c8b3c1 3f9c613 a91236a f044495 84a074b 43fd4f8 3121242 2250aa8 on feature/T-3-start-screen (worktree ../VSCode-LLM-Tutorial-T-3); 87 tests green (74 unit under plain mocha + 13 in a real vscode-test host) under DISPLAY=:1 and xvfb-run; plan.json schema-validated against repo-tour's real schema; AC4 resume simulated via a hand-written marker (disclosed, not a literal process kill); live screenshot of the start screen in codium; coder seat model sonnet",
+      "kind": "other",
+      "fingerprint": "commits a7bca0a 7b1d02d 9b20d87 7c8b3c1 3f9c613 a91236a f044495 84a074b 43fd4f8 3121242 2250aa8 on feature/T-3-start-screen (worktree ../VSCode-LLM-Tutorial-T-3); 87 tests green (74 unit under plain mocha + 13 in a real vscode-test host) under DISPLAY=:1 and xvfb-run; plan.json schema-validated against repo-tour's real schema; AC4 resume simulated via a hand-written marker (disclosed, not a literal process kill); live screenshot of the start screen in codium; coder seat model sonnet",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T03:38:05.812Z",
       "model": "unrecorded"
     }
   }
