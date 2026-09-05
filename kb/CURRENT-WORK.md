@@ -9,6 +9,12 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
+- **T-3** (feature) — start screen + shared skins + build-with-resume — on `feature/T-3-start-screen`
+  in worktree `VSCode-LLM-Tutorial-T-3`; core surface, skin bridge, webview shell, request
+  validation, protocol/view layer, panel wiring, and `build.ts` (marker, resume, language
+  refusal, end-to-end fixture build schema-validated) all built and green (typecheck/lint/74
+  unit tests); remaining: wire `extension.ts`/`package.json`, the vscode-test suite in
+  `test/start.test.ts`, README, close-out. Handoff: `.autodev/handoffs/T-3.md`.
   `feature/T-2-skeleton` (commits through `1f5c259` plus a README/NOTICE/packaging follow-up)
   and self-verified — typecheck, lint, `npm test` (4/4, both under a real DISPLAY and under
   `xvfb-run -a`), `npm run build`, `./build-tutorials doctor`, `./build-tutorials package`
