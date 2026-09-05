@@ -5,9 +5,16 @@
 .claude/**
 .github/**
 .autodev/**
+# The shop overlay is process config for building this extension, not part of it.
+autodev/**
 kb/**
 src/**
 test/**
+# The compiled test BUNDLES too — `test/**` only excludes the sources, so without this
+# the .vsix ships every test suite to every user (~250 KB of it after T-4's). Nothing in
+# `dist/test/` is reachable from `main`; it exists for `.vscode-test.mjs`, which reads it
+# out of the working tree and never out of the package.
+dist/test/**
 scripts/**
 esbuild.mjs
 eslint.config.mjs
