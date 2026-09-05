@@ -26,10 +26,6 @@ here and found via the reference table below.
   extension host via dynamic `import()` — no architecture change needed, T-3 onward can build
   on this as specced. Full account: `.autodev/handoffs/T-2.md`. Reported back for
   review/accept.
-- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — intake
-- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — intake
-- **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — intake
-- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — intake
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
 - **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
 
@@ -39,13 +35,23 @@ here and found via the reference table below.
   answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
   thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
 
-- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — plan
+- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — build
+- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — plan
+- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — plan
+- **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
+- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
+
+- **Wound down 2026-09-05 (night), at Evan's request.** T-4 (the walk) builder asked to stop at a clean point and write a resumable handoff — read `.autodev/handoffs/T-4.md` first tomorrow, then `tracker.mjs next T-4`. T-5…T-8 parked at `plan` (T-6 after T-5, not parallel). Nothing else in flight; repo-tour side complete.
 
 ## Waiting on
 
 <!-- Holds: "waiting at <gate> on <keyholder> since <date>, ping sent to
      <channel>" — no session should discover a hold by archaeology (ruling 24). -->
 - **T-4** — waiting at spec_ready on human:owner since 2026-09-05
+- **T-5** — waiting at spec_ready on human:owner since 2026-09-05
+- **T-6** — waiting at spec_ready on human:owner since 2026-09-05
+- **T-7** — waiting at spec_ready on human:owner since 2026-09-05
+- **T-8** — waiting at spec_ready on human:owner since 2026-09-05
 
 
 ## Recent past (~15 items / ~30 days)
