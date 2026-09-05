@@ -9,7 +9,6 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
-- **T-3** (feature) — start screen + shared skins + build-with-resume — DONE, self-verified on
   `feature/T-3-start-screen` in worktree `VSCode-LLM-Tutorial-T-3`; all 7 ACs built (core
   surface, skin bridge, webview shell, request validation, protocol/view layer, panel wiring
   with `reportProblem` so a build-time refusal surfaces in the form, and `build.ts` — marker,
@@ -39,16 +38,13 @@ here and found via the reference table below.
   routed into T-2…T-10 here + repo-tour T-11…T-13. Waiting on his approval of the set and his
   answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
   thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
-- **T-3** (feature) — The start screen, shared skins, and building the plan with resume — gate
 
-- **T-3** (feature) — The start screen, shared skins, and building the plan with resume — gate
 - **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — plan
 
 ## Waiting on
 
 <!-- Holds: "waiting at <gate> on <keyholder> since <date>, ping sent to
      <channel>" — no session should discover a hold by archaeology (ruling 24). -->
-- **T-3** — waiting at spec_ready on human:owner since 2026-09-05
 - **T-4** — waiting at spec_ready on human:owner since 2026-09-05
 
 
@@ -56,6 +52,7 @@ here and found via the reference table below.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-05 **T-3 COMPLETE** — The start screen, shared skins, and building the plan with resume
 - 2026-09-04 **T-2 COMPLETE** — Extension skeleton, core attach, and a doctor that proves the host can run it
 - 2026-09-04 **T-1 COMPLETE** — Build tutorials v1 — recreate a repo by its decisions, in VS Code, on repo-tour…
 

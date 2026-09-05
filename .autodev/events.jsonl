@@ -82,3 +82,16 @@
 {"ts":"2026-09-05T04:19:00.537Z","type":"stage.advanced","ticket":"T-3","from":"build","to":"auto-review","by":"agent:claude(on-behalf:evan,GA-1)"}
 {"ts":"2026-09-05T04:40:33.120Z","type":"loop.validator.passed","ticket":"T-3","stage":"auto-review","by":"agent:claude(on-behalf:evan,GA-1)","evidence":"review record .autodev/reviews/T-3.md (attempt 1 REWORK c445b2e; attempt 2 PASS 10db965) on feature/T-3-start-screen — three gating findings closed with discriminating tests, no regressions, 109/109 both ways; reviewer seat model sonnet, fresh sessions","fingerprint":"review record .autodev/reviews/T-3.md (attempt 1 REWORK c445b2e; attempt 2 PASS 10db965) on feature/T-3-start-screen — three gating findings closed with discriminating tests, no regressions, 109/109 both ways; reviewer seat model sonnet, fresh sessions"}
 {"ts":"2026-09-05T04:40:33.128Z","type":"stage.advanced","ticket":"T-3","from":"auto-review","to":"gate","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:40:36.284Z","type":"loop.validator.passed","ticket":"T-3","stage":"gate","by":"agent:claude(on-behalf:evan,GA-1)","evidence":"merged to main as a68c8d5 (--no-ff, from main's own checkout), pushed to origin/main; merge gate policy unattended — checks green, review PASS","fingerprint":"merged to main as a68c8d5 (--no-ff, from main's own checkout), pushed to origin/main; merge gate policy unattended — checks green, review PASS"}
+{"ts":"2026-09-05T04:40:36.291Z","type":"gate.cleared","ticket":"T-3","gate":"merge","by":"policy:unattended"}
+{"ts":"2026-09-05T04:40:36.296Z","type":"stage.advanced","ticket":"T-3","from":"gate","to":"verify","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:43:57.731Z","type":"loop.validator.passed","ticket":"T-3","stage":"verify","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/evidence/T-3/verify.txt","fingerprint":"sha256:a86f7aa569c18258"}
+{"ts":"2026-09-05T04:43:57.732Z","type":"stage.advanced","ticket":"T-3","from":"verify","to":"uat","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:43:57.827Z","type":"gate.cleared","ticket":"T-3","gate":"accept","by":"agent:claude(on-behalf:evan,GA-1)","goAhead":"GA-1"}
+{"ts":"2026-09-05T04:43:58.082Z","type":"loop.validator.passed","ticket":"T-3","stage":"uat","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/reports/T-3-uat.md","fingerprint":"sha256:c673462d98cd92b5"}
+{"ts":"2026-09-05T04:43:58.086Z","type":"stage.advanced","ticket":"T-3","from":"uat","to":"release","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:43:58.308Z","type":"loop.validator.passed","ticket":"T-3","stage":"release","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/reports/T-3-release.md","fingerprint":"sha256:4baeae0bdf620bf3"}
+{"ts":"2026-09-05T04:43:58.309Z","type":"gate.cleared","ticket":"T-3","gate":"deploy","by":"policy:unattended"}
+{"ts":"2026-09-05T04:43:58.310Z","type":"stage.advanced","ticket":"T-3","from":"release","to":"monitor","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:43:58.536Z","type":"loop.validator.passed","ticket":"T-3","stage":"monitor","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/reports/T-3-monitor.md","fingerprint":"sha256:224217c82639eb9c"}
+{"ts":"2026-09-05T04:43:58.538Z","type":"pipeline.complete","ticket":"T-3","at":"monitor"}

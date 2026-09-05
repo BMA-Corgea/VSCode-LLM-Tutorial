@@ -27,3 +27,8 @@
 {"ts":"2026-09-05T04:00:05.328Z","kind":"stage.loopback","ticket":"T-3","from":"auto-review","to":"build","attempts":1,"no_progress_streak":1,"stuck":false}
 {"ts":"2026-09-05T04:19:00.537Z","kind":"stage.advanced","ticket":"T-3","from":"build","to":"auto-review"}
 {"ts":"2026-09-05T04:40:33.129Z","kind":"stage.advanced","ticket":"T-3","from":"auto-review","to":"gate"}
+{"ts":"2026-09-05T04:40:36.296Z","kind":"stage.advanced","ticket":"T-3","from":"gate","to":"verify"}
+{"ts":"2026-09-05T04:43:57.732Z","kind":"stage.advanced","ticket":"T-3","from":"verify","to":"uat"}
+{"ts":"2026-09-05T04:43:58.086Z","kind":"stage.advanced","ticket":"T-3","from":"uat","to":"release"}
+{"ts":"2026-09-05T04:43:58.316Z","kind":"stage.advanced","ticket":"T-3","from":"release","to":"monitor"}
+{"ts":"2026-09-05T04:43:58.538Z","kind":"pipeline.complete","ticket":"T-3","at":"monitor"}

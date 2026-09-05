@@ -3,8 +3,8 @@
   "slug": "the-start-screen-shared-skins-and-building-the-p",
   "type": "feature",
   "title": "The start screen, shared skins, and building the plan with resume",
-  "stage": "gate",
-  "status": "awaiting_approval",
+  "stage": "monitor",
+  "status": "complete",
   "spec": "WHY: the front door (.autodev/specs/T-1-build-tutorials-v1.md §5.2) and the skin contract (.autodev/specs/T-1-build-tutorials-v1.md §5.7). DEPENDS ON repo-tour T-11 (package exports + injectable asset roots), T-12 (BuildPlan) and T-13 (alternatives) — cross-shop, so not expressible with --after; do not start build until those three are merged.\n\nACs:\n1. A webview editor tab with: idea textbox; 'Just recreate the repo as it stands' checkbox; reference repo field (local path or GitHub URL) required iff the checkbox is ticked; 'Build it in' folder picker requiring an empty or new folder; the three-position dial. Check: form validation tests via the webview's message protocol.\n2. Typing an idea without ticking recreate shows, in the form itself, 'Idea-first builds arrive with T-9 — tick recreate to build from a repo' — no silent decline (repo-tour lesson T-3). Check: DOM assertion.\n3. A GitHub URL is cloned into globalStorageUri/refs/<owner>-<name>; a local path is used in place; a repo whose files are outside TS/JS/TSX/Python is refused with the reason shown in the form. Check: tests with a fixture repo and a Go-only fixture.\n4. Building the plan calls the core's digest + buildPlan + interpret with a progress notification, writes a write-ahead marker <target>/.repo-tour/build/building.json kept current, and resumes from it after a window reload. Check: kill vscode-test mid-build; on restart the marker is picked up and the plan completes.\n5. plan.json is written to <target>/.repo-tour/build/ and validates against the core's schema; cost is shown on completion (metered or 'this provider does not report usage'). Check: schema validation test.\n6. Skins: every webview inlines the core's baseCss() + alternateCss() plus a bridge sheet mapping base tokens to --vscode-* variables under :root:not([data-theme]) so System follows the editor theme; the picker lists SKINS; the choice is stamped into the HTML by the host before first paint and persisted in globalState. Check: a fixture skin dropped into repo-tour's assets/skins/ + one row appears in the webview HTML with no extension change.\n7. Every inlined client script is parsed by new Function in a test (repo-tour lesson: client script in template literals). Check: the parse test.\n\nOut of scope\n- Walking the plan — T-4\n- Mode A / idea-first — T-9\n- A network-served skin — deferred: who=agent:pm why=webviews inline CSS exactly as repo-tour's pages do",
   "pipeline_version": "feature@v1",
   "modifiers": [],
@@ -23,11 +23,11 @@
     "monitor"
   ],
   "passport": [
-    "2026-09-05 advanced plan → build · plan on unrecorded",
-    "2026-09-05 advanced build → auto-review · build on unrecorded",
-    "2026-09-05 moved auto-review → build by agent:claude(on-behalf:evan,GA-1), attempt 1 · why: auto-review REWORK (.autodev/reviews/T-3.md c445b2e, reviewer sonnet): (1) src/extension.ts:103,137-155 resumeOnActivate never clears workspaceState buildTutorials.currentBuild — after one build, every activation loads the core and opens a progress notification before checking for a marker; untested wiring; (2) src/start/build.ts:272-274 plan.json/request.json written with plain writeFileSync, not the temp+rename the marker uses; (3) src/start/protocol.ts:58-89 no runtime validation of inbound message shapes — null payload / non-string field / unknown type all throw. Advisory: the AC2 line has a 2-char quote deviation between the T-1 and T-3 spec texts. Attempt 2, model escalated. · leaving: Machine review: code review + security review + full preflight (lint, typecheck, unit,… · next: Implement the plan: code + tests on the ticket branch.",
-    "2026-09-05 advanced build → auto-review · build on unrecorded",
-    "2026-09-05 advanced auto-review → gate · auto-review on unrecorded"
+    "2026-09-05 gate accept cleared by agent:claude(on-behalf:evan,GA-1) on go-ahead GA-1 (\"Let's go ahead and loop through it until these are created a\")",
+    "2026-09-05 advanced uat → release · uat on unrecorded",
+    "2026-09-05 gate deploy cleared by policy:unattended",
+    "2026-09-05 advanced release → monitor · release on unrecorded",
+    "2026-09-05 pipeline complete at monitor"
   ],
   "assignees": {},
   "links": {
@@ -38,9 +38,9 @@
   ],
   "gates": {
     "spec_ready": true,
-    "merge": false,
-    "accept": false,
-    "deploy": false,
+    "merge": true,
+    "accept": true,
+    "deploy": true,
     "sp_decide": false,
     "ex_decide": false,
     "compliance": false
@@ -48,8 +48,9 @@
   "overrides": {},
   "risk": "medium",
   "loop": {
-    "validator_passed": false,
-    "attempts": 0
+    "validator_passed": true,
+    "attempts": 0,
+    "evidence": ".autodev/reports/T-3-monitor.md"
   },
   "history": [
     {
@@ -105,6 +106,30 @@
       "to": "gate",
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-05T04:40:33.121Z"
+    },
+    {
+      "from": "gate",
+      "to": "verify",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:40:36.294Z"
+    },
+    {
+      "from": "verify",
+      "to": "uat",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:43:57.731Z"
+    },
+    {
+      "from": "uat",
+      "to": "release",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:43:58.086Z"
+    },
+    {
+      "from": "release",
+      "to": "monitor",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:43:58.309Z"
     }
   ],
   "receipts": {
@@ -163,7 +188,48 @@
       "by": "agent:claude(on-behalf:evan,GA-1)",
       "at": "2026-09-05T04:40:33.118Z",
       "model": "unrecorded"
+    },
+    "gate": {
+      "evidence": "merged to main as a68c8d5 (--no-ff, from main's own checkout), pushed to origin/main; merge gate policy unattended — checks green, review PASS",
+      "kind": "other",
+      "fingerprint": "merged to main as a68c8d5 (--no-ff, from main's own checkout), pushed to origin/main; merge gate policy unattended — checks green, review PASS",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:40:36.275Z",
+      "model": "unrecorded"
+    },
+    "verify": {
+      "evidence": ".autodev/evidence/T-3/verify.txt",
+      "kind": "file",
+      "fingerprint": "sha256:a86f7aa569c18258",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:43:57.730Z",
+      "model": "unrecorded"
+    },
+    "uat": {
+      "evidence": ".autodev/reports/T-3-uat.md",
+      "kind": "file",
+      "fingerprint": "sha256:c673462d98cd92b5",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:43:58.080Z",
+      "model": "unrecorded"
+    },
+    "release": {
+      "evidence": ".autodev/reports/T-3-release.md",
+      "kind": "file",
+      "fingerprint": "sha256:4baeae0bdf620bf3",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:43:58.307Z",
+      "model": "unrecorded"
+    },
+    "monitor": {
+      "evidence": ".autodev/reports/T-3-monitor.md",
+      "kind": "file",
+      "fingerprint": "sha256:224217c82639eb9c",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:43:58.533Z",
+      "model": "unrecorded"
     }
   },
-  "bounces": {}
+  "bounces": {},
+  "completed": true
 }
