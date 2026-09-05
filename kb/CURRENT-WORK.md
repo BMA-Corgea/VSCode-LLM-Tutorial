@@ -9,6 +9,15 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
+- **T-3** (feature) — start screen + shared skins + build-with-resume — DONE, self-verified on
+  `feature/T-3-start-screen` in worktree `VSCode-LLM-Tutorial-T-3`; all 7 ACs built (core
+  surface, skin bridge, webview shell, request validation, protocol/view layer, panel wiring
+  with `reportProblem` so a build-time refusal surfaces in the form, and `build.ts` — marker,
+  resume, language refusal, end-to-end fixture build schema-validated against repo-tour's
+  real schema); typecheck/lint/test (74 unit + 13 vscode-test) green under both `DISPLAY=:1`
+  and `xvfb-run -a`; doctor reports 8/8 modules; the start screen visually confirmed in a real
+  VSCodium window. Reported back for review/accept. Full account:
+  `.autodev/handoffs/T-3.md`.
   `feature/T-2-skeleton` (commits through `1f5c259` plus a README/NOTICE/packaging follow-up)
   and self-verified — typecheck, lint, `npm test` (4/4, both under a real DISPLAY and under
   `xvfb-run -a`), `npm run build`, `./build-tutorials doctor`, `./build-tutorials package`
