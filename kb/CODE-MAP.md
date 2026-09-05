@@ -61,6 +61,51 @@ will be overwritten.
 - Exports: renderStartHtml, startScript
 - Imports: (none)
 
+## src/walk/editor.ts
+
+- Exports: StepDecorator
+- Imports: (none)
+
+## src/walk/model.ts
+
+- Exports: currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCurrent, setDial, statusText, treeModel
+- Imports: (none)
+
+## src/walk/session.ts
+
+- Exports: WalkSession
+- Imports: (none)
+
+## src/walk/status.ts
+
+- Exports: WalkStatusBar
+- Imports: (none)
+
+## src/walk/step-panel.ts
+
+- Exports: StepViewProvider
+- Imports: (none)
+
+## src/walk/step-protocol.ts
+
+- Exports: CHECK_NOTE, handleStepMessage, parseStepMessage
+- Imports: (none)
+
+## src/walk/step-view.ts
+
+- Exports: FILE_MISSING_MESSAGE, NO_HISTORY_MESSAGE, renderNoticeHtml, renderStepHtml, stepScript
+- Imports: (none)
+
+## src/walk/store.ts
+
+- Exports: hasPlan, loadPlan, loadProgress, saveProgress
+- Imports: (none)
+
+## src/walk/tree.ts
+
+- Exports: DecisionsTreeProvider
+- Imports: (none)
+
 ## src/webview/html.ts
 
 - Exports: escapeAttr, escapeHtml

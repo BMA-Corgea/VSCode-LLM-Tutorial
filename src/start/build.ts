@@ -14,6 +14,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { parseGithubUrl, type BuildRequest } from './request.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
@@ -176,7 +177,13 @@ export const realFsWriteOps: FsWriteOps = {
  */
 export function writeJsonAtomic(filePath: string, value: unknown, ops: FsWriteOps = realFsWriteOps): void {
   ops.mkdirSync(path.dirname(filePath));
-  const tmp = `${filePath}.tmp`;
+  // The suffix is RANDOM, not a fixed `.tmp` (T-4 security review, finding 4). `writeFileSync`
+  // follows symlinks, so a repository that commits `progress.json.tmp` as a symlink pointing
+  // anywhere the user can write gets that file truncated and overwritten on the learner's very
+  // first click — git recreates the symlink on clone, so it costs an attacker nothing. A name
+  // the attacker cannot predict cannot be pre-planted, which closes that path without changing
+  // the injected `FsWriteOps` shape every caller and test already depends on.
+  const tmp = `${filePath}.${randomBytes(6).toString('hex')}.tmp`;
   ops.writeFileSync(tmp, JSON.stringify(value, null, 2));
   ops.renameSync(tmp, filePath);
 }

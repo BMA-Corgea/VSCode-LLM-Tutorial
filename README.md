@@ -8,9 +8,10 @@ suite — the two share one core.
 
 ## What's here right now
 
-This is **T-2 + T-3**: the extension skeleton and its doctor (T-2), plus the start screen,
-the shared skin contract, and building the plan with resume (T-3). There is still no decision
-tree, no step panel, no tutor — those arrive in T-4 through T-8.
+This is **T-2 + T-3 + T-4**: the extension skeleton and its doctor (T-2), the start screen,
+the shared skin contract and building the plan with resume (T-3), and now the walk itself —
+the decision tree, the step panel, editor driving, and progress that survives a reload (T-4).
+There is still no file writing, no tutor and no detour; those arrive in T-5 through T-8.
 
 T-2 proved this extension can load repo-tour's core — an ESM package that finds its own
 assets (skins, tree-sitter grammars) via `import.meta.url` — from inside the VS Code
@@ -35,7 +36,8 @@ decisions this extension will later walk you through.
 - **Build it in** — an empty or new folder. This is where the plan (and, later, the tutorial
   itself) lives.
 - **How much do you want to type?** — the three-position dial: manual, scaffolded, or
-  automated. Set here as the default; overridable per step once the walk (T-4) exists.
+  automated. Set here as the default, and overridable per step in the walk. The dial is
+  recorded, and shown; what it actually *does* to a step arrives with T-5.
 
 Every field's problem, if it has one, appears in a line right under that field — never a
 disabled button with no explanation.
@@ -49,6 +51,45 @@ success, the plan lands at `<target>/.repo-tour/build/plan.json` (plus `request.
 recording exactly what was asked for), and a notification reports the chapter/step counts and
 the cost — a dollar amount and a token count where the provider reports usage, or an honest
 *"this provider does not report usage"* where it does not.
+
+## The walk
+
+Open a folder that contains a built plan (`.repo-tour/build/plan.json`) and the walk starts
+itself — that is the whole rule, no bookkeeping handed between windows. There is a **Build
+Tutorials** container in the activity bar holding two views.
+
+**Decisions** is a native tree: chapters over steps, each step showing the question it asks,
+marked `✓` done, `→` current, or `○` pending. Click one and it becomes current.
+
+**Current Step** is the panel beside it, and it shows, for the step you are on:
+
+- the **question** this step is really answering;
+- the **options** — the one the author actually chose, marked as such, and every alternative
+  with its consequence spelled out. Alternatives are shown, not offered: choosing one is
+  divergence, which arrives with T-10, and until then they carry that label and are not
+  rendered as controls at all. There is nothing in the page to click, which is a straighter
+  answer than a greyed-out button;
+- the **why**, with its source named — *from the model, reading the code*, *from the author's
+  own comment*, or *not inferable from the source*. You always know whether you are reading
+  the author or an inference about them;
+- the **witness** — the commit where this decision actually happened — or *no history to
+  show*;
+- the **dial** for this step, and **Previous / Open the file / Check my work / Next**.
+
+Choosing a step reveals its range in a real editor tab and highlights the load-bearing lines
+— the ones this step is asking you to write — leaving the boilerplate unmarked. Focus stays
+in the panel you are reading unless you press *Open the file*, which is an explicit request
+to go there.
+
+**Honest controls, as everywhere else here.** *Check my work* answers, in the panel, *"Check
+my work arrives with T-5"* — it does not quietly do nothing. *Open the file* is disabled, with
+the reason next to it, when the file does not exist yet. Changing the dial is remembered per
+step for T-5 to read.
+
+Your position and each step's status live in `<target>/.repo-tour/build/progress.json`,
+written atomically, beside the plan rather than inside this extension — reload the window,
+close the folder, come back tomorrow, and the walk is where you left it. The status bar
+carries `step 7 / 40 · scaffolded` while it runs.
 
 ## Skins — one file, both front ends
 
@@ -105,10 +146,12 @@ per-person, per-machine scope repo-tour's own web pages keep it in via `localSto
 saying plainly which it found.
 
 `npm test` runs two suites: `npm run test:unit` (plain `mocha`, no `vscode` import anywhere
-in it — pure logic, the write-ahead marker, the language refusal, and a full end-to-end
-`cachedOnly` build against a synthetic fixture, schema-validated against repo-tour's own
+in it — pure logic, the write-ahead marker, the language refusal, the walk's own state
+machine driven through fake adapters, and a full end-to-end `cachedOnly` build against a
+synthetic fixture, schema-validated against repo-tour's own
 `schema/build-plan.schema.json`), then the real `vscode-test` suite (a genuine
-`WebviewPanel`, the extension's activation). Never spends a token either way —
+`WebviewPanel`, a real tree and webview view, real editor decorations, the extension's
+activation). Never spends a token either way —
 `cachedOnly: true` throughout; the one run that actually asks a model anything is the
 orchestrator's own acceptance pass on a real target repo, never this suite.
 

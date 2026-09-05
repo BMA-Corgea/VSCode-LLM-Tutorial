@@ -1,7 +1,7 @@
 {
   "name": "build-tutorials",
   "displayName": "Build Tutorials",
-  "description": "Walks you through building an app the way its decisions were made — a paint-by-numbers tutorial generated from a real repository. Part of the repo-tour suite.",
+  "description": "Walks you through building an app the way its decisions were made \u2014 a paint-by-numbers tutorial generated from a real repository. Part of the repo-tour suite.",
   "version": "0.0.1",
   "publisher": "bma-corgea",
   "license": "AGPL-3.0-or-later",
@@ -34,20 +34,85 @@
         "command": "buildTutorials.doctor",
         "title": "Build Tutorials: Doctor",
         "category": "Build Tutorials"
+      },
+      {
+        "command": "buildTutorials.openWalk",
+        "title": "Build Tutorials: Open the walk",
+        "category": "Build Tutorials"
+      },
+      {
+        "command": "buildTutorials.prevStep",
+        "title": "Build Tutorials: Previous step",
+        "category": "Build Tutorials",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "buildTutorials.nextStep",
+        "title": "Build Tutorials: Next step",
+        "category": "Build Tutorials",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "buildTutorials.goToStep",
+        "title": "Build Tutorials: Go to step",
+        "category": "Build Tutorials"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "buildTutorials",
+          "title": "Build Tutorials",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "buildTutorials": [
+        {
+          "id": "buildTutorials.decisions",
+          "name": "Decisions"
+        },
+        {
+          "id": "buildTutorials.step",
+          "name": "Current Step",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "buildTutorials.goToStep",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "buildTutorials.prevStep",
+          "when": "view == buildTutorials.decisions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "buildTutorials.nextStep",
+          "when": "view == buildTutorials.decisions",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "Build Tutorials",
       "properties": {
         "buildTutorials.repoTourPath": {
           "type": "string",
           "default": "../repo-tour",
-          "description": "Path to the repo-tour checkout, relative to the extension or absolute. repo-tour supplies the core engine (extraction, digest, the LLM layer, skins) that this extension loads at run time."
+          "description": "Path to the repo-tour checkout, relative to the extension or absolute. repo-tour supplies the core engine (extraction, digest, the LLM layer, skins) that this extension loads at run time. Machine-scoped on purpose: this path is dynamically imported and its top-level code runs in the extension host, so a repository must not be able to set it from its own .vscode/settings.json.",
+          "scope": "machine"
         },
         "buildTutorials.llmProvider": {
           "type": "string",
           "default": "claude",
-          "description": "Which LLM provider repo-tour's interpret stage asks for each step's why and its roads-not-taken (spec §4.3). The default runs the local claude CLI — a subscription tool, not an API key."
+          "description": "Which LLM provider repo-tour's interpret stage asks for each step's why and its roads-not-taken (spec \u00a74.3). The default runs the local claude CLI \u2014 a subscription tool, not an API key."
         },
         "buildTutorials.llmModel": {
           "type": "string",
@@ -85,5 +150,11 @@
     "mocha": "^11.0.1",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.2"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The walk opens automatically for any folder containing .repo-tour/build/plan.json, and rendering it loads repo-tour's core by dynamic import. Neither should happen in a workspace you have not trusted."
+    }
   }
 }

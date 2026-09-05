@@ -10,6 +10,7 @@
  * wired here — that file itself has no `vscode` import, by design (see its header).
  */
 
+import fs from 'node:fs';
 import * as vscode from 'vscode';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from './core.js';
 import { runDoctor, formatReport } from './doctor.js';
@@ -19,6 +20,13 @@ import {
   type BuildContext, type BuildOutcome, type ResumeContext,
 } from './start/build.js';
 import type { BuildRequest } from './start/request.js';
+import { StepDecorator } from './walk/editor.js';
+import { resolveInsideTarget } from './walk/paths.js';
+import { WalkSession, type WalkAdapters } from './walk/session.js';
+import { StepViewProvider } from './walk/step-panel.js';
+import { WalkStatusBar } from './walk/status.js';
+import { hasPlan, loadPlan, loadProgress, saveProgress } from './walk/store.js';
+import { DecisionsTreeProvider } from './walk/tree.js';
 
 let outputChannel: vscode.OutputChannel | undefined;
 
@@ -116,14 +124,16 @@ async function reportOutcome(outcome: BuildOutcome | undefined, panel?: StartPan
 
 async function runBuild(context: vscode.ExtensionContext, core: CoreLoadResult, request: BuildRequest, panel: StartPanel): Promise<void> {
   await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
-  await vscode.window.withProgress(
+  const outcome = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
     async (progress, token) => {
-      const outcome = await buildFromRequest(request, buildContextFor(context, core, progress, token));
-      await reportOutcome(outcome, panel);
+      const built = await buildFromRequest(request, buildContextFor(context, core, progress, token));
+      await reportOutcome(built, panel);
+      return built;
     },
   );
   await forgetUnlessResumable(context, request.target);
+  if (outcome?.ok) await openOrOfferWalk(context, request.target);
 }
 
 async function runStartCommand(context: vscode.ExtensionContext): Promise<void> {
@@ -221,10 +231,239 @@ export async function resumeOnActivate(
     return resumeIfMarked(target, resumeCtx);
   });
   await reportOutcome(outcome);
+  if (outcome?.ok) await openOrOfferWalk(context, target);
   // Resumed to completion, or Discarded (`resumeIfMarked` removes the marker either way):
   // nothing is left to resume, so the bookmark goes too. A dismissed prompt or a failed
   // resume leaves the marker — and so keeps the bookmark — for next time.
   await forgetUnlessResumable(context, target);
+}
+
+// ── the walk (T-4) ────────────────────────────────────────────────────────────────────────
+
+/**
+ * The walk's surfaces are created ONCE per window and outlive any individual `WalkSession`,
+ * because that is what "a second open on a different target replaces the first" needs: the
+ * same tree, the same panel and the same status bar get handed a new session's view rather
+ * than being torn down and rebuilt. The session itself is the replaceable part.
+ *
+ * `walkSkins` is module state for an awkward but unavoidable reason: `activate()` is
+ * synchronous, a `WebviewViewProvider` has to be REGISTERED inside it, and repo-tour's skins
+ * arrive from an `await`. So the panel is handed a getter (`() => walkSkins`) instead of a
+ * value, and renders an honest notice until — or unless — the core actually loads.
+ */
+let walkTree: DecisionsTreeProvider | undefined;
+let walkPanel: StepViewProvider | undefined;
+let walkDecorator: StepDecorator | undefined;
+let walkStatus: WalkStatusBar | undefined;
+let walkSession: WalkSession | undefined;
+let walkSkins: StartPanelDeps['skins'] | undefined;
+
+/**
+ * Two questions, both of which have to answer yes before the walk will open a path.
+ *
+ * **Is it a FILE?** `fs.statSync(...).isFile()`, NOT `fs.existsSync` — the distinction is
+ * load-bearing, not pedantry. A `shape` step's `target.file` is a DIRECTORY (`public`,
+ * `tools`) or the synthetic `@misc` sentinel, and `existsSync` answers `true` for a directory,
+ * which would enable the panel's *Open the file* button on something `openTextDocument` then
+ * rejects. In the one large real plan we have that is 5 steps out of 61 — not an edge case.
+ * See `kb/wiki/repo-tour-plan-shapes.md`.
+ *
+ * **Is it really INSIDE the target?** `src/walk/paths.ts`'s `resolveInsideTarget` already
+ * refuses a `target.file` that spells its way out (`../../..`), and `src/walk/session.ts`
+ * calls it before this adapter is ever consulted — but that check is pure `path` arithmetic,
+ * by design: `session.ts` cannot import `fs` without breaking the plain-mocha unit bundle, and
+ * a symlink is invisible to string arithmetic anyway. `<target>/notes.md` symlinked to
+ * `~/.ssh/id_rsa` passes containment on its name and is somebody's private key on the disk.
+ * The `fs` half therefore lives here, where `fs` already does: `realpathSync` both sides —
+ * the TARGET as well as the file, because a target reached through a symlinked parent
+ * (`/tmp` on some systems, a bind mount, a home directory that is a link) would otherwise put
+ * every legitimate file "outside" itself and disable the whole walk — and require the real
+ * path to still be inside the real target (security review, finding 2).
+ *
+ * A `false` here is not an error and is never reported: it means exactly what it means
+ * everywhere else in the walk, "there is nothing to open for this step", which every surface
+ * already renders honestly. The learner did not write the plan and has nothing to fix in it.
+ * It matters now rather than later because **T-5 writes the learner's files at these same
+ * paths**, which turns this read gate into a write gate one ticket from here.
+ */
+function isOpenableFile(target: string, absPath: string): boolean {
+  try {
+    if (!fs.statSync(absPath).isFile()) return false;
+    return resolveInsideTarget(fs.realpathSync(target), fs.realpathSync(absPath)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Built per session so `target` is closed over: `WalkView` deliberately carries the plan and
+ *  the step but not the folder they came from, which is the session's own business. */
+function walkAdaptersFor(target: string): WalkAdapters {
+  return {
+    setTree: (view) => walkTree?.setView(view),
+    setPanel: (view) => walkPanel?.setView(view),
+    setStatus: (text) => walkStatus?.setText(text),
+    revealEditor: (view) => { void walkDecorator?.revealStep(target, view.step); },
+    clearEditor: () => walkDecorator?.clear(),
+    // The one place focus is taken: the learner pressed *Open the file* and asked to go there.
+    openFile: (view) => { void walkDecorator?.revealStep(target, view.step, { preserveFocus: false }); },
+    // Closed over `target`, which is the only reason this adapter can answer the containment
+    // half at all — `WalkAdapters.fileExists` is handed an absolute path and nothing else.
+    fileExists: (absPath) => isOpenableFile(target, absPath),
+    loadPlan,
+    loadProgress,
+    saveProgress,
+    // The walk's channel for a failure the LEARNER has to know about — today, a
+    // `progress.json` that cannot be written (a read-only checkout, a full disk), which costs
+    // them their place in the tutorial next time they open the folder without costing them
+    // anything now (T-4 code review, finding 4; the wording is composed in `session.ts`,
+    // which is the only thing that knows what actually failed). Surfaced the same two ways
+    // `reportOutcome` surfaces a failed build: the output channel for whoever diagnoses it,
+    // and a notification for whoever is looking at the editor rather than at a log. The
+    // session reports each standing condition once per session, so this cannot become a
+    // notification per click.
+    reportError: (message) => { reportWalkFailure(message); },
+  };
+}
+
+/**
+ * The walk's one failure channel, and the answer to "the walk silently never opens" (T-4 code
+ * review finding 2 / security review finding 5).
+ *
+ * All three ways a walk opens — activation, `buildTutorials.openWalk`, and the moment a build
+ * finishes — run the same synchronous `WalkSession.open`, and `loadPlan` THROWS on a
+ * `plan.json` that is not a build plan. Every one of those call sites is an `async` function
+ * whose promise is `void`ed, so the throw became an unhandled rejection: no notification, no
+ * output-channel line, nothing in the UI at all, and a panel confidently reading "No tutorial
+ * in this folder yet" over a folder that visibly has one. Three surfaces, because each covers
+ * a person the others miss: the output channel for whoever is diagnosing it later, a
+ * notification for whoever is looking at their code right now, and `StepViewProvider.setNotice`
+ * for whoever opens the Build Tutorials container afterwards and finds it — the only one of
+ * the three that is still there in five minutes' time.
+ *
+ * `panelNotice` is OPTIONAL because the other caller must not pass one. `WalkAdapters.
+ * reportError` (a `progress.json` that will not save, code review finding 4) is a failure
+ * ALONGSIDE a walk that is working perfectly well — the panel is showing a live step, and
+ * replacing that step with a notice would take the tutorial away to complain about a file. A
+ * notice belongs here only when there is genuinely nothing else for the panel to show.
+ */
+function reportWalkFailure(message: string, panelNotice?: string): void {
+  getOutputChannel().appendLine(`walk: ${message}`);
+  if (panelNotice !== undefined) walkPanel?.setNotice(panelNotice);
+  void vscode.window.showErrorMessage(`Build Tutorials: ${message}`);
+}
+
+/** The spec's rule, verbatim: the walk opens for any workspace folder that contains
+ *  `.repo-tour/build/plan.json`. `hasPlan` is a single `existsSync`, so asking on every
+ *  activation costs nothing. */
+function folderWithPlan(): string | undefined {
+  return vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath).find(hasPlan);
+}
+
+/**
+ * Always replaces: after a REBUILD the plan on disk is a different plan, so re-reading it is
+ * the point, not waste.
+ *
+ * The `try` is here rather than at each of the three call sites deliberately — it is the one
+ * funnel every way of opening a walk already goes through, so a FOURTH entry point added later
+ * inherits the handling instead of quietly reintroducing the silent failure. `loadPlan` is the
+ * throw it is written for (a malformed `plan.json`), but everything `WalkSession.open` does
+ * synchronously is inside it, because "the walk did not open and nobody was told" is the
+ * failure being closed, not "this one function threw".
+ *
+ * `walkSession` is cleared BEFORE the attempt, not merely reassigned after it. The old code
+ * left the disposed session in the variable when `open` threw, so `deps.session()` went on
+ * handing the step panel a session whose every method is a no-op — a walk that answers clicks
+ * with silence, which is precisely the symptom this whole fix exists to remove.
+ */
+function openWalkAt(target: string): void {
+  walkSession?.dispose();
+  walkSession = undefined;
+  try {
+    walkSession = WalkSession.open(target, walkAdaptersFor(target));
+    walkPanel?.setNotice(undefined);
+  } catch (error) {
+    const reason = error instanceof Error && error.message.length > 0 ? error.message : String(error);
+    reportWalkFailure(
+      `the tutorial in ${target} could not be opened: ${reason}`,
+      `This folder's tutorial could not be opened. ${reason}`,
+    );
+  }
+}
+
+/** Loaded once, lazily, and never retried in a loop: a missing core is a standing condition
+ *  the doctor explains, not something to re-ask on every keystroke. */
+async function ensureWalkSkins(context: vscode.ExtensionContext): Promise<void> {
+  if (walkSkins) return;
+  const core = await loadCore(configuredRepoTourRoot(context));
+  if (core.found) walkSkins = core.loaded['skins'] as StartPanelDeps['skins'];
+}
+
+function registerWalk(context: vscode.ExtensionContext): void {
+  walkTree = new DecisionsTreeProvider();
+  walkDecorator = new StepDecorator();
+  walkStatus = new WalkStatusBar();
+  walkPanel = new StepViewProvider(context, {
+    skins: () => walkSkins,
+    session: () => walkSession,
+    log: (line) => { getOutputChannel().appendLine(`step panel: ${line}`); },
+  });
+
+  context.subscriptions.push(
+    walkTree,
+    walkDecorator,
+    walkStatus,
+    // The provider itself, ONE entry for the window's whole life. It owns the listeners it
+    // hooks in `resolveWebviewView` and replaces them on each re-resolve, rather than
+    // appending three more of them here every time the view is dragged to another container
+    // (T-4 code review, finding 9).
+    walkPanel,
+    vscode.window.registerTreeDataProvider('buildTutorials.decisions', walkTree),
+    // No `webviewOptions.retainContextWhenHidden`: VS Code's default is `false`, and false is
+    // exactly what AC5 asks for — a hidden view is torn down and re-rendered FROM THE HOST
+    // when it comes back, so the panel can never become a second source of truth.
+    vscode.window.registerWebviewViewProvider(StepViewProvider.viewType, walkPanel),
+  );
+}
+
+/** On activation: the cheap question first (is there a plan in any open folder at all?), and
+ *  nothing is paid for until its answer is yes — the same discipline `resumeOnActivate`
+ *  follows, and for the same reason. */
+async function openWalkOnActivate(context: vscode.ExtensionContext): Promise<void> {
+  const target = folderWithPlan();
+  if (!target) return;
+  await ensureWalkSkins(context);
+  openWalkAt(target);
+}
+
+/**
+ * After a build lands: walk it here if "here" is where it was built, otherwise offer to go
+ * there. Deliberately NOT `workspaceState` juggling across windows (spec's refinement notes) —
+ * the new window detects the plan on its own activation, by the same rule as every other
+ * window.
+ */
+async function openOrOfferWalk(context: vscode.ExtensionContext, target: string): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
+  if (folders.includes(target)) {
+    await ensureWalkSkins(context);
+    openWalkAt(target);
+    await vscode.commands.executeCommand('buildTutorials.step.focus');
+    return;
+  }
+  const choice = await vscode.window.showInformationMessage('Plan built — open the folder to start?', 'Open the folder');
+  if (choice === 'Open the folder') await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(target));
+}
+
+async function runOpenWalkCommand(context: vscode.ExtensionContext): Promise<void> {
+  const target = folderWithPlan();
+  if (!target) {
+    await vscode.window.showInformationMessage(
+      'Build Tutorials: no tutorial in this folder yet — run "Build Tutorials: Start" to build one.',
+    );
+    return;
+  }
+  await ensureWalkSkins(context);
+  if (walkSession?.target !== target) openWalkAt(target);
+  await vscode.commands.executeCommand('buildTutorials.step.focus');
 }
 
 /** Returned from `activate()` as this extension's public API — see @types/vscode's
@@ -233,18 +472,64 @@ export async function resumeOnActivate(
  *  with, short of duplicating activation itself. */
 export interface ExtensionApi {
   _context: vscode.ExtensionContext;
+  /**
+   * vscode-test only, and for the same reason `_context` is here: the walk's surfaces are
+   * created inside `activate()` and held in module state, and there is no supported way for a
+   * test to reach the REGISTERED tree and webview-view providers — the only ones VS Code will
+   * actually resolve and re-render — short of duplicating activation itself, which would prove
+   * something about a copy rather than about what ships.
+   *
+   * Getters, not values: every one of these is replaced over the window's life (the session on
+   * every `openAt`, the rest never, but a value snapshot would quietly stop being true).
+   * `openAt` exists because a test's fixture folder is not a workspace folder, so
+   * `folderWithPlan()` cannot find it — it is the same path `runOpenWalkCommand` takes, minus
+   * the folder lookup.
+   */
+  _walk: {
+    session: () => WalkSession | undefined;
+    tree: () => DecisionsTreeProvider | undefined;
+    panel: () => StepViewProvider | undefined;
+    decorator: () => StepDecorator | undefined;
+    openAt: (target: string) => Promise<void>;
+  };
 }
 
 export function activate(context: vscode.ExtensionContext): ExtensionApi {
+  registerWalk(context);
   context.subscriptions.push(
     vscode.commands.registerCommand('buildTutorials.doctor', () => runDoctorCommand(context)),
     vscode.commands.registerCommand('buildTutorials.start', () => runStartCommand(context)),
+    vscode.commands.registerCommand('buildTutorials.openWalk', () => runOpenWalkCommand(context)),
+    vscode.commands.registerCommand('buildTutorials.nextStep', () => { walkSession?.next(); }),
+    vscode.commands.registerCommand('buildTutorials.prevStep', () => { walkSession?.prev(); }),
+    // The tree hands this the step's own id. `unknown`, and checked: the command is also
+    // reachable by hand (it is hidden from the palette, not from `executeCommand`), and
+    // `WalkSession.goTo` already ignores an id the plan does not contain.
+    vscode.commands.registerCommand('buildTutorials.goToStep', (stepId: unknown) => {
+      if (typeof stepId === 'string') walkSession?.goTo(stepId);
+    }),
   );
   void resumeOnActivate(context);
-  return { _context: context };
+  void openWalkOnActivate(context);
+  return {
+    _context: context,
+    _walk: {
+      session: () => walkSession,
+      tree: () => walkTree,
+      panel: () => walkPanel,
+      decorator: () => walkDecorator,
+      openAt: async (target: string) => {
+        await ensureWalkSkins(context);
+        openWalkAt(target);
+      },
+    },
+  };
 }
 
 export function deactivate(): void {
+  walkSession?.dispose();
+  walkSession = undefined;
+  walkSkins = undefined;
   outputChannel?.dispose();
   outputChannel = undefined;
 }

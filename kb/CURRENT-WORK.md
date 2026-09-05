@@ -9,6 +9,11 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
+  `feature/T-4-walk` in worktree `VSCode-LLM-Tutorial-T-4` (commit `59b1326`): plan steps 1+3
+  done (pure `src/walk/{model,store,step-protocol}.ts`, no `vscode` import, typecheck/lint/
+  build clean, baseline 89 unit + 20 vscode-test unaffected); wound down for the night before
+  step 2 (`step-view.ts`). Full resume plan (incl. the `WalkSession`-must-not-import-`vscode`
+  constraint and the decoration/webview-view test-seam gotchas): `.autodev/handoffs/T-4.md`.
   `feature/T-3-start-screen` in worktree `VSCode-LLM-Tutorial-T-3`; all 7 ACs built (core
   surface, skin bridge, webview shell, request validation, protocol/view layer, panel wiring
   with `reportProblem` so a build-time refusal surfaces in the form, and `build.ts` — marker,
