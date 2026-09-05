@@ -15,7 +15,7 @@ import { loadCore, resolveCoreRoot, type CoreLoadResult } from './core.js';
 import { runDoctor, formatReport } from './doctor.js';
 import { StartPanel, type StartPanelDeps } from './start/panel.js';
 import {
-  buildFromRequest, completionMessage, coreFor, realGit, resumeIfMarked,
+  buildFromRequest, completionMessage, coreFor, readFreshMarker, readMarker, realGit, resumeIfMarked,
   type BuildContext, type BuildOutcome, type ResumeContext,
 } from './start/build.js';
 import type { BuildRequest } from './start/request.js';
@@ -45,8 +45,23 @@ async function runDoctorCommand(context: vscode.ExtensionContext): Promise<void>
   for (const line of formatReport(report)) channel.appendLine(line);
 }
 
-/** Remembers, per window, which target the last build/resume was for (spec §5.2, plan step 6e). */
+/**
+ * Remembers, per window, which target the last build/resume was for (spec §5.2, plan step 6e).
+ *
+ * A POINTER AT A POSSIBLE MARKER, nothing more — deliberately not a record that a build ever
+ * happened here. The durable state is on disk: `<target>/.repo-tour/build/plan.json` is what
+ * T-4's walk looks for, never this key. So the moment there is no marker left at the target
+ * (the build finished, was refused, was cancelled, was discarded, or simply went stale), the
+ * key has no job and is cleared — otherwise every future activation of this window would pay
+ * to re-answer a question that can only ever come back "nothing to do" (T-3 rework, review
+ * finding 1).
+ */
 const CURRENT_BUILD_KEY = 'buildTutorials.currentBuild';
+
+/** Clears the bookmark unless a marker is still sitting at `target` waiting to be resumed. */
+async function forgetUnlessResumable(context: vscode.ExtensionContext, target: string): Promise<void> {
+  if (readMarker(target) === null) await context.workspaceState.update(CURRENT_BUILD_KEY, undefined);
+}
 
 /** `buildTutorials.llmModel`'s default is `""`: resolved here from repo-tour's own DEFAULT_MODEL
  *  export rather than a copy hardcoded in package.json that could drift out of sync. */
@@ -108,6 +123,7 @@ async function runBuild(context: vscode.ExtensionContext, core: CoreLoadResult, 
       await reportOutcome(outcome, panel);
     },
   );
+  await forgetUnlessResumable(context, request.target);
 }
 
 async function runStartCommand(context: vscode.ExtensionContext): Promise<void> {
@@ -129,29 +145,82 @@ async function runStartCommand(context: vscode.ExtensionContext): Promise<void> 
 }
 
 /**
- * On activation: if the last build this window remembers has a write-ahead marker on disk
- * (a reload or a crash interrupted it), offer to resume — never silently, and never without
- * asking (spec §5.2). No marker, no remembered target, or a missing core: quietly does
- * nothing, since `buildTutorials.doctor` is where a missing-core problem gets explained.
+ * The three things `resumeOnActivate` reaches outside itself for. Injected the way
+ * `src/start/build.ts` injects `git`, and for the same reason: this runs on EVERY window
+ * activation, so "it does nothing, cheaply, when there is nothing to resume" is a property
+ * a test has to be able to prove, and neither `loadCore` nor a notification is observable
+ * from outside otherwise (T-3 rework, review finding 1).
  */
-async function resumeOnActivate(context: vscode.ExtensionContext): Promise<void> {
+export interface ResumeDeps {
+  // Declared as function-valued PROPERTIES, not method shorthand: `confirm` below is handed
+  // straight to `resumeIfMarked` unbound, which the `@typescript-eslint/unbound-method` rule
+  // rightly refuses for a method.
+  loadCore: (root: string) => Promise<CoreLoadResult>;
+  withProgress: <T>(
+    task: (progress: vscode.Progress<{ message?: string }>, token: vscode.CancellationToken) => Promise<T>,
+  ) => Promise<T>;
+  /** The Resume/Discard prompt. `undefined` = dismissed, which leaves the marker for next time. */
+  confirm: (message: string) => Promise<'Resume' | 'Discard' | undefined>;
+}
+
+const REAL_RESUME_DEPS: ResumeDeps = {
+  loadCore: (root) => loadCore(root),
+  withProgress: (task) => Promise.resolve(vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
+    (progress, token) => task(progress, token),
+  )),
+  confirm: (message) => Promise.resolve(vscode.window.showInformationMessage(message, 'Resume', 'Discard')),
+};
+
+/**
+ * On activation: if the last build this window remembers has a FRESH write-ahead marker on
+ * disk (a reload or a crash interrupted it within the last 6 hours), offer to resume — never
+ * silently, and never without asking (spec §5.2).
+ *
+ * The order here is the whole point. `readFreshMarker` is a single `fs.readFileSync` and a
+ * clock comparison; loading repo-tour's core and opening a progress notification are not. So
+ * the cheap question is asked FIRST, and nothing is paid for until its answer is yes — no
+ * marker (or one older than 6 hours) means this bookmark can never do anything again, so it
+ * is cleared and we return, before any core load and before any UI. Before the rework this
+ * function committed to both up front and only discovered there was nothing to do inside
+ * `resumeIfMarked`, which meant every activation of any workspace that had ever run a build
+ * reloaded the whole core and flashed an empty notification, forever (review finding 1).
+ *
+ * A missing core with a fresh marker is the one case the bookmark survives: the marker is
+ * still resumable, it is the core that is missing, and `buildTutorials.doctor` is where that
+ * gets explained.
+ *
+ * Exported for `test/extension.test.ts`, which drives it with fake `deps` — VS Code's
+ * `Extension.activate()` is idempotent within one process, so a second real activation is
+ * not something a test can stage.
+ */
+export async function resumeOnActivate(
+  context: vscode.ExtensionContext,
+  deps: ResumeDeps = REAL_RESUME_DEPS,
+): Promise<void> {
   const target = context.workspaceState.get<string>(CURRENT_BUILD_KEY);
   if (!target) return;
 
-  const core = await loadCore(configuredRepoTourRoot(context));
-  if (!core.found) return;
+  if (!readFreshMarker(target)) {
+    await context.workspaceState.update(CURRENT_BUILD_KEY, undefined);
+    return;
+  }
 
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
-    async (progress, token) => {
-      const resumeCtx: ResumeContext = {
-        ...buildContextFor(context, core, progress, token),
-        confirm: (message) => Promise.resolve(vscode.window.showInformationMessage(message, 'Resume', 'Discard')),
-      };
-      const outcome = await resumeIfMarked(target, resumeCtx);
-      await reportOutcome(outcome);
-    },
-  );
+  const core = await deps.loadCore(configuredRepoTourRoot(context));
+  if (!core.found) return; // the marker is still good; the core is what is missing
+
+  const outcome = await deps.withProgress(async (progress, token) => {
+    const resumeCtx: ResumeContext = {
+      ...buildContextFor(context, core, progress, token),
+      confirm: deps.confirm,
+    };
+    return resumeIfMarked(target, resumeCtx);
+  });
+  await reportOutcome(outcome);
+  // Resumed to completion, or Discarded (`resumeIfMarked` removes the marker either way):
+  // nothing is left to resume, so the bookmark goes too. A dismissed prompt or a failed
+  // resume leaves the marker — and so keeps the bookmark — for next time.
+  await forgetUnlessResumable(context, target);
 }
 
 /** Returned from `activate()` as this extension's public API — see @types/vscode's

@@ -138,6 +138,9 @@ export interface BuildMarker {
   request: BuildRequest;
 }
 
+/** How long an interrupted build stays worth offering to resume (plan step 6e). */
+const STALE_AFTER_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 export function buildDir(target: string): string {
   return path.join(target, '.repo-tour', 'build');
 }
@@ -146,12 +149,41 @@ export function markerPath(target: string): string {
   return path.join(buildDir(target), 'building.json');
 }
 
-/** Write-ahead: written to a temp file and renamed over the real one — never a half-written marker. */
-function writeMarker(target: string, marker: BuildMarker): void {
-  fs.mkdirSync(buildDir(target), { recursive: true });
-  const tmp = `${markerPath(target)}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(marker, null, 2));
-  fs.renameSync(tmp, markerPath(target));
+/**
+ * The three filesystem calls every durable write in this file makes, as one swappable
+ * record. Real by default; a test injects a version whose `renameSync` throws to prove what
+ * a crash at the worst possible instant actually leaves on disk (`BuildContext.writeOps`).
+ */
+export interface FsWriteOps {
+  mkdirSync(dir: string): void;
+  writeFileSync(file: string, data: string): void;
+  renameSync(from: string, to: string): void;
+}
+
+export const realFsWriteOps: FsWriteOps = {
+  mkdirSync: (dir) => { fs.mkdirSync(dir, { recursive: true }); },
+  writeFileSync: (file, data) => { fs.writeFileSync(file, data); },
+  renameSync: (from, to) => { fs.renameSync(from, to); },
+};
+
+/**
+ * Every durable write this file makes goes through here: serialise to `<file>.tmp` in the
+ * SAME directory, then rename it over the real name. A rename within one filesystem is
+ * atomic, so a crash leaves either the previous file or the complete new one — never a
+ * truncated half file. Used for the write-ahead marker AND (T-3 rework, review finding 2)
+ * for `plan.json`/`request.json`, which used to be plain `writeFileSync` calls: a crash
+ * mid-write could leave a corrupt plan behind for T-4's walk to trip over.
+ */
+export function writeJsonAtomic(filePath: string, value: unknown, ops: FsWriteOps = realFsWriteOps): void {
+  ops.mkdirSync(path.dirname(filePath));
+  const tmp = `${filePath}.tmp`;
+  ops.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  ops.renameSync(tmp, filePath);
+}
+
+/** Write-ahead: temp file + rename, so there is never a half-written marker. */
+function writeMarker(target: string, marker: BuildMarker, ops: FsWriteOps = realFsWriteOps): void {
+  writeJsonAtomic(markerPath(target), marker, ops);
 }
 
 export function readMarker(target: string): BuildMarker | null {
@@ -160,6 +192,20 @@ export function readMarker(target: string): BuildMarker | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The marker at `target`, but only while it is still worth offering to resume (the same
+ * 6-hour rule `resumeIfMarked` applies). A plain `fs` read and a clock comparison — no core
+ * load, no notification — so activation can ask "is there anything to resume here?" before
+ * paying for either (T-3 rework, review finding 1; see `src/extension.ts`).
+ */
+export function readFreshMarker(target: string, now: () => number = Date.now): BuildMarker | null {
+  const marker = readMarker(target);
+  if (!marker) return null;
+  const ageMs = now() - new Date(marker.startedAt).getTime();
+  if (ageMs > STALE_AFTER_MS) return null; // old enough that we stay quiet about it
+  return marker;
 }
 
 function deleteMarker(target: string): void {
@@ -185,6 +231,9 @@ export interface BuildContext {
   onPhase?: (phase: BuildPhase) => void;
   /** Polled between phases; returning true stops the build (cancelled from the progress notification). */
   isCancelled?: () => boolean;
+  /** Swappable filesystem writes — a test makes `renameSync` fail exactly where a crash
+   *  would hurt most and asserts what is left on disk. Defaults to `realFsWriteOps`. */
+  writeOps?: FsWriteOps;
 }
 
 export interface BuildOutcome {
@@ -199,7 +248,7 @@ export interface BuildOutcome {
 /** Advances the marker to `phase`, durably (write-ahead), before that phase's own work runs. */
 function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: BuildContext): void {
   marker.phase = phase;
-  writeMarker(target, marker);
+  writeMarker(target, marker, ctx.writeOps ?? realFsWriteOps);
   ctx.onPhase?.(phase);
 }
 
@@ -269,9 +318,13 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
 
   try {
     ctx.onProgress?.('writing the plan…');
-    fs.mkdirSync(buildDir(target), { recursive: true });
-    fs.writeFileSync(path.join(buildDir(target), 'plan.json'), JSON.stringify(interpreted.plan, null, 2));
-    fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify(request, null, 2));
+    // Atomic, and in this order on purpose: `request.json` first, then `plan.json`, then the
+    // marker goes. At every instant in between, what is on disk is either a marker (so a
+    // Resume finishes the job) or a COMPLETE plan — never a half-written file with nothing
+    // left to signal that it is broken (T-3 rework, review finding 2).
+    const writeOps = ctx.writeOps ?? realFsWriteOps;
+    writeJsonAtomic(path.join(buildDir(target), 'request.json'), request, writeOps);
+    writeJsonAtomic(path.join(buildDir(target), 'plan.json'), interpreted.plan, writeOps);
   } catch (err) {
     return fail(err);
   }
@@ -307,8 +360,6 @@ export function completionMessage(plan: BuildPlanLike, cost: InterpretCostLike):
 
 // ── resuming after a reload (AC4) ───────────────────────────────────────────────────────────
 
-const STALE_AFTER_MS = 6 * 60 * 60 * 1000; // 6 hours (plan step 6e)
-
 export interface ResumeContext extends BuildContext {
   now?: () => number;
   /** Prompts Resume/Discard; `undefined` = dismissed (leaves the marker for next time). */
@@ -322,12 +373,8 @@ export interface ResumeContext extends BuildContext {
  */
 export async function resumeIfMarked(target: string | undefined, ctx: ResumeContext): Promise<BuildOutcome | undefined> {
   if (!target) return undefined;
-  const marker = readMarker(target);
+  const marker = readFreshMarker(target, ctx.now ?? Date.now);
   if (!marker) return undefined;
-
-  const now = ctx.now ?? Date.now;
-  const ageMs = now() - new Date(marker.startedAt).getTime();
-  if (ageMs > STALE_AFTER_MS) return undefined; // old enough that we stay quiet about it
 
   const answer = await ctx.confirm(`A build for ${target} was interrupted (in progress: ${marker.phase}). Resume it?`);
   if (answer === 'Discard') {
