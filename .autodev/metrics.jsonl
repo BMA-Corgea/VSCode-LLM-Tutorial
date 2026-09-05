@@ -14,3 +14,7 @@
 {"ts":"2026-09-04T23:53:56.959Z","kind":"stage.advanced","ticket":"T-2","from":"uat","to":"release"}
 {"ts":"2026-09-04T23:53:57.004Z","kind":"stage.advanced","ticket":"T-2","from":"release","to":"monitor"}
 {"ts":"2026-09-04T23:53:57.049Z","kind":"pipeline.complete","ticket":"T-2","at":"monitor"}
+{"ts":"2026-09-05T00:03:30.187Z","kind":"stage.advanced","ticket":"T-3","from":"intake","to":"refine"}
+{"ts":"2026-09-05T00:03:30.737Z","kind":"stage.advanced","ticket":"T-3","from":"refine","to":"queue"}
+{"ts":"2026-09-05T00:03:30.826Z","kind":"stage.advanced","ticket":"T-3","from":"queue","to":"locate"}
+{"ts":"2026-09-05T00:03:30.928Z","kind":"stage.advanced","ticket":"T-3","from":"locate","to":"plan"}
