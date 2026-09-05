@@ -141,6 +141,10 @@ async function runStartCommand(context: vscode.ExtensionContext): Promise<void> 
   const panel: StartPanel = StartPanel.show(context, {
     skins,
     onSubmit: (request) => { void runBuild(context, core, request, panel); },
+    // A message from the webview that does not match any known shape is ignored, not acted
+    // on and never thrown (T-3 rework, review finding 3) — this is where it gets said out
+    // loud, so a page that has quietly stopped working is explainable rather than a mystery.
+    log: (line) => { getOutputChannel().appendLine(`start screen: ${line}`); },
   });
 }
 

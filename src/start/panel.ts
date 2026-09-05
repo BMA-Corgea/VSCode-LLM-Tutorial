@@ -16,18 +16,32 @@ import * as vscode from 'vscode';
 import { readSkin, writeSkin } from '../skins.js';
 import { emptyRequest, type BuildRequest, type RequestField } from './request.js';
 import {
-  handleStartMessage, type InboundMessage, type OutboundMessage, type PanelState, type PickTarget, type StartEffects,
+  handleStartMessage, parseInboundMessage, type OutboundMessage, type PanelState, type PickTarget, type StartEffects,
 } from './protocol.js';
 import { renderStartHtml, type SkinsModule } from './view.js';
 
 const VIEW_TYPE = 'buildTutorials.start';
 const VIEW_TITLE = 'Build Tutorials: Start';
 
+/** A one-line, length-capped rendering of an ignored message, for the output channel. */
+function describe(raw: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(raw) ?? String(raw);
+  } catch {
+    text = Object.prototype.toString.call(raw); // circular, a BigInt, …
+  }
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
 export interface StartPanelDeps {
   /** repo-tour's own skins module (SKINS, DEFAULT_SKIN, baseCss, alternateCss), loaded via loadCore. */
   skins: SkinsModule & { DEFAULT_SKIN: string };
   /** Called on a validated form:submit. Fire-and-forget from the panel's own point of view. */
   onSubmit(request: BuildRequest): void;
+  /** Where an ignored message gets mentioned — `src/extension.ts` wires the "Build Tutorials"
+   *  output channel. Optional so a test can observe it (or leave it silent). */
+  log?: (line: string) => void;
 }
 
 export class StartPanel {
@@ -36,6 +50,8 @@ export class StartPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly effects: StartEffects;
   private state: PanelState;
+  /** See `onMessage`: the channel gets one line about ignored messages, not one per message. */
+  private loggedIgnoredMessage = false;
 
   private constructor(context: vscode.ExtensionContext, private readonly deps: StartPanelDeps) {
     const skin = readSkin(context.globalState, deps.skins.DEFAULT_SKIN);
@@ -61,7 +77,10 @@ export class StartPanel {
     });
     this.render();
 
-    this.panel.webview.onDidReceiveMessage((message: InboundMessage) => { void this.onMessage(message); }, undefined, context.subscriptions);
+    // `raw`, not `InboundMessage`: what arrives here is whatever the webview posted, and a
+    // compile-time annotation is not a run-time guarantee about a value from outside the
+    // compiler's reach. `onMessage` parses it (T-3 rework, review finding 3).
+    this.panel.webview.onDidReceiveMessage((raw: unknown) => { void this.onMessage(raw); }, undefined, context.subscriptions);
     this.panel.onDidChangeViewState((e) => {
       if (e.webviewPanel.visible) this.render();
     }, undefined, context.subscriptions);
@@ -110,7 +129,26 @@ export class StartPanel {
     this.panel.webview.html = renderStartHtml(this.state, this.deps.skins);
   }
 
-  private async onMessage(message: InboundMessage): Promise<OutboundMessage | undefined> {
+  /**
+   * Parse, then act — never the other way round. Anything that is not a message this screen
+   * knows, in exactly the shape that message promises, is IGNORED: no throw (this is called
+   * from a `void`-ed promise, where a rejection has nobody listening and becomes an unhandled
+   * rejection), no reply, no state change. The output channel gets ONE line about it per
+   * panel — enough to explain a webview that has silently stopped working, without handing a
+   * misbehaving (or malicious) page a way to fill the log.
+   */
+  private async onMessage(raw: unknown): Promise<OutboundMessage | undefined> {
+    const message = parseInboundMessage(raw);
+    if (!message) {
+      if (!this.loggedIgnoredMessage) {
+        this.loggedIgnoredMessage = true;
+        this.deps.log?.(
+          `ignored a start-screen message that did not match any known message shape: ${describe(raw)} ` +
+          '(further ignored messages will not be logged)',
+        );
+      }
+      return undefined;
+    }
     const { state, post } = await handleStartMessage(this.state, message, this.effects);
     this.state = state;
     if (post) void this.panel.webview.postMessage(post);
@@ -124,9 +162,12 @@ export class StartPanel {
    * `test/unit/protocol.test.ts` already covers with no webview at all — calls this instead
    * of simulating a real `postMessage` from inside the iframe. It runs the exact same
    * `onMessage` the real `webview.onDidReceiveMessage` listener calls.
+   *
+   * `unknown`, deliberately: the real listener's argument is untyped too, and a malformed
+   * message is exactly the case worth proving is survivable (T-3 rework, review finding 3).
    */
-  dispatchForTest(message: InboundMessage): Promise<OutboundMessage | undefined> {
-    return this.onMessage(message);
+  dispatchForTest(raw: unknown): Promise<OutboundMessage | undefined> {
+    return this.onMessage(raw);
   }
 
   /**

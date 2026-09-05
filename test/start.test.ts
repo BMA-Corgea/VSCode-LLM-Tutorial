@@ -238,3 +238,73 @@ suite('StartPanel.reportProblem — a build-time refusal surfaces in the form (A
     assert.match(problems.repo ?? '', /is go; the grammars repo-tour ships cover TS, JS, TSX and Python/);
   });
 });
+
+// ── T-3 rework, review finding 3: a malformed message from the webview is IGNORED ─────────
+//
+// `test/unit/protocol.test.ts` proves `parseInboundMessage` returns null for each of the
+// reviewer's three probes with no webview at all. What only a real extension host can prove
+// is the other half: that the same probes, dispatched through the panel's own listener path
+// (`onMessage`, which the real `onDidReceiveMessage` calls as `void this.onMessage(raw)`),
+// resolve to `undefined` instead of rejecting — because a rejection there has nobody
+// listening and becomes an unhandled promise rejection.
+
+suite('StartPanel ignores malformed webview messages (review finding 3)', () => {
+  let panel: StartPanel | undefined;
+
+  teardown(() => {
+    panel?.dispose();
+    panel = undefined;
+  });
+
+  const PROBES: Array<[string, unknown]> = [
+    ['a non-string field in the request', { type: 'form:submit', payload: { request: { idea: '', recreate: true, repo: 12345, target: { evil: true }, dial: 'manual' } } }],
+    ['a null request payload', { type: 'form:submit', payload: { request: null } }],
+    ['a missing payload entirely', { type: 'form:changed' }],
+    ['an unrecognised message type', { type: 'evil:message' }],
+    ['not an object at all', 'evil:message'],
+    ['null', null],
+  ];
+
+  test('each probe resolves to undefined, never throws, and never starts a build', async () => {
+    const context = await getContext();
+    const skins = await realSkins(context);
+    const logged: string[] = [];
+    panel = StartPanel.show(context, {
+      skins,
+      onSubmit: () => { throw new Error('a malformed message must never start a build'); },
+      log: (line) => { logged.push(line); },
+    });
+
+    for (const [label, probe] of PROBES) {
+      const reply = await panel.dispatchForTest(probe);
+      assert.equal(reply, undefined, `${label}: an ignored message must post no reply`);
+    }
+
+    // Ignored, not acted on: the panel's own state is untouched by any of the six.
+    assert.deepEqual(panel.getStateForTest().request, emptyRequest());
+    assert.deepEqual(panel.getStateForTest().problems, {});
+    // "Logs once" is literal — six ignored messages, one line, so a page stuck in a loop
+    // cannot fill the output channel.
+    assert.equal(logged.length, 1, `expected exactly one log line, got ${JSON.stringify(logged)}`);
+    assert.match(logged[0]!, /did not match any known message shape/);
+  });
+
+  test('a WELL-FORMED message dispatched the same way still works (discriminates)', async () => {
+    const context = await getContext();
+    const skins = await realSkins(context);
+    const logged: string[] = [];
+    let submitted: BuildRequest | undefined;
+    panel = StartPanel.show(context, { skins, onSubmit: (req) => { submitted = req; }, log: (line) => { logged.push(line); } });
+
+    // Sent as a plain object typed `unknown`, exactly as it would arrive over postMessage —
+    // proving the guard passes real traffic through, not merely that it rejects garbage.
+    const request: BuildRequest = { idea: '', recreate: true, repo: tmpDir('start-test-repo-'), target: tmpDir('start-test-target-'), dial: 'manual' };
+    const raw: unknown = JSON.parse(JSON.stringify({ type: 'form:submit', payload: { request } }));
+
+    const reply = await panel.dispatchForTest(raw);
+
+    assert.deepEqual(reply, { type: 'form:problems', payload: { problems: {} } });
+    assert.deepEqual(submitted, request);
+    assert.deepEqual(logged, [], 'a valid message must not be logged as ignored');
+  });
+});

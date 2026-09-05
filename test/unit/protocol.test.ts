@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { emptyRequest, IDEA_FIRST_MESSAGE, type BuildRequest } from '../../src/start/request.js';
-import { handleStartMessage, type PanelState, type StartEffects } from '../../src/start/protocol.js';
+import { handleStartMessage, parseInboundMessage, type PanelState, type StartEffects } from '../../src/start/protocol.js';
 
 function tmpEmptyDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'build-tutorials-protocol-'));
@@ -124,5 +124,110 @@ suite('handleStartMessage — skin:set', () => {
     assert.equal(result.post, undefined);
     assert.equal(result.state.skin, 'gunmetal');
     assert.deepEqual(effects.persisted, ['gunmetal']);
+  });
+});
+
+// ── T-3 rework, review finding 3: nothing reaches handleStartMessage unparsed ──────────────
+//
+// The three probes below are the reviewer's own, verbatim: fed to the real compiled
+// `handleStartMessage` they threw `TypeError: repo.trim is not a function`, threw from the
+// exhaustive `default` branch, and threw `Cannot read properties of null`. Dispatched from a
+// real `onDidReceiveMessage` (which calls `void this.onMessage(...)`) each became an
+// unhandled promise rejection. `parseInboundMessage` is the gate that now stops all three.
+
+const VALID_REQUEST = { idea: '', recreate: true, repo: '/tmp/x', target: '/tmp/y', dial: 'manual' };
+
+suite('parseInboundMessage — the reviewer\'s three probes (review finding 3)', () => {
+  test('probe 1: a non-string field in the request -> null (never a TypeError from validateRepo)', () => {
+    assert.equal(
+      parseInboundMessage({ type: 'form:submit', payload: { request: { ...VALID_REQUEST, repo: 12345, target: { evil: true } } } }),
+      null,
+    );
+  });
+
+  test('probe 2: a null payload/request -> null (never "Cannot read properties of null")', () => {
+    assert.equal(parseInboundMessage({ type: 'form:submit', payload: { request: null } }), null);
+    assert.equal(parseInboundMessage({ type: 'form:submit', payload: null }), null);
+    assert.equal(parseInboundMessage({ type: 'form:changed' }), null, 'a missing payload entirely');
+  });
+
+  test('probe 3: an unknown message type -> null (never a throw from the default branch)', () => {
+    assert.equal(parseInboundMessage({ type: 'evil:message' }), null);
+    assert.equal(parseInboundMessage({ type: 'evil:message', payload: { request: VALID_REQUEST } }), null);
+  });
+
+  test('nothing at all, or the wrong kind of thing entirely, is also just null', () => {
+    for (const raw of [null, undefined, 42, 'form:submit', [], [{ type: 'form:submit' }], { }, { type: 7 }]) {
+      assert.equal(parseInboundMessage(raw), null, `expected null for ${JSON.stringify(raw)}`);
+    }
+  });
+
+  test('a field of the right NAME but the wrong type is caught, field by field', () => {
+    const bad: Array<Record<string, unknown>> = [
+      { ...VALID_REQUEST, idea: 1 },
+      { ...VALID_REQUEST, recreate: 'true' },  // a string, not a boolean
+      { ...VALID_REQUEST, repo: null },
+      { ...VALID_REQUEST, target: ['/tmp'] },
+      { ...VALID_REQUEST, dial: 'turbo' },     // not one of the three
+      { ...VALID_REQUEST, dial: 3 },
+      { idea: '', recreate: true, repo: '/tmp/x', target: '/tmp/y' }, // dial missing entirely
+    ];
+    for (const request of bad) {
+      assert.equal(
+        parseInboundMessage({ type: 'form:submit', payload: { request } }), null,
+        `expected null for request ${JSON.stringify(request)}`,
+      );
+    }
+  });
+});
+
+suite('parseInboundMessage — every real message still gets through (discriminates)', () => {
+  test('form:submit / form:changed with a well-formed request parse to exactly that message', () => {
+    for (const type of ['form:submit', 'form:changed'] as const) {
+      assert.deepEqual(
+        parseInboundMessage({ type, payload: { request: VALID_REQUEST } }),
+        { type, payload: { request: VALID_REQUEST } },
+      );
+    }
+  });
+
+  test('each dial position is accepted', () => {
+    for (const dial of ['manual', 'scaffolded', 'automated']) {
+      const parsed = parseInboundMessage({ type: 'form:submit', payload: { request: { ...VALID_REQUEST, dial } } });
+      assert.equal(parsed?.type === 'form:submit' ? parsed.payload.request.dial : undefined, dial);
+    }
+  });
+
+  test('unknown extra keys are dropped, not carried into the request (request.json stays clean)', () => {
+    const parsed = parseInboundMessage({
+      type: 'form:changed',
+      payload: { request: { ...VALID_REQUEST, __proto__hack: 'x', extra: { deep: true } }, alsoIgnored: 1 },
+    });
+    assert.deepEqual(parsed, { type: 'form:changed', payload: { request: VALID_REQUEST } });
+  });
+
+  test('pick:repo / pick:target parse with or without the empty payload the client actually sends', () => {
+    assert.deepEqual(parseInboundMessage({ type: 'pick:repo', payload: {} }), { type: 'pick:repo' });
+    assert.deepEqual(parseInboundMessage({ type: 'pick:target' }), { type: 'pick:target' });
+  });
+
+  test('skin:set needs a string skin, and only a string skin', () => {
+    assert.deepEqual(parseInboundMessage({ type: 'skin:set', payload: { skin: 'gunmetal' } }), {
+      type: 'skin:set', payload: { skin: 'gunmetal' },
+    });
+    assert.equal(parseInboundMessage({ type: 'skin:set', payload: { skin: 42 } }), null);
+    assert.equal(parseInboundMessage({ type: 'skin:set', payload: {} }), null);
+  });
+
+  test('a parsed message really is accepted by handleStartMessage (the two ends line up)', async () => {
+    const effects = fakeEffects();
+    const parsed = parseInboundMessage({
+      type: 'form:submit',
+      payload: { request: { ...VALID_REQUEST, repo: tmpEmptyDir(), target: tmpEmptyDir() } },
+    });
+    assert.ok(parsed);
+    const result = await handleStartMessage(freshState(), parsed, effects);
+    assert.deepEqual(result.post, { type: 'form:problems', payload: { problems: {} } });
+    assert.equal(effects.submitted.length, 1);
   });
 });
