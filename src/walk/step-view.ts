@@ -102,6 +102,11 @@ const DIAL_LABEL: Record<Dial, string> = {
  *  had nothing done to it yet, and "manual" is the one label that can never overstate that. */
 const FALLBACK_DIAL: Dial = 'manual';
 
+/** Exported for the same reason `CHECK_NOTE` and `IDEA_FIRST_MESSAGE` are: a test should
+ *  assert the string this page actually uses, never a copy of it that can drift. */
+export const AUTHOR_BADGE = 'What the author did';
+export const T10_BADGE = 'coming with T-10';
+
 const PAGE_CSS = `
 .notice-only { padding:20px 16px; }
 .notice-only .notice { opacity:0.85; margin:0; }
@@ -127,6 +132,26 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .open-wrap { display:inline-flex; align-items:center; gap:8px; }
 .hint { color:var(--kw); font-size:12px; min-height:14px; }
 .note { color:var(--muted); font-size:12px; min-height:14px; }
+
+/* This page lives in a SIDEBAR, and everything on it is someone else's text — a docstring,
+   a commit subject, a generated sentence. The real plan already ships a \`why\` that is a
+   docstring beginning with a rule of box-drawing characters
+   (\`── tokenizer ─────────────────\`), which has no wrap opportunity in it at all and pushes
+   the whole panel sideways. Long URLs and long identifiers do the same. \`anywhere\` is the
+   right strength here: break mid-token only when there is no other option. */
+main, section, .option { min-width:0; }
+.step-head h1, .option-label, .option-consequence, .why-text, .why-source, .witness-text,
+.note, .hint { overflow-wrap:anywhere; }
+
+/* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
+   title and the skin picker stop competing for one line and 48px of horizontal padding
+   stops eating a sixth of the width. */
+@media (max-width: 480px) {
+  main { padding:16px 12px 32px; }
+  .step-head { flex-direction:column; gap:8px; }
+  .step-head h1 { max-width:100%; }
+  fieldset.dial label { margin-right:12px; }
+}
 `;
 
 /** Every option that is not what the author did: plain text/list markup, a "coming with
@@ -137,9 +162,15 @@ function optionsHtml(options: OptionLike[]): string {
   const items = options
     .map((opt) => {
       const cls = opt.taken ? 'option option-taken' : 'option option-alt';
+      // The badge is suppressed when it would only repeat the option's own label. That is
+      // not a rare tidy-up: a plan built with no interpretation gives every step exactly one
+      // option, labelled "What the author did" by repo-tour itself, so the badge said it
+      // twice in a row on all 61 steps of the first real plan we rendered. The author's
+      // choice is still marked — `.option-taken` carries the accent border and highlight —
+      // and the badge comes back the moment a plan has options whose labels differ.
       const badge = opt.taken
-        ? '<span class="badge badge-taken">What the author did</span>'
-        : '<span class="badge badge-t10">coming with T-10</span>';
+        ? (opt.label.trim().toLowerCase() === AUTHOR_BADGE.toLowerCase() ? '' : `<span class="badge badge-taken">${AUTHOR_BADGE}</span>`)
+        : `<span class="badge badge-t10">${T10_BADGE}</span>`;
       return `<li class="${cls}" data-option-id="${escapeAttr(opt.id)}">${badge}<span class="option-label">${escapeHtml(opt.label)}</span><p class="option-consequence">${escapeHtml(opt.consequence)}</p></li>`;
     })
     .join('');
