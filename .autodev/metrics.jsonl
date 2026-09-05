@@ -40,3 +40,12 @@
 {"ts":"2026-09-05T04:48:04.133Z","kind":"stage.advanced","ticket":"T-6","from":"intake","to":"refine"}
 {"ts":"2026-09-05T04:48:04.313Z","kind":"stage.advanced","ticket":"T-6","from":"refine","to":"queue"}
 {"ts":"2026-09-05T04:48:04.426Z","kind":"stage.advanced","ticket":"T-6","from":"queue","to":"locate"}
+{"ts":"2026-09-05T04:49:45.595Z","kind":"stage.advanced","ticket":"T-6","from":"locate","to":"plan"}
+{"ts":"2026-09-05T04:49:45.682Z","kind":"stage.advanced","ticket":"T-7","from":"intake","to":"refine"}
+{"ts":"2026-09-05T04:49:45.815Z","kind":"stage.advanced","ticket":"T-7","from":"refine","to":"queue"}
+{"ts":"2026-09-05T04:49:45.857Z","kind":"stage.advanced","ticket":"T-7","from":"queue","to":"locate"}
+{"ts":"2026-09-05T04:49:45.901Z","kind":"stage.advanced","ticket":"T-7","from":"locate","to":"plan"}
+{"ts":"2026-09-05T04:49:45.984Z","kind":"stage.advanced","ticket":"T-8","from":"intake","to":"refine"}
+{"ts":"2026-09-05T04:49:46.117Z","kind":"stage.advanced","ticket":"T-8","from":"refine","to":"queue"}
+{"ts":"2026-09-05T04:49:46.159Z","kind":"stage.advanced","ticket":"T-8","from":"queue","to":"locate"}
+{"ts":"2026-09-05T04:49:46.205Z","kind":"stage.advanced","ticket":"T-8","from":"locate","to":"plan"}
