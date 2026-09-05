@@ -46,11 +46,18 @@ suite('build-tutorials extension', () => {
     const report = await runDoctor(root);
 
     assert.equal(report.core.found, true, report.core.reason ?? 'core should be found');
+    // T-3 adds 'build' (repo-tour/build: buildPlan, interpretPlan, check, stubFile) to the
+    // tracked set, so the doctor now reports exactly 8 modules, all ok.
+    assert.equal(report.modules.length, 8, `expected 8 modules, got: ${JSON.stringify(report.modules)}`);
     const okModules = report.modules.filter((m) => m.ok);
     assert.ok(
       okModules.length >= 6,
       `expected >= 6 ok modules, got ${okModules.length}: ${JSON.stringify(report.modules)}`,
     );
+    const buildModule = report.modules.find((m) => m.name === 'build');
+    assert.ok(buildModule?.ok, `the "build" module should load: ${JSON.stringify(buildModule)}`);
+    assert.match(buildModule.detail, /buildPlan/, 'build module detail should name buildPlan');
+    assert.match(buildModule.detail, /interpretPlan/, 'build module detail should name interpretPlan');
 
     // This is the whole bet: does web-tree-sitter initialise inside THIS extension host.
     assert.equal(report.grammars.ok, true, report.grammars.detail);

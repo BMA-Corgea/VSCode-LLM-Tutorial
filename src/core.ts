@@ -12,6 +12,15 @@
  * repo-tour has no `exports` map yet, so today every module is reached at `dist/<mod>.js`.
  * repo-tour T-11 adds one — a subpath like `repo-tour/skins` will then resolve through it. Both
  * shapes are tried, in that order, so this file needs no change when T-11 lands.
+ *
+ * T-3 adds `build` to the reported set (`repo-tour/build` — digest -> BuildPlan, interpret,
+ * check, stubFile; T-1 spec §4). It also exports `loadAnyModule`, a one-off loader for a
+ * repo-tour subpath the doctor does not track (T-3's tests need `repo-tour/assets` to exercise
+ * `configureAssets` against a temp copy of repo-tour's own asset tree — AC6 — without growing
+ * `CORE_MODULE_NAMES`, whose length is the load-bearing count `./build-tutorials doctor`
+ * reports). It shares `loadOneModule`'s exact resolution order (scoped exports, then dist/) so
+ * there remains exactly one place that knows how to reach into repo-tour, even for a module the
+ * doctor itself never asks about.
  */
 
 import fs from 'node:fs';
@@ -20,7 +29,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 /** repo-tour's public modules, in the order the doctor reports them. */
-export const CORE_MODULE_NAMES = ['skins', 'extract', 'llm', 'digest', 'interpret', 'ask', 'types'] as const;
+export const CORE_MODULE_NAMES = ['skins', 'extract', 'llm', 'digest', 'interpret', 'ask', 'types', 'build'] as const;
 export type CoreModuleName = (typeof CORE_MODULE_NAMES)[number];
 
 /** How a module actually resolved, once loaded. */
@@ -92,7 +101,9 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * Loads one module both ways and reports which one worked.
+ * Loads one repo-tour subpath both ways and reports which one worked. `name` is a bare
+ * module name (`"skins"`, `"build"`, …) — never a path — because this is exactly the
+ * `repo-tour/<name>` subpath a real caller would import.
  *
  * The "exports" attempt is scoped to `root` via Node's package self-reference resolution: a
  * `require` constructed as though it lived INSIDE `root` resolves `repo-tour/<name>` through
@@ -100,22 +111,43 @@ function errorMessage(err: unknown): string {
  * and it means a `repoTourPath` override is honoured rather than whatever `repo-tour` happens
  * to be linked into this extension's own node_modules.
  */
-async function loadOneModule(root: string, name: CoreModuleName): Promise<ModuleLoad & { module?: unknown }> {
+async function resolveAndImport(root: string, name: string): Promise<{ ok: boolean; via: ResolutionPath | null; detail: string; module?: unknown }> {
   try {
     const scoped = createRequire(path.join(root, 'package.json'));
     const resolved = scoped.resolve(`repo-tour/${name}`);
     const mod: unknown = await import(pathToFileURL(resolved).href);
-    return { name, ok: true, via: 'exports', detail: describeModule(mod), module: mod };
+    return { ok: true, via: 'exports', detail: describeModule(mod), module: mod };
   } catch {
     // No exports map yet (today's repo-tour) — fall through to the dist/ path below.
   }
   try {
     const distPath = path.join(root, 'dist', `${name}.js`);
     const mod: unknown = await import(pathToFileURL(distPath).href);
-    return { name, ok: true, via: 'dist', detail: describeModule(mod), module: mod };
+    return { ok: true, via: 'dist', detail: describeModule(mod), module: mod };
   } catch (err) {
-    return { name, ok: false, via: null, detail: errorMessage(err) };
+    return { ok: false, via: null, detail: errorMessage(err) };
   }
+}
+
+async function loadOneModule(root: string, name: CoreModuleName): Promise<ModuleLoad & { module?: unknown }> {
+  const result = await resolveAndImport(root, name);
+  return { name, ...result };
+}
+
+/**
+ * A one-off loader for a repo-tour subpath the doctor's own module list does not track (see
+ * this file's header). Used by T-3's AC6 test to reach `repo-tour/assets` — `configureAssets`
+ * lives there — through the exact same safe, root-scoped resolution `loadCore` itself uses,
+ * rather than a second, ad hoc `require`/`import` living in test code.
+ *
+ * Throws (does not report) on failure: unlike `loadCore`, this is never shown to a user as a
+ * doctor line, so there is no report to shape — a caller that reaches for a module this way is
+ * expected to handle its own failure.
+ */
+export async function loadAnyModule(root: string, name: string): Promise<unknown> {
+  const result = await resolveAndImport(root, name);
+  if (!result.ok) throw new Error(`could not load repo-tour/${name} from ${root}: ${result.detail}`);
+  return result.module;
 }
 
 /**
