@@ -64,7 +64,7 @@ import type { WalkView } from './session.js';
 import {
   handleStepMessage, parseStepMessage, type OutboundMessage, type StepEffects, type StepViewState,
 } from './step-protocol.js';
-import { renderStepHtml } from './step-view.js';
+import { renderNoticeHtml, renderStepHtml } from './step-view.js';
 
 /**
  * A one-line, length-capped rendering of an ignored message, for the output channel.
@@ -102,8 +102,17 @@ export interface WalkSessionLike {
 }
 
 export interface StepPanelDeps {
-  /** repo-tour's own skins module (SKINS, DEFAULT_SKIN, baseCss, alternateCss), loaded via loadCore. */
-  skins: SkinsModule & { DEFAULT_SKIN: string };
+  /**
+   * repo-tour's own skins module (SKINS, DEFAULT_SKIN, baseCss, alternateCss).
+   *
+   * A FUNCTION, and allowed to answer `undefined`, for the same reason `session` is one: this
+   * provider must be REGISTERED during `activate()`, which is synchronous, while the core is
+   * loaded with an `await` that has not happened yet — and may never succeed, if repo-tour is
+   * missing. Registering late instead would leave the view with no provider at all and
+   * nothing to explain itself with; this way the panel is always live and always says
+   * something true (see `renderNoticeHtml`).
+   */
+  skins: () => (SkinsModule & { DEFAULT_SKIN: string }) | undefined;
   /**
    * The walk this panel drives. A FUNCTION, not a value, and that is load-bearing: a
    * `WebviewViewProvider` is registered once at activation, long before any session exists
@@ -148,7 +157,10 @@ export class StepViewProvider implements vscode.WebviewViewProvider {
   private readonly subscriptions: vscode.Disposable[];
 
   constructor(context: vscode.ExtensionContext, private readonly deps: StepPanelDeps) {
-    this.skin = readSkin(context.globalState, deps.skins.DEFAULT_SKIN);
+    // `'system'` when the core has not loaded yet — it is repo-tour's own `DEFAULT_SKIN`
+    // value, so this fallback agrees with the real one rather than guessing at it, and a skin
+    // the learner has actually chosen is read from `globalState` either way.
+    this.skin = readSkin(context.globalState, deps.skins()?.DEFAULT_SKIN ?? 'system');
     this.subscriptions = context.subscriptions;
 
     // Built here, exactly as `StartPanel` builds its own `StartEffects`: the pure protocol
@@ -235,10 +247,23 @@ export class StepViewProvider implements vscode.WebviewViewProvider {
     }, undefined, this.subscriptions);
   }
 
+  /**
+   * The three things this view can be, all of them said out loud rather than left blank:
+   * a step, "there is no tutorial here", or "the core that renders one is missing".
+   */
   private render(): void {
     const view = this.webviewView;
     if (!view) return;
-    view.webview.html = this.state ? renderStepHtml(this.state, this.deps.skins) : '';
+    const skins = this.deps.skins();
+    if (this.state && skins) {
+      view.webview.html = renderStepHtml(this.state, skins);
+    } else if (!skins) {
+      view.webview.html = renderNoticeHtml(
+        "repo-tour's core isn't loaded, so there is nothing to render a step with. Run \"Build Tutorials: Doctor\" to see why.",
+      );
+    } else {
+      view.webview.html = renderNoticeHtml('No tutorial in this folder yet. Run "Build Tutorials: Start" to build one.');
+    }
   }
 
   /**

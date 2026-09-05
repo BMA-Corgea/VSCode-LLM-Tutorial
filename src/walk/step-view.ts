@@ -103,6 +103,8 @@ const DIAL_LABEL: Record<Dial, string> = {
 const FALLBACK_DIAL: Dial = 'manual';
 
 const PAGE_CSS = `
+.notice-only { padding:20px 16px; }
+.notice-only .notice { opacity:0.85; margin:0; }
 main { max-width:640px; margin:0 auto; padding:20px 24px 40px; }
 .step-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:18px; }
 .step-head h1 { font-size:16px; margin:0; max-width:70%; }
@@ -284,6 +286,28 @@ const CLIENT_SCRIPT = `
 
 export function stepScript(): string {
   return CLIENT_SCRIPT;
+}
+
+/**
+ * The page this view shows when there is no step to show — no tutorial in this folder yet,
+ * or repo-tour's core not loaded so there is nothing to render a step WITH.
+ *
+ * It exists because the alternative was `html = ''`, and a silently blank panel is precisely
+ * the failure this repo's house rule is about: if a surface can have nothing to say, it says
+ * so, where the eye already is. It takes no `SkinsModule` on purpose — the "core is missing"
+ * case is exactly the case where there isn't one — so it is deliberately unskinned, styled by
+ * the bridge sheet's editor-token mapping alone, which needs nothing from repo-tour.
+ */
+export function renderNoticeHtml(notice: string): string {
+  return renderPage({
+    title: 'Build Tutorials: Step',
+    coreCss: '',
+    bridgeCss: bridgeCss(),
+    pageCss: PAGE_CSS,
+    skin: 'system',
+    body: `<main class="notice-only"><p class="notice">${escapeHtml(notice)}</p></main>`,
+    script: '',
+  });
 }
 
 export function renderStepHtml(state: StepViewState, skins: SkinsModule): string {

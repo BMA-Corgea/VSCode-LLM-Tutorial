@@ -151,12 +151,20 @@ export class StepDecorator {
    * its load-bearing ranges. Resolves — never rejects — whatever happens: see the file header
    * on why a rejection here has nobody to catch it.
    */
-  async revealStep(target: string, step: StepLike): Promise<void> {
+  /**
+   * `preserveFocus` defaults to true because the common caller is a STEP CHANGE — the learner
+   * clicked in the tree or pressed Next, and yanking the caret out of the panel they are
+   * reading would be the editor taking a turn nobody offered it. The exception is the panel's
+   * own *Open the file* button, which is an explicit "take me there": that one passes
+   * `preserveFocus: false`, because being sent to a file you asked for and left unable to type
+   * in it is its own small insult.
+   */
+  async revealStep(target: string, step: StepLike, opts: { preserveFocus?: boolean } = {}): Promise<void> {
     let editor: vscode.TextEditor;
     try {
       const doc = await vscode.workspace.openTextDocument(path.join(target, step.target.file));
       editor = await vscode.window.showTextDocument(doc, {
-        preserveFocus: true,
+        preserveFocus: opts.preserveFocus ?? true,
         viewColumn: vscode.ViewColumn.One,
       });
     } catch {

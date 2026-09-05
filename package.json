@@ -34,8 +34,72 @@
         "command": "buildTutorials.doctor",
         "title": "Build Tutorials: Doctor",
         "category": "Build Tutorials"
+      },
+      {
+        "command": "buildTutorials.openWalk",
+        "title": "Build Tutorials: Open the walk",
+        "category": "Build Tutorials"
+      },
+      {
+        "command": "buildTutorials.prevStep",
+        "title": "Build Tutorials: Previous step",
+        "category": "Build Tutorials",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "buildTutorials.nextStep",
+        "title": "Build Tutorials: Next step",
+        "category": "Build Tutorials",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "buildTutorials.goToStep",
+        "title": "Build Tutorials: Go to step",
+        "category": "Build Tutorials"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "buildTutorials",
+          "title": "Build Tutorials",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "buildTutorials": [
+        {
+          "id": "buildTutorials.decisions",
+          "name": "Decisions"
+        },
+        {
+          "id": "buildTutorials.step",
+          "name": "Current Step",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "buildTutorials.goToStep",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "buildTutorials.prevStep",
+          "when": "view == buildTutorials.decisions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "buildTutorials.nextStep",
+          "when": "view == buildTutorials.decisions",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "Build Tutorials",
       "properties": {

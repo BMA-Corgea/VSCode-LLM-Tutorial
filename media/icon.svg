@@ -1,0 +1,19 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!--
+  The activity-bar glyph: a decision tree. A root, a trunk, and two branches ending in
+  their own nodes — the same shape the "Decisions" view itself renders, and the thing this
+  extension is actually about (a repo recreated by the decisions behind it, one at a time).
+
+  Hand-drawn here on purpose: the plan's step 6 rules out a third-party asset, and VS Code
+  recolours an activity-bar icon through a CSS mask, so a single-colour `currentColor`
+  drawing on a transparent ground is all the format can use anyway.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+     fill="none" stroke="currentColor" stroke-width="1.8"
+     stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6 7.5 V18 H13" />
+  <path d="M6 11 H13" />
+  <circle cx="6" cy="5.5" r="2" fill="currentColor" stroke="none" />
+  <circle cx="15.5" cy="11" r="2" fill="currentColor" stroke="none" />
+  <circle cx="15.5" cy="18" r="2" fill="currentColor" stroke="none" />
+</svg>
