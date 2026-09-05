@@ -82,3 +82,19 @@ now ship a real `exports` map, so a type-only import would resolve — the reaso
 different: the mirror keeps this extension typecheckable with no dependency on
 repo-tour's `dist/*.d.ts` being present, and needs no edit when repo-tour's types grow
 a field this extension never reads.
+
+## The development host does not honour `capabilities.untrustedWorkspaces`
+
+Learned while verifying T-4's workspace-trust fix, and worth knowing before anyone tests one
+the easy way.
+
+Launched with `--extensionDevelopmentPath` against an **untrusted** folder, the extension
+activated and the walk ran — the status bar read `step 1 / 61 · manual` while VS Code showed
+"Restricted Mode" in the same bar. Installing the packaged `.vsix` into a throwaway
+`--extensions-dir` and opening the same untrusted folder showed the opposite, correctly: no
+walk, no activity-bar container, extension disabled.
+
+This is expected VS Code behaviour — a developer running their own extension has already
+trusted it — but the consequence is sharp: **a workspace-trust protection can never be
+verified from the dev host.** Test it by installing the real artifact, or you will conclude a
+working guard is broken.

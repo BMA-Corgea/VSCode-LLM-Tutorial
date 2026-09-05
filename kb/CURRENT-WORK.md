@@ -9,44 +9,31 @@ here and found via the reference table below.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
-  `feature/T-4-walk` in worktree `VSCode-LLM-Tutorial-T-4` (commit `59b1326`): plan steps 1+3
-  done (pure `src/walk/{model,store,step-protocol}.ts`, no `vscode` import, typecheck/lint/
-  build clean, baseline 89 unit + 20 vscode-test unaffected); wound down for the night before
-  step 2 (`step-view.ts`). Full resume plan (incl. the `WalkSession`-must-not-import-`vscode`
-  constraint and the decoration/webview-view test-seam gotchas): `.autodev/handoffs/T-4.md`.
-  `feature/T-3-start-screen` in worktree `VSCode-LLM-Tutorial-T-3`; all 7 ACs built (core
-  surface, skin bridge, webview shell, request validation, protocol/view layer, panel wiring
-  with `reportProblem` so a build-time refusal surfaces in the form, and `build.ts` — marker,
-  resume, language refusal, end-to-end fixture build schema-validated against repo-tour's
-  real schema); typecheck/lint/test (74 unit + 13 vscode-test) green under both `DISPLAY=:1`
-  and `xvfb-run -a`; doctor reports 8/8 modules; the start screen visually confirmed in a real
-  VSCodium window. Reported back for review/accept. Full account:
-  `.autodev/handoffs/T-3.md`.
-  `feature/T-2-skeleton` (commits through `1f5c259` plus a README/NOTICE/packaging follow-up)
-  and self-verified — typecheck, lint, `npm test` (4/4, both under a real DISPLAY and under
-  `xvfb-run -a`), `npm run build`, `./build-tutorials doctor`, `./build-tutorials package`
-  (.vsix), and `./build-tutorials dev` / `./start.sh` (codium opened with the extension,
-  confirmed via process + logs, then closed) all green. **The risky bet paid off**: repo-tour's
-  ESM core, including web-tree-sitter's WASM, loads and runs correctly inside the real VS Code
-  extension host via dynamic `import()` — no architecture change needed, T-3 onward can build
-  on this as specced. Full account: `.autodev/handoffs/T-2.md`. Reported back for
-  review/accept.
-- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
-- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
 
+- **T-4 (feature) — The walk. BUILT, REVIEWED, MERGED; waiting at the `accept` gate.**
+  Merged to `main` as `a46f7c9`. All 6 ACs and all 8 plan steps done: native decision tree,
+  webview step panel, real editor reveal + load-bearing decorations, and position that
+  survives a reload in `<target>/.repo-tour/build/progress.json`. Tests went from 89 unit + 20
+  vscode-test at the start of the ticket to **261 + 39**, green under both a real DISPLAY and
+  `xvfb-run`. Two machine reviews (code + security) ran and **every finding was fixed in-diff**
+  rather than deferred — including a path traversal that T-5 would have turned from a read
+  into a write, and a workspace-settable `repoTourPath` that this ticket had newly made
+  reachable by merely opening a folder. Verified e2e against the **installed .vsix** on a real
+  61-step plan: untrusted workspace correctly disabled, trusted opens the walk, a malformed
+  plan says so. Full account: `.autodev/handoffs/T-4.md`; reviews and evidence in
+  `.autodev/reviews/` and `.autodev/evidence/T-4/`.
+  **The one thing needing the owner: nobody has SEEN the tree or the step panel inside VS
+  Code's own chrome** — this machine has no way to synthesise a click, so the activity-bar
+  container could not be opened. 30 seconds at the accept gate closes it.
 
-- **T-1 (direction) — Build tutorials v1.** 2026-09-04: shaped with the owner in one session and
-  routed into T-2…T-10 here + repo-tour T-11…T-13. Waiting on his approval of the set and his
-  answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
-  thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
+- **T-5 → T-8** — parked at `plan`, `spec_ready` already cleared on GA-1. T-6 follows T-5, not
+  parallel. T-5 should read `kb/wiki/repo-tour-plan-shapes.md` first: it writes the learner's
+  files at exactly the paths T-4 just had to make containment-safe.
 
-- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — gate
-- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — plan
-- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — plan
-- **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
-- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
+- **T-9, T-10** (direction) — Mode A (idea-first) and Divergence. Untouched, at `dir-goals`.
 
-- **Wound down 2026-09-05 (night), at the owner's request.** T-4 (the walk) builder asked to stop at a clean point and write a resumable handoff — read `.autodev/handoffs/T-4.md` first tomorrow, then `tracker.mjs next T-4`. T-5…T-8 parked at `plan` (T-6 after T-5, not parallel). Nothing else in flight; repo-tour side complete.
+- **T-1 (direction) — Build tutorials v1.** Complete; routed into T-2…T-10 here plus
+  repo-tour T-11…T-13. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`.
 
 ## Waiting on
 
@@ -63,6 +50,7 @@ here and found via the reference table below.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-05 **T-4 merged to main** — the walk; every review finding fixed in-diff, awaiting the owner's accept
 - 2026-09-05 **T-11 COMPLETE** — The owner's name leaves the public repo
 - 2026-09-05 **T-3 COMPLETE** — The start screen, shared skins, and building the plan with resume
 - 2026-09-04 **T-2 COMPLETE** — Extension skeleton, core attach, and a doctor that proves the host can run it
