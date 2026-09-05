@@ -15,9 +15,10 @@ import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import {
   buildDir, buildFromRequest, coreFor, completionMessage, costLine, detectUnsupportedLanguages,
-  languageRefusalMessage, markerPath, readMarker, resolveRepo, resumeIfMarked,
+  languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, resolveRepo,
+  resumeIfMarked, writeJsonAtomic,
   type BuildContext, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
-  type GitRunner, type InterpretCostLike,
+  type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
 import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
 
@@ -471,5 +472,98 @@ suite('costLine / completionMessage', () => {
     const plan = { chapters: [1, 2, 3], steps: new Array(12).fill(0) };
     const msg = completionMessage(plan, cost({ metered: false }));
     assert.equal(msg, '3 chapters · 12 steps — this provider does not report usage');
+  });
+});
+
+// ── T-3 rework, review finding 2: plan.json/request.json are written ATOMICALLY, in an
+// order that leaves either a marker or a complete plan — never a half file and no marker. ──
+
+suite('writeJsonAtomic (T-3 rework, review finding 2)', () => {
+  test('a failing rename leaves NO file at the destination — the temp file holds it all', () => {
+    const dir = tmpDir('atomic-write-');
+    const dest = path.join(dir, 'plan.json');
+    const ops: FsWriteOps = {
+      ...realFsWriteOps,
+      renameSync: () => { throw new Error('crashed during rename'); },
+    };
+
+    assert.throws(() => writeJsonAtomic(dest, { chapters: [1, 2, 3] }, ops), /crashed during rename/);
+
+    // The whole point of temp+rename: the real filename never exists in a partial state. A
+    // plain `fs.writeFileSync(dest, ...)` — what this replaced — would leave `dest` behind,
+    // so this assertion is what fails if the fix is reverted.
+    assert.equal(fs.existsSync(dest), false, 'the destination must not exist at all after a failed rename');
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(`${dest}.tmp`, 'utf8')),
+      { chapters: [1, 2, 3] },
+      'the content was written COMPLETELY to a temp file first, and only then renamed',
+    );
+  });
+
+  test('the same write, uninterrupted, lands complete at the destination (discriminates)', () => {
+    const dir = tmpDir('atomic-write-');
+    const dest = path.join(dir, 'nested', 'plan.json');
+    writeJsonAtomic(dest, { chapters: [1] });
+    assert.deepEqual(JSON.parse(fs.readFileSync(dest, 'utf8')), { chapters: [1] });
+    assert.equal(fs.existsSync(`${dest}.tmp`), false, 'the temp file is renamed away, not left behind');
+  });
+});
+
+suite('buildFromRequest — a crash while writing the plan (AC4/AC5, review finding 2)', () => {
+  /** Real fs ops, except that renaming onto any path matching `failOn` throws — the crash a
+   *  plain `writeFileSync` could not survive without leaving a truncated file behind. */
+  function opsFailingRenameTo(failOn: RegExp, renamed: string[]): FsWriteOps {
+    return {
+      ...realFsWriteOps,
+      renameSync: (from, to) => {
+        if (failOn.test(to)) throw new Error(`crashed while renaming onto ${path.basename(to)}`);
+        renamed.push(to);
+        realFsWriteOps.renameSync(from, to);
+      },
+    };
+  }
+
+  test('a crash renaming plan.json leaves no plan.json at all, and the marker still there', async () => {
+    const repo = makeTsFixture();
+    const target = tmpDir('build-tutorials-target-');
+    const renamed: string[] = [];
+
+    const outcome = await buildFromRequest(
+      requestFor(repo, target),
+      baseContext({ writeOps: opsFailingRenameTo(/plan\.json$/, renamed) }),
+    );
+
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.reason ?? '', /crashed while renaming onto plan\.json/);
+
+    const planPath = path.join(buildDir(target), 'plan.json');
+    assert.equal(fs.existsSync(planPath), false, 'no partial plan.json may be left for T-4 to trip over');
+
+    const marker = readMarker(target);
+    assert.ok(marker, 'the marker must still be there, so this is resumable rather than silently broken');
+    assert.equal(marker.phase, 'write');
+    assert.ok(readFreshMarker(target), 'and fresh enough that activation would offer to resume it');
+  });
+
+  test('request.json is written BEFORE plan.json, and the marker is removed only after both', async () => {
+    const repo = makeTsFixture();
+    const target = tmpDir('build-tutorials-target-');
+    const renamed: string[] = [];
+
+    const outcome = await buildFromRequest(
+      requestFor(repo, target),
+      baseContext({ writeOps: opsFailingRenameTo(/never-matches-anything/, renamed) }),
+    );
+
+    assert.equal(outcome.ok, true, outcome.reason);
+    // Every durable write in this file goes through the same temp+rename helper, so this is
+    // the full ordered list: the marker (once per phase), then request.json, then plan.json.
+    const deliverables = renamed.filter((p) => !p.endsWith('building.json')).map((p) => path.basename(p));
+    assert.deepEqual(deliverables, ['request.json', 'plan.json']);
+    assert.ok(
+      renamed.filter((p) => p.endsWith('building.json')).length >= 4,
+      'the marker is itself renamed into place once per phase — it uses the same helper',
+    );
+    assert.equal(readMarker(target), null, 'and is removed only once both deliverables are complete');
   });
 });
