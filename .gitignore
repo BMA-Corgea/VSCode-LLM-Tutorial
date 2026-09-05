@@ -6,3 +6,7 @@ out/
 .cache/
 .scratch/
 .vscode-test/
+
+# factory ledger and generated day pages stay local (public repo, owner's request 2026-09-05)
+.autodev/
+kb/days/
