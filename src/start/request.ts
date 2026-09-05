@@ -45,12 +45,16 @@ export interface ValidationResult {
 }
 
 /**
- * The exact honesty line AC2 names verbatim (spec §5.2): "Idea-first builds arrive with T-9
- * — tick 'recreate' to build from a repo." Exported so the panel's client-side fallback
- * rendering (a fresh page, before any message round-trip) and every test that checks this
- * wording read it from one place rather than retyping it.
+ * The exact honesty line AC2 names verbatim. Byte-for-byte from THIS ticket's own spec,
+ * `.autodev/specs/T-3-start-screen.md` line 12 ("captured, not re-composed") — no quotes
+ * around recreate, no trailing period. It had been copied from the older
+ * `.autodev/specs/T-1-build-tutorials-v1.md` §5.2 wording instead, which quotes it; the two
+ * spec documents disagree and the ticket's own text is canonical (T-3 rework, review
+ * advisory 1). Exported so the panel's client-side fallback rendering (a fresh page, before
+ * any message round-trip) and every test that checks this wording read it from one place
+ * rather than retyping it.
  */
-export const IDEA_FIRST_MESSAGE = "Idea-first builds arrive with T-9 — tick 'recreate' to build from a repo";
+export const IDEA_FIRST_MESSAGE = 'Idea-first builds arrive with T-9 — tick recreate to build from a repo';
 
 const GITHUB_URL_RE = /^https:\/\/github\.com\/([^/\s]+)\/([^/\s#?]+?)(?:\.git)?\/?$/;
 

@@ -26,7 +26,7 @@ decisions this extension will later walk you through.
 - **What do you want to build?** — an idea, in your own words.
 - **Just recreate the repo as it stands** — the only mode v1 actually builds. Typing an idea
   without ticking this shows, right under the idea field, *"Idea-first builds arrive with
-  T-9 — tick 'recreate' to build from a repo"* — never a silent decline.
+  T-9 — tick recreate to build from a repo"* — never a silent decline.
 - **Reference repo** — a local absolute path, or a `https://github.com/<owner>/<repo>` URL.
   A URL is cloned in full (the witness needs history) into this extension's global storage,
   under `refs/<owner>-<repo>`; reused with `git fetch` next time. A repo whose source is

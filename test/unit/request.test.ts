@@ -39,7 +39,12 @@ suite('validateRequest', () => {
     });
     assert.equal(ok, false);
     assert.equal(problems.idea, IDEA_FIRST_MESSAGE);
-    assert.equal(problems.idea, "Idea-first builds arrive with T-9 — tick 'recreate' to build from a repo");
+    // Retyped rather than derived, deliberately: this is the assertion that would catch
+    // IDEA_FIRST_MESSAGE drifting away from the ticket's own spec text. Copied byte for byte
+    // from .autodev/specs/T-3-start-screen.md line 12 — no quotes around recreate, no
+    // trailing period (the older T-1 spec §5.2 words it differently; this ticket's own AC2
+    // is canonical — T-3 rework, review advisory 1).
+    assert.equal(problems.idea, 'Idea-first builds arrive with T-9 — tick recreate to build from a repo');
   });
 
   test('idea typed, recreate NOT ticked, repo ALSO filled in -> still the T-9 line (v1 has no guided mode)', () => {
