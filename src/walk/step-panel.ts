@@ -336,6 +336,20 @@ export class StepViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * The REAL webview this provider resolved, or `undefined` before VS Code has resolved one —
+   * `src/start/panel.ts` exposes its own the same way, for the same reason.
+   *
+   * It is the only honest way to check AC5's actual promise. `getStateForTest()` proves the
+   * state a re-render WOULD paint from survives a hide/show; it cannot prove the page was
+   * repainted, and "the host kept the right state but never redrew" is exactly the failure
+   * AC5 is about. Reading `.html` back off the live webview proves what is on screen, not
+   * what we intended to put there.
+   */
+  get webview(): vscode.Webview | undefined {
+    return this.webviewView?.webview;
+  }
+
+  /**
    * Test-only seam: VS Code gives an extension no public way to observe a message it just
    * posted TO its own webview (that is the renderer's job to receive), so a test that wants to
    * prove the wiring — not just `handleStepMessage` in isolation, which

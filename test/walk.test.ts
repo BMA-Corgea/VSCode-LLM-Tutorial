@@ -34,16 +34,15 @@
  * **Two things this file deliberately asserts one layer in from the pixels, because VS Code
  * exposes no way to assert them at the pixels. Both are stated here rather than hidden:**
  *
- *   1. **The webview view's rendered HTML is unobservable.** `StepViewProvider` keeps its
- *      `vscode.WebviewView` private (it needs no public accessor to do its job), and VS Code
- *      offers an extension no API to read a view's HTML, to query whether a view is visible,
- *      or to learn that `resolveWebviewView` has fired. So AC5's hide/show drill executes the
- *      REAL reveal and hide commands — `buildTutorials.step.focus` and
- *      `workbench.action.closeSidebar`, so that if the host does resolve the view, the real
- *      teardown-and-re-render path is what runs — and then asserts through
- *      `getStateForTest()`, the panel's own documented seam (handoff T-4 item 7's named
- *      fallback). That seam is exactly the state `render()` paints from, so it is the whole
- *      truth about what comes back on screen; what is NOT proven here is the paint itself.
+ *   1. **VS Code tells an extension nothing about a view's LIFECYCLE.** There is no API to
+ *      ask whether a view is visible, or whether `resolveWebviewView` has fired. So AC5's
+ *      drill executes the real reveal and hide commands — `buildTutorials.step.focus` and
+ *      `workbench.action.closeSidebar` — so that the genuine teardown-and-re-render path is
+ *      what runs, and then asserts on both halves of the promise: `getStateForTest()` for the
+ *      state the host kept, and the panel's `webview.html` for the page it actually redrew.
+ *      The second matters on its own — "kept the right state but never repainted" is
+ *      precisely the AC5 failure, and the state seam alone cannot see it. If the host ever
+ *      stops resolving the view, that test FAILS loudly rather than passing empty.
  *   2. **`vscode.StatusBarItem.text` is write-only too**, and `_walk` exposes no handle on
  *      `WalkStatusBar`. AC6 therefore asserts the exact string `WalkSession.refresh` hands
  *      `WalkAdapters.setStatus` — `statusText(view.plan, view.progress)`, computed from the
@@ -625,5 +624,40 @@ suite('the step view survives being hidden (AC5)', () => {
     assert.equal(state?.step.id, STEPS.file, 'the panel must come back on the step the SESSION is on');
     assert.equal(state?.step.id, session.getView()?.step.id);
     assert.equal(state?.note, undefined, 'the note belongs to the step it was produced on, and that step is gone');
+  });
+
+  test('AC5: the page is actually REPAINTED, not merely remembered', async () => {
+    const dir = newTarget();
+    const { panel } = await openWalk(dir);
+    await vscode.commands.executeCommand(STEP_VIEW_FOCUS);
+    await settle();
+
+    // Loud, not skipped: if the host never resolved the view there is genuinely nothing to
+    // say about paint, and a test that quietly passed in that case would be worse than none.
+    assert.ok(panel.webview, `the step view did not resolve in this host, so ${STEP_VIEW_FOCUS} proves nothing about what is on screen`);
+
+    await goTo(STEPS.handle);
+    await settle();
+    assert.match(
+      panel.webview.html,
+      new RegExp(`data-step-id="${STEPS.handle}"`),
+      'the live page should be showing the step the session is on',
+    );
+
+    await vscode.commands.executeCommand('workbench.action.closeSidebar');
+    await settle();
+    await goTo(STEPS.file);
+    await vscode.commands.executeCommand(STEP_VIEW_FOCUS);
+    await settle();
+
+    // Re-read rather than reuse: a re-resolve hands the provider a NEW `WebviewView`, and
+    // asserting against the old one would be asserting about a corpse.
+    const html = panel.webview?.html ?? '';
+    assert.match(
+      html,
+      new RegExp(`data-step-id="${STEPS.file}"`),
+      'the page that came back must be REDRAWN on the step the session is on — this is the half getStateForTest cannot see, and "kept the right state but never repainted" is exactly the AC5 failure',
+    );
+    assert.doesNotMatch(html, new RegExp(`data-step-id="${STEPS.handle}"`), 'and must not still be the page it was showing when it was hidden');
   });
 });
