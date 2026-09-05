@@ -35,7 +35,7 @@ here and found via the reference table below.
   answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
   thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
 
-- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — build
+- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — gate
 - **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — plan
 - **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — plan
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
@@ -47,17 +47,18 @@ here and found via the reference table below.
 
 <!-- Holds: "waiting at <gate> on <keyholder> since <date>, ping sent to
      <channel>" — no session should discover a hold by archaeology (ruling 24). -->
-- **T-4** — waiting at spec_ready on human:owner since 2026-09-05
-- **T-5** — waiting at spec_ready on human:owner since 2026-09-05
-- **T-6** — waiting at spec_ready on human:owner since 2026-09-05
-- **T-7** — waiting at spec_ready on human:owner since 2026-09-05
-- **T-8** — waiting at spec_ready on human:owner since 2026-09-05
+- Nothing is waiting on a human right now. T-4…T-8's `spec_ready` gates were all cleared
+  2026-09-05 on the owner's go-ahead GA-1; the five "waiting at spec_ready" lines that stood
+  here were stale against the tracker. T-4 is **building** (resumed 2026-09-05 on go-ahead
+  GA-3); T-5…T-8 sit at `plan` — unstarted, not blocked. The next human stop is T-4's
+  **accept** gate.
 
 
 ## Recent past (~15 items / ~30 days)
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-05 **T-11 COMPLETE** — The owner's name leaves the public repo
 - 2026-09-05 **T-3 COMPLETE** — The start screen, shared skins, and building the plan with resume
 - 2026-09-04 **T-2 COMPLETE** — Extension skeleton, core attach, and a doctor that proves the host can run it
 - 2026-09-04 **T-1 COMPLETE** — Build tutorials v1 — recreate a repo by its decisions, in VS Code, on repo-tour…
