@@ -3,8 +3,8 @@
   "slug": "the-dial-manual-scaffolded-automated-with-the-st",
   "type": "feature",
   "title": "The dial — manual, scaffolded, automated — with the structural check and a commit per step",
-  "stage": "intake",
-  "status": "triage",
+  "stage": "plan",
+  "status": "planning",
   "spec": "WHY: .autodev/specs/T-1-build-tutorials-v1.md §5.4, §4.4, §4.5. This is where the learner's hands meet the load-bearing line.\n\nACs:\n1. The dial is global (from the start screen) and overridable per step from the panel; per-step positions are remembered; the global setting never drifts toward automated on its own. Check: state tests.\n2. manual: the extension writes nothing and the panel shows the file's shape (exports, imports) from the plan. Check: target tree unchanged after opening the step.\n3. scaffolded: the file is written with boilerplate ranges from the reference and the core's stubs for load-bearing ranges; the written file parses (zero ERROR nodes) in TS, JS and Python fixtures. Check: parse test on written files.\n4. automated: the reference file is written verbatim and the panel walks each load-bearing range with reveal + decoration and the step's narration. Check: byte equality with the reference; the walk visits every range.\n5. Check my work runs the core's structural check and shows present / missing / extra per symbol in the panel and a ✓ / ✗ on the tree node; a renamed local variable passes; a missing export is named. Check: unit + vscode-test.\n6. Walking every step in automated mode reproduces the reference's source files byte-for-byte; generated / vendored / lockfile files are reproduced from plan.reproduce and never presented as steps. Check: diff -r in the acceptance run on the first target (sql-gauntlet).\n7. Commit per completed step: the target is git-inited if needed; a passed (or automated) step commits its file with the message '<ordinal>: <question> — <chosen option label>'; a setting turns it off. Check: git log on the fixture target.\n\nOut of scope\n- Semantic comparison of bodies — deferred: who=agent:pm why=the check is structural by design (.autodev/specs/T-1-build-tutorials-v1.md §4.4); semantics go to the tutor on request\n- Running the learner's app for them — deferred: who=agent:pm why=the real terminal is theirs; the panel only suggests the command",
   "pipeline_version": "feature@v1",
   "modifiers": [],
@@ -23,7 +23,11 @@
     "monitor"
   ],
   "passport": [
-    "2026-09-04 created as feature \"The dial — manual, scaffolded, automated — with the structural check and a commit per step\" on feature@v1 by agent:claude(on-behalf:evan,session_01Mxgb5pYk1Jb3C1qwp9RLAV)"
+    "2026-09-05 waiting at gate spec_ready (keyholder human:owner) since 2026-09-05",
+    "2026-09-05 gate spec_ready cleared by agent:claude(on-behalf:evan,GA-1) on go-ahead GA-1 (\"Let's go ahead and loop through it until these are created a\")",
+    "2026-09-05 advanced refine → queue · refine on unrecorded",
+    "2026-09-05 advanced queue → locate · queue on unrecorded",
+    "2026-09-05 advanced locate → plan · locate on unrecorded"
   ],
   "assignees": {},
   "links": {
@@ -33,7 +37,7 @@
     "T-4"
   ],
   "gates": {
-    "spec_ready": false,
+    "spec_ready": true,
     "merge": false,
     "accept": false,
     "deploy": false,
@@ -47,5 +51,64 @@
     "validator_passed": false,
     "attempts": 0
   },
-  "history": []
+  "history": [
+    {
+      "from": "intake",
+      "to": "refine",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:03.704Z"
+    },
+    {
+      "from": "refine",
+      "to": "queue",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:03.886Z"
+    },
+    {
+      "from": "queue",
+      "to": "locate",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:03.945Z"
+    },
+    {
+      "from": "locate",
+      "to": "plan",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:04.006Z"
+    }
+  ],
+  "receipts": {
+    "intake": {
+      "evidence": "T-5 captured with type feature, source = T-1 direction (spec §5.4, §4.4, §4.5), no open duplicate, routed feature@v1",
+      "kind": "other",
+      "fingerprint": "T-5 captured with type feature, source = T-1 direction (spec §5.4, §4.4, §4.5), no open duplicate, routed feature@v1",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:03.702Z",
+      "model": "unrecorded"
+    },
+    "refine": {
+      "evidence": ".autodev/specs/T-5-dial.md",
+      "kind": "file",
+      "fingerprint": "sha256:fe3bd39ef5eaaf5e",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:03.821Z",
+      "model": "unrecorded"
+    },
+    "queue": {
+      "evidence": "sequenced after its --after dependency; T-6 additionally waits for T-5 to merge (shared step panel) by orchestrator rule",
+      "kind": "other",
+      "fingerprint": "sequenced after its --after dependency; T-6 additionally waits for T-5 to merge (shared step panel) by orchestrator rule",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:03.944Z",
+      "model": "unrecorded"
+    },
+    "locate": {
+      "evidence": ".autodev/locates/T-5.md",
+      "kind": "file",
+      "fingerprint": "sha256:6227103e0b757af7",
+      "by": "agent:claude(on-behalf:evan,GA-1)",
+      "at": "2026-09-05T04:48:04.005Z",
+      "model": "unrecorded"
+    }
+  }
 }

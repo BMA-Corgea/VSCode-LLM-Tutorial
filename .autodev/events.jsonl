@@ -95,3 +95,23 @@
 {"ts":"2026-09-05T04:43:58.310Z","type":"stage.advanced","ticket":"T-3","from":"release","to":"monitor","by":"agent:claude(on-behalf:evan,GA-1)"}
 {"ts":"2026-09-05T04:43:58.536Z","type":"loop.validator.passed","ticket":"T-3","stage":"monitor","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/reports/T-3-monitor.md","fingerprint":"sha256:224217c82639eb9c"}
 {"ts":"2026-09-05T04:43:58.538Z","type":"pipeline.complete","ticket":"T-3","at":"monitor"}
+{"ts":"2026-09-05T04:44:12.791Z","type":"loop.validator.passed","ticket":"T-4","stage":"plan","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/plans/T-4.md","fingerprint":"sha256:d1cec798037c487a"}
+{"ts":"2026-09-05T04:44:12.792Z","type":"stage.advanced","ticket":"T-4","from":"plan","to":"build","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:48:03.704Z","type":"loop.validator.passed","ticket":"T-5","stage":"intake","by":"agent:claude(on-behalf:evan,GA-1)","evidence":"T-5 captured with type feature, source = T-1 direction (spec §5.4, §4.4, §4.5), no open duplicate, routed feature@v1","fingerprint":"T-5 captured with type feature, source = T-1 direction (spec §5.4, §4.4, §4.5), no open duplicate, routed feature@v1"}
+{"ts":"2026-09-05T04:48:03.705Z","type":"stage.advanced","ticket":"T-5","from":"intake","to":"refine","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:48:03.822Z","type":"loop.validator.passed","ticket":"T-5","stage":"refine","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/specs/T-5-dial.md","fingerprint":"sha256:fe3bd39ef5eaaf5e"}
+{"ts":"2026-09-05T04:48:03.822Z","type":"gate_waiting","ticket":"T-5","stage":"refine","gate":"spec_ready","reason":"awaiting human clearance","at":"2026-09-05T04:48:03.822Z"}
+{"ts":"2026-09-05T04:48:03.885Z","type":"gate.cleared","ticket":"T-5","gate":"spec_ready","by":"agent:claude(on-behalf:evan,GA-1)","goAhead":"GA-1"}
+{"ts":"2026-09-05T04:48:03.886Z","type":"stage.advanced","ticket":"T-5","from":"refine","to":"queue","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:48:03.944Z","type":"loop.validator.passed","ticket":"T-5","stage":"queue","by":"agent:claude(on-behalf:evan,GA-1)","evidence":"sequenced after its --after dependency; T-6 additionally waits for T-5 to merge (shared step panel) by orchestrator rule","fingerprint":"sequenced after its --after dependency; T-6 additionally waits for T-5 to merge (shared step panel) by orchestrator rule"}
+{"ts":"2026-09-05T04:48:03.945Z","type":"stage.advanced","ticket":"T-5","from":"queue","to":"locate","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:48:04.005Z","type":"loop.validator.passed","ticket":"T-5","stage":"locate","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/locates/T-5.md","fingerprint":"sha256:6227103e0b757af7"}
+{"ts":"2026-09-05T04:48:04.006Z","type":"stage.advanced","ticket":"T-5","from":"locate","to":"plan","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:48:04.132Z","type":"loop.validator.passed","ticket":"T-6","stage":"intake","by":"agent:claude(on-behalf:evan,GA-1)","evidence":"T-6 captured with type feature, source = T-1 direction (spec §5.5), no open duplicate, routed feature@v1","fingerprint":"T-6 captured with type feature, source = T-1 direction (spec §5.5), no open duplicate, routed feature@v1"}
+{"ts":"2026-09-05T04:48:04.133Z","type":"stage.advanced","ticket":"T-6","from":"intake","to":"refine","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:48:04.249Z","type":"loop.validator.passed","ticket":"T-6","stage":"refine","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/specs/T-6-tutor.md","fingerprint":"sha256:c18f0807f2e77615"}
+{"ts":"2026-09-05T04:48:04.250Z","type":"gate_waiting","ticket":"T-6","stage":"refine","gate":"spec_ready","reason":"awaiting human clearance","at":"2026-09-05T04:48:04.250Z"}
+{"ts":"2026-09-05T04:48:04.312Z","type":"gate.cleared","ticket":"T-6","gate":"spec_ready","by":"agent:claude(on-behalf:evan,GA-1)","goAhead":"GA-1"}
+{"ts":"2026-09-05T04:48:04.313Z","type":"stage.advanced","ticket":"T-6","from":"refine","to":"queue","by":"agent:claude(on-behalf:evan,GA-1)"}
+{"ts":"2026-09-05T04:48:04.425Z","type":"loop.validator.passed","ticket":"T-6","stage":"queue","by":"agent:claude(on-behalf:evan,GA-1)","evidence":".autodev/locates/T-6.md","fingerprint":"sha256:dd46aab6a7b68ce9"}
+{"ts":"2026-09-05T04:48:04.426Z","type":"stage.advanced","ticket":"T-6","from":"queue","to":"locate","by":"agent:claude(on-behalf:evan,GA-1)"}
