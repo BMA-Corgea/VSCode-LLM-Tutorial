@@ -97,7 +97,7 @@ already exist; the plan adds no new parsing.
 | `ImportGraph` | **file order within a chapter**: topological, leaves first — you build what you import before what imports it. Ties: first-commit date, then rank score |
 | `FileExtract.symbols` (exported, by span) | **symbol steps** — the load-bearing parts of a file, capped at 5 per file so a 1,200-line file is not 40 steps |
 | `git log --diff-filter=A` per file | the **witness**: when the author actually wrote it, and the commit subject — shown, never used to order |
-| `Classification` | only `source` and `structural` files become steps; `test` files become steps *after* the file they test; `generated` / `vendored` / `lockfile` are reproduced by the automated writer and never taught |
+| `Classification` | only `source` and `structural` files become steps; `test` files become steps *after* the file they test; `generated` / `vendored` / `lockfile` / `data` (and any binary) go to `plan.reproduce` — reproduced by the automated writer, never taught. **Invariant:** every inventoried file is a step or is in `reproduce`; nothing vanishes (T-12 review, 2026-09-04) |
 
 Three step kinds: **shape** (one per chapter: why this subsystem exists), **file** (create
 this module: what it owns, what it depends on), **symbol** (fill this load-bearing part).
