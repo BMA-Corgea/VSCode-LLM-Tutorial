@@ -22,6 +22,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadAnyModule, resolveCoreRoot } from '../../src/core.js';
 import { BRIDGE_TOKEN_MAP, bridgeCss, pickerHtml, type SkinRow } from '../../src/skins.js';
+import { emptyRequest } from '../../src/start/request.js';
+import { renderStartHtml } from '../../src/start/view.js';
 
 interface SkinsModule {
   SKINS: SkinRow[];
@@ -124,6 +126,17 @@ suite('AC6 — a fixture skin, via a temp copy of repo-tour\'s assets, no extens
       const html = pickerHtml(skinsMod.SKINS, 'fixture');
       assert.match(html, /<option value="fixture"[^>]*selected>Fixture<\/option>/);
       assert.equal([...html.matchAll(/<option/g)].length, originalLength + 1);
+
+      // AC6's own wording: "appears in the RENDERED PAGE" — not just the underlying css/
+      // picker functions called directly above, but the actual start-screen page a real
+      // webview would receive, produced with zero change to this extension's code.
+      const page = renderStartHtml(
+        { request: emptyRequest(), problems: {}, skin: 'fixture' },
+        skinsMod,
+      );
+      assert.ok(page.includes(marker), 'the fixture skin\'s css should be inlined in the rendered page\'s <style>');
+      assert.match(page, /<option value="fixture"[^>]*selected>Fixture<\/option>/);
+      assert.match(page, /<html lang="en" data-theme="fixture">/, 'the host should stamp the fixture skin onto <html> like any other');
     } finally {
       // Both `SKINS` and the configured assets dir are process-wide module state — undo
       // both, in the same test, so no other test/unit file sharing this mocha process ever
