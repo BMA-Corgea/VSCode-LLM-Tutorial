@@ -201,7 +201,7 @@ host re-renders from the plan, never from the view.
 
 - Recreate ⇒ repo required. Idea-only or idea+repo are **present and honest**: typing an idea
   without ticking recreate shows, where the eye already is, *"Idea-first builds arrive with
-  T-9 — tick 'recreate' to build from a repo."* (repo-tour lesson: a control that silently
+  T-9 — tick recreate to build from a repo"* (repo-tour lesson: a control that silently
   declines is a broken control.)
 - A GitHub URL is cloned into the extension's global storage; a local path is used in place.
   A repo outside TS/JS/TSX/Python is refused *with the reason* (the grammars repo-tour ships).
