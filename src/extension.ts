@@ -382,6 +382,26 @@ async function runOpenWalkCommand(context: vscode.ExtensionContext): Promise<voi
  *  with, short of duplicating activation itself. */
 export interface ExtensionApi {
   _context: vscode.ExtensionContext;
+  /**
+   * vscode-test only, and for the same reason `_context` is here: the walk's surfaces are
+   * created inside `activate()` and held in module state, and there is no supported way for a
+   * test to reach the REGISTERED tree and webview-view providers — the only ones VS Code will
+   * actually resolve and re-render — short of duplicating activation itself, which would prove
+   * something about a copy rather than about what ships.
+   *
+   * Getters, not values: every one of these is replaced over the window's life (the session on
+   * every `openAt`, the rest never, but a value snapshot would quietly stop being true).
+   * `openAt` exists because a test's fixture folder is not a workspace folder, so
+   * `folderWithPlan()` cannot find it — it is the same path `runOpenWalkCommand` takes, minus
+   * the folder lookup.
+   */
+  _walk: {
+    session: () => WalkSession | undefined;
+    tree: () => DecisionsTreeProvider | undefined;
+    panel: () => StepViewProvider | undefined;
+    decorator: () => StepDecorator | undefined;
+    openAt: (target: string) => Promise<void>;
+  };
 }
 
 export function activate(context: vscode.ExtensionContext): ExtensionApi {
@@ -401,7 +421,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
   );
   void resumeOnActivate(context);
   void openWalkOnActivate(context);
-  return { _context: context };
+  return {
+    _context: context,
+    _walk: {
+      session: () => walkSession,
+      tree: () => walkTree,
+      panel: () => walkPanel,
+      decorator: () => walkDecorator,
+      openAt: async (target: string) => {
+        await ensureWalkSkins(context);
+        openWalkAt(target);
+      },
+    },
+  };
 }
 
 export function deactivate(): void {
