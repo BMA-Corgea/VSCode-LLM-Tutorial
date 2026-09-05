@@ -98,8 +98,12 @@ export function currentStep(plan: PlanLike, progress: Progress): StepLike | unde
   return progress.current ? plan.steps.find((s) => s.id === progress.current) : undefined;
 }
 
-/** `null` at the end of the plan (or when nothing is current yet — the caller decides what
- *  "nothing" means; this never guesses a step that isn't there). */
+/** The step after the current one; `null` at the END of the plan — no wraparound.
+ *
+ *  When `current` names no step in this plan (nothing is current yet, or a stale id survived
+ *  a rebuild) this returns the FIRST step rather than `null`: "where does a walk with no
+ *  usable position begin" has one sensible answer, and stranding the walk is not it.
+ *  `prevStepId` is genuinely `null` in that case, since there is nothing before the start. */
 export function nextStepId(plan: PlanLike, progress: Progress): string | null {
   const steps = orderedSteps(plan);
   const idx = steps.findIndex((s) => s.id === progress.current);
