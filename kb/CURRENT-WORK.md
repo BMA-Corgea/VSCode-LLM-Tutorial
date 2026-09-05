@@ -18,7 +18,6 @@ here and found via the reference table below.
   extension host via dynamic `import()` — no architecture change needed, T-3 onward can build
   on this as specced. Full account: `.autodev/handoffs/T-2.md`. Reported back for
   review/accept.
-- **T-3** (feature) — The start screen, shared skins, and building the plan with resume — intake
 - **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — intake
 - **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — intake
 - **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — intake
@@ -32,11 +31,15 @@ here and found via the reference table below.
   routed into T-2…T-10 here + repo-tour T-11…T-13. Waiting on his approval of the set and his
   answer to the exception question. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`. First
   thing to prove: T-2's doctor (can the extension host load repo-tour's core at all).
+- **T-3** (feature) — The start screen, shared skins, and building the plan with resume — plan
+
+- **T-3 (feature) — the start screen, shared skins, plan build with resume.** 2026-09-05: repo-tour T-11/T-12/T-13/T-15 all merged (repo-tour main 207/207; `repo-tour/build` exports buildPlan, interpretPlan, check, stubFile); T-3's worktree cut and its builder spawned. The sql-gauntlet dry run now yields 61 steps / 35 symbol steps.
 
 ## Waiting on
 
 <!-- Holds: "waiting at <gate> on <keyholder> since <date>, ping sent to
      <channel>" — no session should discover a hold by archaeology (ruling 24). -->
+- **T-3** — waiting at spec_ready on human:owner since 2026-09-05
 
 
 ## Recent past (~15 items / ~30 days)
