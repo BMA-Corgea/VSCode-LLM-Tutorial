@@ -14,7 +14,7 @@
 
 import * as vscode from 'vscode';
 import { readSkin, writeSkin } from '../skins.js';
-import { emptyRequest, type BuildRequest } from './request.js';
+import { emptyRequest, type BuildRequest, type RequestField } from './request.js';
 import {
   handleStartMessage, type InboundMessage, type OutboundMessage, type PanelState, type PickTarget, type StartEffects,
 } from './protocol.js';
@@ -89,6 +89,23 @@ export class StartPanel {
     this.panel.dispose();
   }
 
+  /**
+   * Surfaces a BUILD-TIME problem (a language refusal, a clone failure) under a field, the
+   * same "in the form, where the eye already is" channel `form:submit` itself replies
+   * through (AC3: "refused with the reason shown in the form") — never only a transient
+   * notification, which the caller (`src/extension.ts`) also shows for anyone not currently
+   * looking at this tab, but which is not itself "in the form." Merges onto whatever
+   * problems are already there rather than replacing them, and returns the message posted
+   * so a test can assert on it directly (see the `dispatchForTest` doc comment above for why
+   * that is necessary at all).
+   */
+  reportProblem(problems: Partial<Record<RequestField, string>>): OutboundMessage {
+    this.state = { ...this.state, problems: { ...this.state.problems, ...problems } };
+    const post: OutboundMessage = { type: 'form:problems', payload: { problems: this.state.problems } };
+    void this.panel.webview.postMessage(post);
+    return post;
+  }
+
   private render(): void {
     this.panel.webview.html = renderStartHtml(this.state, this.deps.skins);
   }
@@ -110,5 +127,16 @@ export class StartPanel {
    */
   dispatchForTest(message: InboundMessage): Promise<OutboundMessage | undefined> {
     return this.onMessage(message);
+  }
+
+  /**
+   * Test-only seam, read-only: a way to observe `this.state` (in particular, the current
+   * `problems`) WITHOUT dispatching a message — `form:changed`/`form:submit` recompute
+   * `problems` from scratch via `validateRequest`, so probing with one of those would
+   * overwrite (not merely read) whatever `reportProblem` had just set, which is exactly the
+   * kind of test-observation bug this getter avoids.
+   */
+  getStateForTest(): PanelState {
+    return this.state;
   }
 }

@@ -77,24 +77,35 @@ function buildContextFor(
   };
 }
 
-async function reportOutcome(outcome: BuildOutcome | undefined): Promise<void> {
+/**
+ * A notification either way (so anyone not currently looking at the start screen — or, for
+ * a resume, anyone who does not even have it open — still finds out); a REFUSAL or error
+ * additionally goes `panel.reportProblem` when a panel is given, since AC3 asks for the
+ * reason "shown in the form", not only a transient toast. Every non-ok, non-cancelled reason
+ * is attributed to the `repo` field: v1's actual failure modes here (a language refusal, a
+ * clone failure) are always about the repo; a rarer internal error (e.g. a full disk during
+ * the final write) reusing that same field is an acceptable simplification for v1 over
+ * threading field-attribution through every stage of `build.ts`.
+ */
+async function reportOutcome(outcome: BuildOutcome | undefined, panel?: StartPanel): Promise<void> {
   if (!outcome) return;
   if (outcome.ok) {
     await vscode.window.showInformationMessage(`Build Tutorials: ${completionMessage(outcome.plan!, outcome.cost!)}`);
   } else if (!outcome.cancelled) {
+    panel?.reportProblem({ repo: outcome.reason ?? 'the build failed' });
     await vscode.window.showErrorMessage(`Build Tutorials: ${outcome.reason ?? 'the build failed'}`);
   } else {
     await vscode.window.showInformationMessage(`Build Tutorials: ${outcome.reason ?? 'build cancelled'}`);
   }
 }
 
-async function runBuild(context: vscode.ExtensionContext, core: CoreLoadResult, request: BuildRequest): Promise<void> {
+async function runBuild(context: vscode.ExtensionContext, core: CoreLoadResult, request: BuildRequest, panel: StartPanel): Promise<void> {
   await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
     async (progress, token) => {
       const outcome = await buildFromRequest(request, buildContextFor(context, core, progress, token));
-      await reportOutcome(outcome);
+      await reportOutcome(outcome, panel);
     },
   );
 }
@@ -109,9 +120,11 @@ async function runStartCommand(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
   const skins = core.loaded['skins'] as StartPanelDeps['skins'];
-  StartPanel.show(context, {
+  // `panel` is read inside `onSubmit`, never at the time this object literal is built — by
+  // the time a real form:submit can fire, `show()` below has long since returned it.
+  const panel: StartPanel = StartPanel.show(context, {
     skins,
-    onSubmit: (request) => { void runBuild(context, core, request); },
+    onSubmit: (request) => { void runBuild(context, core, request, panel); },
   });
 }
 

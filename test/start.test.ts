@@ -148,3 +148,93 @@ suite('the start screen — real WebviewPanel wiring (AC1, AC2, AC6)', () => {
     assert.notEqual(panel, first);
   });
 });
+
+// ── AC3: a build-time refusal is shown IN THE FORM, not only as a transient notification ──
+
+suite('StartPanel.reportProblem — a build-time refusal surfaces in the form (AC3)', () => {
+  let panel: StartPanel | undefined;
+
+  teardown(() => {
+    panel?.dispose();
+    panel = undefined;
+  });
+
+  test('posts a form:problems message and merges onto whatever was already there', async () => {
+    const context = await getContext();
+    const skins = await realSkins(context);
+    panel = StartPanel.show(context, { skins, onSubmit: () => {} });
+
+    const first = panel.reportProblem({ repo: 'go is not one of the languages repo-tour ships grammars for' });
+    assert.deepEqual(first, {
+      type: 'form:problems',
+      payload: { problems: { repo: 'go is not one of the languages repo-tour ships grammars for' } },
+    });
+
+    const second = panel.reportProblem({ target: 'not empty' });
+    assert.deepEqual(second, {
+      type: 'form:problems',
+      payload: {
+        problems: {
+          repo: 'go is not one of the languages repo-tour ships grammars for',
+          target: 'not empty',
+        },
+      },
+    });
+  });
+
+  test('end to end: submitting a Go-only fixture through the panel surfaces the refusal under repo, in the form', async () => {
+    // Mirrors exactly what src/extension.ts's runBuild + reportOutcome do — buildFromRequest,
+    // then panel.reportProblem on a non-ok, non-cancelled outcome — without depending on
+    // extension.ts's own private functions, which are not exported for a test to call.
+    const { buildFromRequest, coreFor } = await import('../src/start/build.js');
+    const context = await getContext();
+    const root = resolveCoreRoot('../repo-tour', context.extensionUri.fsPath);
+    const core = await loadCore(root);
+    assert.equal(core.found, true, core.reason ?? 'core should be found');
+    const skins = core.loaded['skins'] as StartPanelDeps['skins'];
+
+    const goRepo = tmpDir('start-test-go-fixture-');
+    fs.writeFileSync(path.join(goRepo, 'main.go'), 'package main\n\nfunc main() {}\n');
+    const target = tmpDir('start-test-go-target-');
+
+    let submittedRequest: BuildRequest | undefined;
+    let buildDone: Promise<void> | undefined;
+    panel = StartPanel.show(context, {
+      skins,
+      onSubmit: (request) => {
+        submittedRequest = request;
+        // `onSubmit` is fire-and-forget in production (StartEffects.submit returns void) —
+        // captured here so the test can await the SAME promise rather than guessing when
+        // the asynchronous build (and its reportProblem call) has actually finished.
+        buildDone = buildFromRequest(request, {
+          core: coreFor(core.loaded),
+          globalStorageRoot: context.globalStorageUri.fsPath,
+          provider: 'claude',
+          model: 'claude-sonnet-5',
+          cachedOnly: true,
+        }).then((outcome) => {
+          assert.equal(outcome.ok, false, 'a Go-only fixture must be refused');
+          panel!.reportProblem({ repo: outcome.reason ?? 'refused' });
+        });
+      },
+    });
+
+    const request: BuildRequest = { idea: '', recreate: true, repo: goRepo, target, dial: 'manual' };
+    // dispatchForTest awaits handleStartMessage in full, which calls effects.submit
+    // synchronously inside its form:submit branch — by the time this resolves, `onSubmit`
+    // has already run and `buildDone` is assigned (though not yet settled).
+    const submitReply = await panel.dispatchForTest({ type: 'form:submit', payload: { request } });
+    assert.deepEqual(submitReply, { type: 'form:problems', payload: { problems: {} } }, 'the form itself is valid at submit time');
+    assert.deepEqual(submittedRequest, request);
+    assert.ok(buildDone, 'onSubmit should have run synchronously within dispatchForTest');
+
+    await buildDone;
+
+    // Read the panel's OWN state directly — never by dispatching another message, which
+    // would recompute `problems` from scratch via validateRequest and silently overwrite
+    // (not read) whatever reportProblem had just set (a real bug this test caught while
+    // being written; see .autodev/handoffs/T-3.md).
+    const problems = panel.getStateForTest().problems;
+    assert.match(problems.repo ?? '', /is go; the grammars repo-tour ships cover TS, JS, TSX and Python/);
+  });
+});
