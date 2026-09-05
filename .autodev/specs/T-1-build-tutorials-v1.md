@@ -356,6 +356,9 @@ the detour's cleanup contract (nothing left in the workspace) deserves its own g
   order; the git witness shows where the author actually went. Both are shown; neither lies.
 - **Distribution:** a `file:` dependency on the sibling repo-tour checkout works for Evan; a
   public `.vsix` needs repo-tour published or vendored — deferred (§11).
+- **Ports:** the extension binds nothing — webviews are in-process and the core is a library, not a
+  server. Any future local server claims its port in `Coding Projects/PROJECT_PORTS.md` first (Evan,
+  2026-09-05; `7777` is a trap there). Recorded in `.autodev/conventions.md`.
 
 ## 11. Out of scope
 
