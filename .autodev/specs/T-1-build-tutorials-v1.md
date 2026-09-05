@@ -95,7 +95,7 @@ already exist; the plan adds no new parsing.
 | --- | --- |
 | `rollup` subsystem tiers (`TierDigest`) | **chapters**, ordered so a chapter comes after the chapters it imports from |
 | `ImportGraph` | **file order within a chapter**: topological, leaves first — you build what you import before what imports it. Ties: first-commit date, then rank score |
-| `FileExtract.symbols` (exported, by span) | **symbol steps** — the load-bearing parts of a file, capped at 5 per file so a 1,200-line file is not 40 steps |
+| `FileExtract.symbols` (exported, by span) | **symbol steps** — the load-bearing parts of a file, capped at 5 per file so a 1,200-line file is not 40 steps. A file that exports nothing (script-style JS, IIFEs, CommonJS, a private-only Python module) falls back to all its recorded symbols, minus trivial ones (one-line variables, aliases) — repo-tour T-15, from the sql-gauntlet dry run, 2026-09-04 |
 | `git log --diff-filter=A` per file | the **witness**: when the author actually wrote it, and the commit subject — shown, never used to order |
 | `Classification` | only `source` and `structural` files become steps; `test` files become steps *after* the file they test; `generated` / `vendored` / `lockfile` / `data` (and any binary) go to `plan.reproduce` — reproduced by the automated writer, never taught. **Invariant:** every inventoried file is a step or is in `reproduce`; nothing vanishes (T-12 review, 2026-09-04) |
 
