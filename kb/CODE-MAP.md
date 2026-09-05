@@ -28,7 +28,7 @@ will be overwritten.
 
 ## src/extension.ts
 
-- Exports: activate, deactivate
+- Exports: activate, deactivate, resumeOnActivate
 - Imports: (none)
 
 ## src/skins.ts
@@ -38,7 +38,7 @@ will be overwritten.
 
 ## src/start/build.ts
 
-- Exports: buildDir, buildFromRequest, completionMessage, coreFor, costLine, detectUnsupportedLanguages, languageRefusalMessage, markerPath, readMarker, realGit, resolveRepo, resumeIfMarked
+- Exports: buildDir, buildFromRequest, completionMessage, coreFor, costLine, detectUnsupportedLanguages, languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, realGit, resolveRepo, resumeIfMarked, writeJsonAtomic
 - Imports: (none)
 
 ## src/start/panel.ts
@@ -48,7 +48,7 @@ will be overwritten.
 
 ## src/start/protocol.ts
 
-- Exports: handleStartMessage
+- Exports: handleStartMessage, parseInboundMessage
 - Imports: (none)
 
 ## src/start/request.ts
