@@ -10,30 +10,23 @@ here and found via the reference table below.
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
 
-- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — monitor
-  Merged to `main` as `a46f7c9`. All 6 ACs and all 8 plan steps done: native decision tree,
-  webview step panel, real editor reveal + load-bearing decorations, and position that
-  survives a reload in `<target>/.repo-tour/build/progress.json`. Tests went from 89 unit + 20
-  vscode-test at the start of the ticket to **261 + 39**, green under both a real DISPLAY and
-  `xvfb-run`. Two machine reviews (code + security) ran and **every finding was fixed in-diff**
-  rather than deferred — including a path traversal that T-5 would have turned from a read
-  into a write, and a workspace-settable `repoTourPath` that this ticket had newly made
-  reachable by merely opening a folder. Verified e2e against the **installed .vsix** on a real
-  61-step plan: untrusted workspace correctly disabled, trusted opens the walk, a malformed
-  plan says so. Full account: `.autodev/handoffs/T-4.md`; reviews and evidence in
-  `.autodev/reviews/` and `.autodev/evidence/T-4/`.
-  **The one thing needing the owner: nobody has SEEN the tree or the step panel inside VS
-  Code's own chrome** — this machine has no way to synthesise a click, so the activity-bar
-  container could not be opened. 30 seconds at the accept gate closes it.
+- **T-5 (feature) — The dial. IN PLAN, branch `feature/T-5-dial`, worktree
+  `../VSCode-LLM-Tutorial-T-5`.** Where the learner's hands meet the load-bearing line:
+  manual / scaffolded / automated, the structural check behind *Check my work*, and a commit
+  per completed step. Its locate and refinement notes were drafted against T-4's PLAN, so the
+  plan now opens with a **reconciliation table against T-4's merged code** — twelve names
+  moved, and one of them (the step panel's new repaint key) would store a check result and
+  never draw it rather than failing loudly. Plan: `.autodev/plans/T-5.md`.
+  T-5 also owns the half of AC1 that T-4 deliberately left: the GLOBAL dial in `request.json`
+  is still read by nothing, so `statusText` falls back to `manual` per step.
 
-- **T-5 → T-8** — parked at `plan`, `spec_ready` already cleared on GA-1. T-6 follows T-5, not
-  parallel. T-5 should read `kb/wiki/repo-tour-plan-shapes.md` first: it writes the learner's
-  files at exactly the paths T-4 just had to make containment-safe.
+- **T-6 → T-8** — parked at `plan`, `spec_ready` cleared on GA-1. T-6 is sequenced AFTER T-5
+  (both edit the step panel, protocol and session; a three-way edit is not worth the merge).
 
 - **T-9, T-10** (direction) — Mode A (idea-first) and Divergence. Untouched, at `dir-goals`.
 
 - **T-1 (direction) — Build tutorials v1.** Complete; routed into T-2…T-10 here plus
-  repo-tour T-11…T-13. Spec: `.autodev/specs/T-1-build-tutorials-v1.md`.
+  repo-tour T-11…T-13.
 
 ## Waiting on
 
@@ -50,7 +43,7 @@ here and found via the reference table below.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
-- 2026-09-05 **T-4 merged to main** — the walk; every review finding fixed in-diff, awaiting the owner's accept
+- 2026-09-06 **T-4 COMPLETE** — The walk — decision tree, step panel, editor driving, and progress that survive…
 - 2026-09-05 **T-11 COMPLETE** — The owner's name leaves the public repo
 - 2026-09-05 **T-3 COMPLETE** — The start screen, shared skins, and building the plan with resume
 - 2026-09-04 **T-2 COMPLETE** — Extension skeleton, core attach, and a doctor that proves the host can run it
