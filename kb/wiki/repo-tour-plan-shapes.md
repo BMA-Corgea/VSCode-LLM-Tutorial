@@ -98,3 +98,23 @@ This is expected VS Code behaviour — a developer running their own extension h
 trusted it — but the consequence is sharp: **a workspace-trust protection can never be
 verified from the dev host.** Test it by installing the real artifact, or you will conclude a
 working guard is broken.
+
+## Open, and it belongs to repo-tour rather than here (found by T-4's security review)
+
+Our render caps defend against this; they do not fix it, and the fix belongs upstream.
+
+- **`parseAlternatives` caps neither count nor length** (`repo-tour/src/interpret.ts`). Its
+  sibling `parseAnswer` clamps `summary` to 400 characters and nothing else does. A
+  prompt-injected docstring can therefore steer a model into emitting thousands of very long
+  alternatives, which land in `plan.json` and are rendered synchronously by whatever consumes
+  it. This is the ONE path that VS Code's Workspace Trust does not gate, because the victim
+  never opens the attacker's repo — they point the start screen at its URL and we clone it.
+- **`foldMeaning`** (`repo-tour/src/build/interpret.ts`) passes `why` through unclamped.
+- **The interpret cache** (`<pkg>/.cache/interpret`, shared across every repo ever scanned) is
+  read back with only `if (!cached.summary)` / `Array.isArray` guards, so a corrupt entry can
+  put non-string values into `option.label` and `decision.why`. That is what makes the
+  "plan fields might not be strings" defence in this extension load-bearing rather than
+  paranoid.
+
+Consuming code should keep treating plan text as untrusted and unbounded regardless of what
+repo-tour does about this — but a cap at the producer is worth a ticket on repo-tour's board.

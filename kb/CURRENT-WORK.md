@@ -10,7 +10,7 @@ here and found via the reference table below.
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live. -->
 
-- **T-4 (feature) — The walk. BUILT, REVIEWED, MERGED; waiting at the `accept` gate.**
+- **T-4** (feature) — The walk — decision tree, step panel, editor driving, and progress that survive… — monitor
   Merged to `main` as `a46f7c9`. All 6 ACs and all 8 plan steps done: native decision tree,
   webview step panel, real editor reveal + load-bearing decorations, and position that
   survives a reload in `<target>/.repo-tour/build/progress.json`. Tests went from 89 unit + 20
