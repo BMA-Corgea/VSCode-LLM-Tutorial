@@ -116,7 +116,9 @@ function requestPath(target: string): string {
  * real state — it can be walked, it just cannot be written into — so `null` is an answer
  * callers must handle, not an error.
  */
-export function loadRequest(target: string): BuildRequest | null {
+export type ResolvedRequest = BuildRequest & { referenceRoot: string };
+
+export function loadRequest(target: string): ResolvedRequest | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(requestPath(target), 'utf8'));
@@ -127,10 +129,31 @@ export function loadRequest(target: string): BuildRequest | null {
   const repo = parsed['repo'];
   const dial = parsed['dial'];
   if (typeof repo !== 'string') return null;
+
+  // Where the reference actually lives. `referenceRoot` is what the build resolved; `repo` is
+  // only a fallback for `request.json` files written before that field existed — correct
+  // precisely because a build old enough to lack it could only have been a local path.
+  const recorded = parsed['referenceRoot'];
+  const root = typeof recorded === 'string' && recorded.length > 0 ? recorded : repo;
+
+  // And it must be a DIRECTORY that exists. `repo` is whatever was typed, so it can be a
+  // GitHub URL, a path that has since been deleted, or a file — and every consumer of it
+  // (the writer, the check, the reproduce copy) does `path.resolve(root, relative)`, which
+  // turns a URL into a nonsense path relative to the process's cwd and then fails one read
+  // at a time, silently. Answering `null` once, here, is the honest version of that: the
+  // caller already knows how to say "this tutorial can be walked but not written into".
+  let referenceRoot: string;
+  try {
+    if (!fs.statSync(root).isDirectory()) return null;
+    referenceRoot = root;
+  } catch {
+    return null;
+  }
   return {
     idea: typeof parsed['idea'] === 'string' ? parsed['idea'] : '',
     recreate: parsed['recreate'] === true,
     repo,
+    referenceRoot,
     target: typeof parsed['target'] === 'string' ? parsed['target'] : target,
     // An unrecognised dial is the global default, never a guess: a value outside `DIALS`
     // means the file was hand-edited or written by a future version, and "manual" is the

@@ -57,7 +57,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { GitRunner } from '../../src/start/build.js';
-import type { BuildRequest, Dial } from '../../src/start/request.js';
+import type { Dial } from '../../src/start/request.js';
+import type { ResolvedRequest } from '../../src/walk/store.js';
 import type { CheckReport, DialCore, StubQuestion } from '../../src/dial/core.js';
 import {
   emptyProgress,
@@ -138,7 +139,7 @@ interface FakeOptions {
   /** `request.json`. ABSENT MEANS `null`, and that is the T-4 default on purpose: a session
    *  with no request has no reference root, so no position writes and every one of the suites
    *  written before this ticket goes on describing a walk that touches nothing. */
-  request?: BuildRequest;
+  request?: ResolvedRequest;
   /** `core()` resolves `undefined` — repo-tour is not loadable at all. */
   coreMissing?: boolean;
   /** The core's `check` REJECTS — a missing grammar, an unloadable parser. Real breakage, and
@@ -939,15 +940,17 @@ suite('the dial, the check and the commit (T-5)', () => {
     fs.rmSync(box, { recursive: true, force: true });
   });
 
-  /** `request.json` as the start screen wrote it: the reference root, and the GLOBAL dial. */
-  function request(dial: Dial): BuildRequest {
-    return { idea: 'a tokenizer', recreate: true, repo: refRoot, target, dial };
+  /** `request.json` as `loadRequest` hands it over: the RESOLVED reference root, and the
+   *  GLOBAL dial. `repo` is only what the learner typed — for a GitHub URL the two differ,
+   *  and reading `repo` as a path is what T-5's security review found silently refusing. */
+  function request(dial: Dial): ResolvedRequest {
+    return { idea: 'a tokenizer', recreate: true, repo: refRoot, referenceRoot: refRoot, target, dial };
   }
 
   /** A request pointing at a reference that is not there — for the in-memory suites, where the
    *  question is which dial resolves and never what lands on a disk. */
-  function nowhereRequest(dial: Dial): BuildRequest {
-    return { idea: '', recreate: true, repo: '/fixture/reference', target: TARGET, dial };
+  function nowhereRequest(dial: Dial): ResolvedRequest {
+    return { idea: '', recreate: true, repo: '/fixture/reference', referenceRoot: '/fixture/reference', target: TARGET, dial };
   }
 
   /** Every file under `dir`, relative and sorted. The empty array is the assertion AC2 is

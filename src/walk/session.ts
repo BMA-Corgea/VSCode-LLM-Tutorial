@@ -114,7 +114,8 @@
  */
 
 import type { GitRunner } from '../start/build.js';
-import type { BuildRequest, Dial } from '../start/request.js';
+import type { Dial } from '../start/request.js';
+import type { ResolvedRequest } from './store.js';
 import { commitStep } from '../dial/commit.js';
 import type { DialCore } from '../dial/core.js';
 import {
@@ -260,7 +261,7 @@ export interface WalkAdapters {
    * copy from, so every position behaves like `manual` and nothing is claimed on the learner's
    * behalf.
    */
-  loadRequest(target: string): BuildRequest | null;
+  loadRequest(target: string): ResolvedRequest | null;
   /**
    * repo-tour's core, lazily. A PROMISE rather than the getter `StepPanelDeps.skins` uses,
    * and the difference is load-bearing: `activate()` is synchronous and opens the walk before
@@ -362,7 +363,7 @@ export class WalkSession {
     private progress: Progress,
     /** `request.json`, read ONCE at `open` — the reference root and the global dial (AC1).
      *  `null` is ordinary; see `WalkAdapters.loadRequest`. */
-    private readonly request: BuildRequest | null,
+    private readonly request: ResolvedRequest | null,
   ) {}
 
   /**
@@ -695,7 +696,9 @@ export class WalkSession {
     // (the file is not there, the dial reads what it reads).
     const request = this.request;
     if (request === null) return;
-    const refRoot = request.repo;
+    // `referenceRoot`, never `repo`: for a GitHub-URL build those differ, and `repo` is only
+    // what the learner typed. `loadRequest` has already resolved and stat'd this one.
+    const refRoot = request.referenceRoot;
 
     const dial = stepDial(this.progress, stepId, request.dial);
 
@@ -862,7 +865,7 @@ export class WalkSession {
     const step = this.plan.steps.find((s) => s.id === stepId);
     if (!step) return;
 
-    const refRoot = this.request?.repo;
+    const refRoot = this.request?.referenceRoot;
     if (refRoot === undefined) {
       this.noteFor(stepId, 'This tutorial has no reference repository recorded, so there is nothing to check against.');
       return;
@@ -942,7 +945,7 @@ export class WalkSession {
    */
   private reproduceInto(): boolean {
     if (this.progress.reproduced !== undefined) return false;
-    const refRoot = this.request?.repo;
+    const refRoot = this.request?.referenceRoot;
     if (refRoot === undefined || reproduceEntries(this.plan).length === 0) return false;
 
     const problems = reproduceFiles(this.plan, refRoot, this.target);

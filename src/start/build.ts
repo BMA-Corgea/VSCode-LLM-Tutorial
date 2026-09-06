@@ -330,7 +330,10 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
     // Resume finishes the job) or a COMPLETE plan — never a half-written file with nothing
     // left to signal that it is broken (T-3 rework, review finding 2).
     const writeOps = ctx.writeOps ?? realFsWriteOps;
-    writeJsonAtomic(path.join(buildDir(target), 'request.json'), request, writeOps);
+    // `repoRoot`, not `request.repo`: for a GitHub URL those differ, and the one worth
+    // recording is where the clone actually landed. Writing only the URL is what made the
+    // dial silently refuse on every URL-built tutorial (T-5 security review, finding 2).
+    writeJsonAtomic(path.join(buildDir(target), 'request.json'), { ...request, referenceRoot: repoRoot }, writeOps);
     writeJsonAtomic(path.join(buildDir(target), 'plan.json'), interpreted.plan, writeOps);
   } catch (err) {
     return fail(err);

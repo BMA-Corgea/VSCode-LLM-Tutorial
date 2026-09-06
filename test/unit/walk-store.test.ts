@@ -218,12 +218,42 @@ suite('loadRequest — the reference root and the GLOBAL dial (T-5 AC1)', () => 
     fs.writeFileSync(path.join(buildDir(target), 'request.json'), typeof body === 'string' ? body : JSON.stringify(body));
   }
 
-  test('a real request round-trips, carrying the reference root and the global dial', () => {
+  test('a real request round-trips, carrying the RESOLVED reference root and the global dial', () => {
     const target = fixtureTarget();
-    writeRequest(target, { idea: '', recreate: true, repo: '/somewhere/reference', target, dial: 'automated' });
+    const ref = tmpDir();
+    writeRequest(target, { idea: '', recreate: true, repo: ref, referenceRoot: ref, target, dial: 'automated' });
     const req = loadRequest(target);
-    assert.equal(req?.repo, '/somewhere/reference');
+    assert.equal(req?.referenceRoot, ref);
     assert.equal(req?.dial, 'automated');
+  });
+
+  test('a GitHub URL in `repo` is not a path — `referenceRoot` is what gets used', () => {
+    // The bug (T-5 security review, finding 2): for a URL build, `repo` is the URL and the
+    // clone path used to be computed and thrown away. Everything downstream then resolved the
+    // URL as a relative path and refused one read at a time, silently.
+    const target = fixtureTarget();
+    const clone = tmpDir();
+    writeRequest(target, { idea: '', recreate: true, repo: 'https://github.com/o/n', referenceRoot: clone, target, dial: 'automated' });
+    assert.equal(loadRequest(target)?.referenceRoot, clone);
+  });
+
+  test('a reference root that is not an existing directory is refused ONCE, here', () => {
+    // Rather than failing one read at a time, deeper in, where each failure looks like an
+    // ordinary "that file is not written yet".
+    const target = fixtureTarget();
+    for (const root of ['https://github.com/o/n', '/nowhere/at/all', planPath(target)]) {
+      writeRequest(target, { idea: '', recreate: true, repo: root, referenceRoot: root, target, dial: 'manual' });
+      assert.equal(loadRequest(target), null, `${root} is not a usable reference root`);
+    }
+  });
+
+  test('a request written before `referenceRoot` existed falls back to `repo`', () => {
+    // Correct precisely because a build old enough to lack the field could only have been a
+    // local path — the URL case is what introduced the field.
+    const target = fixtureTarget();
+    const ref = tmpDir();
+    writeRequest(target, { idea: '', recreate: true, repo: ref, target, dial: 'scaffolded' });
+    assert.equal(loadRequest(target)?.referenceRoot, ref);
   });
 
   test('no request.json at all is null — a walkable tutorial that simply cannot be written into', () => {
@@ -246,7 +276,8 @@ suite('loadRequest — the reference root and the GLOBAL dial (T-5 AC1)', () => 
 
   test('a dial outside DIALS falls back to the default rather than being trusted', () => {
     const target = fixtureTarget();
-    writeRequest(target, { repo: '/ref', dial: 'turbo' });
+    const ref = tmpDir();
+    writeRequest(target, { repo: ref, referenceRoot: ref, dial: 'turbo' });
     // "manual" is the only fallback that cannot overstate what has happened to the
     // learner's files, so a hand-edited or future value must not survive as itself.
     assert.equal(loadRequest(target)?.dial, DEFAULT_DIAL);
