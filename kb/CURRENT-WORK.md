@@ -13,7 +13,7 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — plan
+- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — build
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
@@ -21,31 +21,21 @@ here and found via the reference table below.
 
 ### Where that stands
 
-**T-5 — the dial. COMPLETE.** Merged as `1167f91`; the full pipeline ran. Tests across T-4 and
-T-5 went from 89 unit + 20 vscode-test to **479 + 50**. Verified on the INSTALLED `.vsix`
-against the real 61-step plan, not the dev host: automated mode wrote the step's file
-byte-for-byte, copied all 15 never-taught files, and committed under the folder's own git
-identity. Evidence and screenshot in `.autodev/evidence/T-5/`.
+**T-6 — the tutor. BUILT, not yet reviewed or merged.** Branch `feature/T-6-tutor`, worktree
+`../VSCode-LLM-Tutorial-T-6`, 4 commits. All 7 plan steps, all 5 ACs. **653 unit + 58
+vscode-test**, green under both display methods (T-6 began at 479 + 50).
 
-**One delta from T-1 §5.4 is on the record for the owner**, not decided: he wrote that
-automated mode's panel "walks each load-bearing range and narrates"; what ships reveals and
-decorates the STEP's range. Identical for a symbol step, visible only on a multi-range file
-step. Whether a per-range walk earns its complexity is a feel question.
+**RESUME BY RUNNING THE TWO MACHINE REVIEWS** (code + security), the way T-4 and T-5 ran them
+— `.autodev/reviews/T-5-*.md` shows the shape and the standard. Both of those tickets had
+must-fix findings; this one has not been reviewed at all yet. Full account and the resume
+command: `.autodev/handoffs/T-6.md`.
 
-**Both machine reviews found things worth more than the feature**, all fixed in-diff: a write
-that could escape the target through a symlinked directory, a commit that took the whole index
-rather than the step's file, a file the dial wrote but never revealed, and — before that — an
-entry pass that was dropped rather than deferred when the learner navigated quickly. The
-durable form of each is in `kb/wiki/lessons.md`, which is now nine lessons rather than a stub.
+One thing already flagged for the reviewer: `checkReachable` is only called inside `beginAsk`,
+so the reachability line appears after the first press rather than beside the input from the
+start. AC4 as specified still holds; the refinement note's wording is only half wired.
 
-**T-6 is next and must RECONCILE FIRST.** It was refined against T-4's plan, and both T-4 and
-T-5 have since moved the surfaces it edits. The two it will trip on: `stepRenderKey` (a
-rendered field missing from the repaint key is stored and never drawn, failing no test), and
-the panel's client-side `note` channel, which has had no producer since T-5 deleted the
-"arrives with T-5" placeholder — T-6's tutor is what fills it, and its clearing-on-navigation
-is currently untested as a result.
-
-**T-1** is complete and routed into T-2…T-10 here plus repo-tour T-11…T-13.
+**T-4 and T-5 are complete and merged.** T-7 (the detour) and T-8 (publish) are parked at
+`plan`; T-9 and T-10 untouched at `dir-goals`.
 
 ## Waiting on
 
