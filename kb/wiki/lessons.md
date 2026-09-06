@@ -9,6 +9,33 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A rejected `GitRunner` call has thrown its stdout away (T-6)
+
+`realGit` builds its `Error` from `(stderr || err.message)` and drops stdout. So for any git
+command whose OUTPUT is the answer and whose non-zero exit is the NORMAL case —
+`git diff --no-index` exits 1 when the files differ, with an empty stderr — catching the
+rejection gets you nothing to read.
+
+Written the obvious way ("catch the exit-1 and read the output"), a diff module produces a
+diff only when the two files are IDENTICAL: the one case with nothing to say. Have git write
+the result somewhere instead (`--output=<file>`) and read it on both exit paths. That also
+bounds what is pulled into memory, which `execFile`'s 64 MB `maxBuffer` otherwise does not.
+
+The general form: before catching a rejection to read a result out of it, check that the
+runner you are using actually carries the result into the rejection.
+
+## Two clips in a row: the inner one wins, and it takes your marker with it (T-6)
+
+The tutor clips the learner's diff before handing it to repo-tour's `buildContextBlock`, which
+clips at 8,000 itself with its own bare `… (truncated)`. Clip at anything above that and the
+outer marker is cut off by the inner clip — the learner is billed for text the model never
+sees, and the sentence explaining why is the first thing lost.
+
+Match the downstream limit exactly, and assert the marker survives into the RENDERED output
+rather than into your own return value. Also: an empty value is not always a value —
+`buildContextBlock` guards `if (ctx.build.learnerDiff)`, so "identical" and "we had nothing to
+give it" reach the model looking exactly the same unless one of them says so.
+
 ## `git add <paths>` does not scope a commit (T-5)
 
 `git commit -m <subject>` with no pathspec commits **the whole index**, not the paths you just
