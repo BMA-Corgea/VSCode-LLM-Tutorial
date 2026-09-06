@@ -85,7 +85,9 @@
  *     failed `saveProgress` uses, and the reason `src/dial/check.ts` insists its callers await
  *     rather than fire-and-forget. One chain rather than one promise per click is deliberate:
  *     the tree can fire `goTo` faster than a write completes, and two writes racing the same
- *     file is the one way `writeTextAtomic`'s atomicity could still lose.
+ *     file is the one way `writeTextAtomic`'s atomicity could still lose. Serialised means
+ *     DEFERRED, never dropped — a pass belongs to the step the walk ENTERED, and `applyDial`
+ *     argues at length why one whose step is no longer current still has to run.
  *   - **Never prompt twice for the same (step, file) in one session.** This is the plan's own
  *     named write-ahead risk, and the reason is mechanical rather than theoretical: the tree
  *     re-fires `goTo` for the step already current (that is how a learner asks for their file
@@ -635,6 +637,10 @@ export class WalkSession {
    * Called after the refresh rather than before it, so the surfaces are already showing the
    * step the learner asked for while the write is still being decided; the write's own result
    * arrives as a second push a moment later, carrying `writeNote`.
+   *
+   * The step is PINNED here, at the moment of arrival, and `applyDial` is handed that id
+   * rather than asking what is current when it eventually runs. See there: the pass belongs to
+   * the step the walk entered, and the walk can enter two steps before either pass has run.
    */
   private enterCurrentStep(): void {
     const step = currentStep(this.plan, this.progress);
@@ -645,13 +651,42 @@ export class WalkSession {
   /**
    * The dial, applied to one step (ACs 2, 3, 4, 7).
    *
-   * Reads the step back by id rather than closing over the object, and stops if the walk has
-   * moved on: a job that waited behind a modal for half a minute must not write the file of a
-   * step nobody is looking at any more.
+   * Reads the step back by id rather than closing over the object, because an id is what
+   * survives a wait on this session's chain. What it deliberately does NOT do is check that
+   * the step is still the CURRENT one — that is the rule, not an omission, and it was learned
+   * the expensive way, so read it before putting such a check back:
+   *
+   * **An entry pass belongs to the step the walk ENTERED, not to the step the walk happens to
+   * be on by the time the pass gets its turn.** Two `next()` calls in one tick — an ordinary
+   * double-click on the Next button, or a held keybinding repeating faster than a write — put
+   * two passes on the chain before either can run, and the first of them finds the walk
+   * already a step further on. A staleness check at the top of this method did not DEFER that
+   * pass, it dropped it: the acceptance suite measured two files never written, one commit
+   * where three were due, and no `reportError`, no `writeNote` and no tree mark to say a step
+   * had been skipped, because nothing on this path reports a pass it declined to run. AC6 is
+   * "walking every step in automated mode reproduces the reference byte-for-byte", and
+   * clicking Next twice is walking; AC7's commit per completed step goes the same way, since a
+   * file that was never written completes nothing.
+   *
+   * The check that used to be here argued that "a job that waited behind a modal for half a
+   * minute must not write the file of a step nobody is looking at any more". The modal is
+   * precisely why that cannot happen: `confirmOverwrite` is a `showWarningMessage(..., {
+   * modal: true })` (`src/extension.ts`), which blocks the window, so the learner cannot
+   * navigate while it is up. And when they do answer — *Overwrite*, about a file named to them
+   * in the dialog — that answer is honoured wherever the walk has since gone, because
+   * `writeFile` has already recorded the pair in `prompted`, and a later visit would otherwise
+   * tell them their version was kept on the one occasion they asked for the opposite.
+   *
+   * What DOES cancel a pass in flight is the session going away, and that is what the two
+   * `disposed` re-checks below — plus the third inside `writeFile`, which is the one that
+   * guards the bytes — are for. `enqueue` re-guards a job that has not started yet; only the
+   * job can guard itself once it has. A disposed session's target may already belong to the
+   * session that replaced it — writing the same files, from a `prompted` set that starts empty
+   * — and a `commit` from a dead session drives surfaces the new one has claimed.
    */
   private async applyDial(stepId: string): Promise<void> {
     const step = this.plan.steps.find((s) => s.id === stepId);
-    if (!step || this.progress.current !== stepId) return;
+    if (!step) return;
 
     // No `request.json` means no reference root: there is nothing to copy FROM, so no position
     // can write and none pretends to. Deliberately quiet — the plan is on disk without the
@@ -678,6 +713,10 @@ export class WalkSession {
     if (step.kind !== 'file') return;
 
     const core = await this.adapters.core();
+    // The first of this method's two `disposed` re-checks (see its header). Everything past
+    // here writes into the learner's folder or pushes to a surface — `reportCoreMissing`
+    // included — and a session torn down while the core was loading owns neither any more.
+    if (this.disposed) return;
     if (!core) {
       this.reportCoreMissing();
       return;
@@ -714,6 +753,9 @@ export class WalkSession {
     }
 
     const attempt = await this.writeFile(step, planned.path, planned.content);
+    // The second re-check, and the one that matters most: `writeFile` can wait on a human, and
+    // everything below it persists progress, pushes it to four surfaces and commits.
+    if (this.disposed) return;
     if (attempt.note !== undefined) this.note = { stepId, text: attempt.note };
 
     // AC7's other half: an automated step has no check to pass — the file IS the reference —
@@ -775,7 +817,13 @@ export class WalkSession {
         };
       }
       this.prompted.add(key);
-      if (!(await this.adapters.confirmOverwrite(step.target.file))) {
+      const overwrite = await this.adapters.confirmOverwrite(step.target.file);
+      // The learner's answer is honoured wherever the WALK has moved to while the dialog was
+      // up (`applyDial`'s header argues why, and why the modal makes that a narrow case). A
+      // SESSION torn down under it is the exception: its target may already belong to the
+      // session that replaced it, and no note is left either, since there is nobody to read one.
+      if (this.disposed) return { landed: false, wrote: false };
+      if (!overwrite) {
         return { landed: false, wrote: false, note: `Your own ${step.target.file} was kept. Nothing was written over it.` };
       }
       overwriting = true;

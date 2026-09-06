@@ -1008,14 +1008,17 @@ suite('the dial, the check and the commit (T-5)', () => {
     return { session, fake, plan };
   }
 
-  /** The plan with one step's `kind` flipped to `file`. Used to reach `src/api/routes.ts` — the
-   *  only fixture file that has imports — through the file path, since the fixture's own file
-   *  step points at `src/parse.ts`, which has none. */
-  function asFileStep(stepId: string): PlanLike {
+  /** The plan with the named steps' `kind` flipped to `file`. One id reaches
+   *  `src/api/routes.ts` — the only fixture file that has imports — through the file path,
+   *  since the fixture's own file step points at `src/parse.ts`, which has none. Several ids
+   *  give the plan a RUN of consecutive file steps, which is what a walk that writes on every
+   *  arrival needs in order to be walked at all. */
+  function asFileStep(...stepIds: string[]): PlanLike {
+    const flipped = new Set(stepIds);
     const plan = fixturePlan();
     return {
       ...plan,
-      steps: plan.steps.map((step) => (step.id === stepId ? { ...step, kind: 'file' as const } : step)),
+      steps: plan.steps.map((step) => (flipped.has(step.id) ? { ...step, kind: 'file' as const } : step)),
     };
   }
 
@@ -1558,6 +1561,108 @@ suite('the dial, the check and the commit (T-5)', () => {
 
       assert.deepEqual(tree(target), [],
         'that step applies it when the learner arrives, which is the same rule open and goTo follow rather than a second one');
+    });
+
+    /**
+     * The acceptance suite found this one, and it is worth stating what it actually was.
+     *
+     * `applyDial` opened by returning unless its step was STILL the current one — a staleness
+     * check ahead of every `await`, so a pass that had merely been queued behind another was
+     * not deferred, it was dropped. Two `next()` calls in one tick (an ordinary double-click on
+     * the Next button; a held keybinding repeats the same way) put two passes on the chain
+     * before either could run, and the first one found the walk already on the second step and
+     * did nothing at all: no file, no `markDone`, no commit, and — the part that made it worth
+     * a suite of its own — no `reportError` and no `writeNote` either. A learner would find a
+     * file missing from a walk that reported nothing wrong, and `diff -r` would fail AC6 on a
+     * gesture nobody would think to mention in a bug report.
+     */
+    suite('a step the walk enters applies its dial, however fast the learner walks (AC6, AC7)', () => {
+      const STEP_3_SUBJECT = '3: Fill in handleRequest — how should this function do its job? — What the author did';
+      const STEP_4_SUBJECT = '4: Fill in render — how should a response be turned into markup? — What the author did';
+
+      test('two Next presses in ONE tick write BOTH files and commit BOTH steps', async () => {
+        // A RUN of consecutive file steps: the fixture's own single file step cannot be walked
+        // past, so it cannot show a pass being skipped.
+        const { session, fake } = await walking({
+          dial: 'automated',
+          plan: asFileStep('st-3-symbol-handle', 'st-4-symbol-render'),
+        });
+        assert.deepEqual(tree(target), ['src/parse.ts'], 'the step the walk opened on, already applied');
+        fake.clearLog();
+
+        // Both navigations land before a single queued job has had a chance to run — which is
+        // exactly what a double-click is, and what the old guard could not survive.
+        session.next();
+        session.next();
+        await session.settled();
+
+        assert.deepEqual(tree(target), ['src/api/render.ts', 'src/api/routes.ts', 'src/parse.ts'],
+          'AC6 is "walking every step in automated mode reproduces the reference", and clicking Next twice is walking');
+        assert.ok(sameBytes('src/api/routes.ts'),
+          'the step the walk moved off is still a step the walk ENTERED, and entering a step is what applies its dial');
+        assert.ok(sameBytes('src/api/render.ts'));
+        assert.deepEqual(
+          pick(fake, 'git').filter((call) => call.args[0] === 'commit').map((call) => call.args[3]),
+          [STEP_3_SUBJECT, STEP_4_SUBJECT],
+          'AC7 is a commit per completed step, and a step whose file was never written completes nothing to commit',
+        );
+        assert.deepEqual(
+          ['st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render'].map((id) => fake.stored()?.steps[id]?.status),
+          ['done', 'done', 'done'],
+          'and the tree marks every one of them, rather than leaving a hole nobody can account for',
+        );
+        assert.deepEqual(pick(fake, 'reportError'), [],
+          'nothing to report is only honest when nothing was skipped — the dropped pass said nothing either');
+        assert.match(session.getView()?.writeNote ?? '', /render\.ts/,
+          'the sentence still describes the step in front of the learner, never the one the queue caught up on');
+      });
+
+      test('the passes run in the order they were entered, and each writes its own step\'s file', async () => {
+        const { session, fake } = await walking({
+          dial: 'automated',
+          plan: asFileStep('st-3-symbol-handle', 'st-4-symbol-render'),
+        });
+        fake.clearLog();
+
+        session.next();
+        session.next();
+        await session.settled();
+
+        assert.deepEqual(pick(fake, 'readText').map((call) => call.absPath),
+          [path.join(target, 'src/api/routes.ts'), path.join(target, 'src/api/render.ts')],
+          'serialised, in entry order: two passes racing one destination is the one way an atomic write still loses');
+      });
+
+      test('a session disposed while the prompt is up writes nothing when the answer arrives', async () => {
+        // The one thing that DOES cancel a pass in flight, and the reason the rule is about the
+        // session being alive rather than about which step is current: a disposed session's
+        // target may already belong to a replacement session writing the same file.
+        writeTarget('src/parse.ts', 'export function tokenize() {\n  return [];  // my own attempt\n}\n');
+        const before = readTarget('src/parse.ts');
+        const plan = fixturePlan();
+        const fake = fakeAdapters({
+          plan,
+          target,
+          request: request('automated'),
+          progress: setCurrent(emptyProgress(plan), 'st-2-file-parse'),
+        });
+        const walk: { session?: WalkSession } = {};
+        walk.session = WalkSession.open(target, {
+          ...fake.adapters,
+          // The walk is torn down between the question and the answer — the folder was closed,
+          // or a rebuild replaced the session — which is the one thing an `await` inside a pass
+          // cannot see for itself.
+          confirmOverwrite: async (relPath) => {
+            walk.session?.dispose();
+            return fake.adapters.confirmOverwrite(relPath);
+          },
+        });
+        await walk.session.settled();
+
+        assert.equal(readTarget('src/parse.ts'), before, 'not one byte of the learner’s file was touched');
+        assert.deepEqual(pick(fake, 'saveProgress'), [],
+          'and nothing was persisted or pushed on behalf of a walk that is no longer running');
+      });
     });
   });
 });
