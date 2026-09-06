@@ -118,3 +118,17 @@ Our render caps defend against this; they do not fix it, and the fix belongs ups
 
 Consuming code should keep treating plan text as untrusted and unbounded regardless of what
 repo-tour does about this — but a cap at the producer is worth a ticket on repo-tour's board.
+
+## repo-tour's `build` module moved (T-11's exports map)
+
+`repo-tour/dist/build.js` no longer exists — the module now resolves at
+`dist/build/index.js`. `src/core.ts`'s `loadCore` tries the published subpath exports first
+and only falls back to `dist/<mod>.js`, so nothing in this extension broke, but **anything
+reaching for the old path directly will**. Found while wiring T-5's writer against
+`stubFile`.
+
+Related, and easy to lose an hour to: **`stubFile` normalises line endings** (it splits on
+`/\r?\n/` and joins with `\n`). Harmless for scaffolded output, which has no byte-equality
+requirement — but it means scaffolded output can never be byte-compared against a CRLF
+reference. Automated mode bypasses `stubFile` entirely and IS byte-exact, which is what AC6's
+`diff -r` depends on.
