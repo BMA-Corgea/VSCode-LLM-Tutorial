@@ -13,7 +13,7 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — build
+- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — auto-review
 - **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — plan
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
@@ -22,21 +22,27 @@ here and found via the reference table below.
 
 ### Where that stands
 
-**T-5 — the dial.** Branch `feature/T-5-dial`, worktree `../VSCode-LLM-Tutorial-T-5`, cut from
-`main` at `ee9465a`. Where the learner's hands meet the load-bearing line: manual / scaffolded
-/ automated, the structural check behind *Check my work*, and a commit per completed step.
-Its locate and refinement notes were drafted against T-4's *plan*, so the plan now opens with a
-**reconciliation table against T-4's merged code** — twelve names moved. The one worth reading
-twice: the step panel keys repaints on what the page displays, so a check report added without
-also adding it to that key is stored and never drawn, failing no test. Plan:
-`.autodev/plans/T-5.md` §0.
+**T-5 — the dial. BUILT; in review.** Branch `feature/T-5-dial`, worktree
+`../VSCode-LLM-Tutorial-T-5`, 10 commits. All 8 plan steps, all 7 ACs. Tests went from
+261 + 39 at the start of the ticket to **429 unit + 50 vscode-test**, green under both a real
+DISPLAY and `xvfb-run`. Full account: `.autodev/handoffs/T-5.md`.
 
-T-5 also owns the half of AC1 that T-4 deliberately left undone: the GLOBAL dial sits in
-`request.json` and nothing reads it, so `statusText` falls back to `manual` for any step
-without a per-step override.
+AC6 is proven the way it is worded — a real plan built through the core with `cachedOnly`,
+walked in automated mode, then compared to the reference file-for-file and byte-for-byte, with
+a mutation proof that flips a byte a string comparison could not see.
 
-**T-6 is sequenced AFTER T-5**, not parallel — both edit the step panel, protocol and session,
-and a three-way edit of those is not worth the merge.
+**Its own acceptance suite found a real bug rather than passing.** `applyDial`'s staleness
+check sat before its await, so a queued entry pass for a step already navigated past was
+dropped rather than deferred: two `next()` calls in one tick left two files unwritten and one
+commit instead of three, silently. Fixed in `fbf6805`. Nothing caught it earlier because the
+fixture had a single `file` step, and a walk with one file step cannot be walked past one. The
+generalisable form is now in `kb/wiki/lessons.md`.
+
+**T-6 must reconcile before it builds, exactly as T-5 had to.** T-6 was refined against T-4's
+PLAN, and T-5 has since moved more of the same surfaces. Two things it will trip on: the
+panel's repaint key (`stepRenderKey` — a rendered field missing from it is stored and never
+drawn, failing no test), and the fact that the panel's client-side `note` channel now has no
+producer, because T-5 deleted the placeholder that fed it and T-6's tutor is what fills it.
 
 **T-1** is complete and routed into T-2…T-10 here plus repo-tour T-11…T-13.
 
