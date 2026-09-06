@@ -36,7 +36,8 @@ import * as assert from 'node:assert/strict';
 import { DIALS, type Dial } from '../../src/start/request.js';
 import { currentStep, setCurrent, stepDial } from '../../src/walk/model.js';
 import {
-  handleStepMessage, parseStepMessage, type StepEffects, type StepViewState,
+  MAX_ASK_TEXT, NOTHING_TO_ASK_MESSAGE, askTooLongMessage, handleStepMessage, parseStepMessage,
+  type StepEffects, type StepViewState,
 } from '../../src/walk/step-protocol.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
@@ -47,12 +48,20 @@ interface Calls {
   reproduce: number;
   persistDial: Array<[string, Dial]>;
   persistSkin: string[];
+  /** T-6: every question that actually reached the session, exactly as it was handed over —
+   *  which is how the two refusals below are proved to be refusals and not merely quiet. */
+  ask: string[];
+  cancelAsk: number;
 }
 
-const NOTHING: Calls = { goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [] };
+function noCalls(): Calls {
+  return { goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [], cancelAsk: 0 };
+}
+
+const NOTHING: Calls = noCalls();
 
 function fakeEffects(): { effects: StepEffects; calls: Calls } {
-  const calls: Calls = { goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [] };
+  const calls = noCalls();
   const effects: StepEffects = {
     goTo: (stepId) => { calls.goTo.push(stepId); },
     openFile: () => { calls.openFile += 1; },
@@ -60,6 +69,10 @@ function fakeEffects(): { effects: StepEffects; calls: Calls } {
     reproduce: () => { calls.reproduce += 1; },
     persistDial: (stepId, dial) => { calls.persistDial.push([stepId, dial]); },
     persistSkin: (name) => { calls.persistSkin.push(name); },
+    // The one effect in this protocol that can spend money, and it is a recorder here like
+    // every other — nothing in this suite has a provider anywhere near it.
+    ask: (text) => { calls.ask.push(text); },
+    cancelAsk: () => { calls.cancelAsk += 1; },
   };
   return { effects, calls };
 }
@@ -81,7 +94,12 @@ function stateAt(stepId: string, overrides: Partial<StepViewState> = {}): StepVi
   const progress = setCurrent(fixtureProgress(plan), stepId);
   const step = currentStep(plan, progress);
   assert.ok(step, `the fixture plan should contain a step ${stepId}`);
-  return { plan, progress, step, fileExists: true, dial: stepDial(progress, stepId), skin: 'system', ...overrides };
+  return {
+    plan, progress, step, fileExists: true, dial: stepDial(progress, stepId), skin: 'system',
+    // T-6: a step nobody has asked about has an EMPTY conversation, which is the ordinary
+    // state and the one every test below starts from unless it says otherwise.
+    transcript: [], ...overrides,
+  };
 }
 
 suite('handleStepMessage — step:next / step:prev (AC2\'s Next and Previous)', () => {
@@ -296,8 +314,8 @@ suite('parseStepMessage — malformed input is null, never a throw', () => {
 });
 
 suite('parseStepMessage — every real message still gets through (discriminates)', () => {
-  test('the five no-payload messages parse to exactly themselves, with or without an empty payload', () => {
-    for (const type of ['step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run'] as const) {
+  test('the six no-payload messages parse to exactly themselves, with or without an empty payload', () => {
+    for (const type of ['step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'tutor:cancel'] as const) {
       assert.deepEqual(parseStepMessage({ type }), { type });
       assert.deepEqual(parseStepMessage({ type, payload: {} }), { type }, 'the client sends an empty payload; the extra is dropped');
     }
@@ -342,5 +360,153 @@ suite('parseStepMessage — every real message still gets through (discriminates
       handleStepMessage(stateAt('st-2-file-parse'), parsed, effects);
       assert.deepEqual(calls, { ...NOTHING, [field]: 1 }, `${raw.type} drives ${field}, and only ${field}`);
     }
+  });
+});
+
+// ── T-6: the tutor ─────────────────────────────────────────────────────────────────────────
+
+suite('handleStepMessage — tutor:ask sends (AC2)', () => {
+  test('hands the question to the session exactly once, and clears any previous refusal', () => {
+    const { effects, calls } = fakeEffects();
+    const state = stateAt('st-2-file-parse', { note: NOTHING_TO_ASK_MESSAGE });
+    const result = handleStepMessage(state, { type: 'tutor:ask', payload: { text: 'Why not keep it inline?' } }, effects);
+
+    assert.deepEqual(calls, { ...NOTHING, ask: ['Why not keep it inline?'] });
+    assert.equal(result.state.note, undefined, 'a refusal left under a question the tutor is answering would be a stale sentence stated confidently');
+    assert.deepEqual(result.post, { type: 'step:note', payload: { note: '' } }, 'and the node on the page is cleared without a repaint');
+  });
+
+  test('the question is TRIMMED before it is sent — the session stores exactly what it is given', () => {
+    const { effects, calls } = fakeEffects();
+    handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:ask', payload: { text: '  \n why?  \n\n ' } }, effects);
+    assert.deepEqual(calls.ask, ['why?']);
+  });
+
+  test('a question exactly at the cap goes through — the boundary is inclusive', () => {
+    const { effects, calls } = fakeEffects();
+    const text = 'q'.repeat(MAX_ASK_TEXT);
+    const result = handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:ask', payload: { text } }, effects);
+
+    assert.deepEqual(calls.ask, [text]);
+    assert.equal(result.state.note, undefined);
+  });
+
+  test('the caller\'s state is not edited in place', () => {
+    const { effects } = fakeEffects();
+    const state = stateAt('st-2-file-parse', { note: NOTHING_TO_ASK_MESSAGE });
+    handleStepMessage(state, { type: 'tutor:ask', payload: { text: 'why?' } }, effects);
+    assert.equal(state.note, NOTHING_TO_ASK_MESSAGE, 'a new state is returned; the one handed in survives');
+  });
+});
+
+suite('handleStepMessage — tutor:ask REFUSES, and says so (the note channel\'s producer)', () => {
+  test('an empty box is answered, not swallowed — in the state AND in the posted message', () => {
+    // Both halves, because the panel needs both. The FIELD is what a later repaint renders
+    // (`step-panel.ts` mirrors it out of the returned state); the POST is what puts the
+    // sentence on the page right now, without a repaint — which is the whole reason this
+    // channel was kept when T-5 deleted its only other producer.
+    const { effects, calls } = fakeEffects();
+    const result = handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:ask', payload: { text: '' } }, effects);
+
+    assert.deepEqual(calls, NOTHING, 'nothing was asked, so nothing was spent');
+    assert.equal(result.state.note, NOTHING_TO_ASK_MESSAGE);
+    assert.deepEqual(result.post, { type: 'step:note', payload: { note: NOTHING_TO_ASK_MESSAGE } });
+  });
+
+  test('whitespace alone is an empty box — a stray Enter is not a question', () => {
+    for (const text of [' ', '\n', '\t\t', '   \n  \n ']) {
+      const { effects, calls } = fakeEffects();
+      const result = handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:ask', payload: { text } }, effects);
+      assert.deepEqual(calls.ask, [], `${JSON.stringify(text)} is not a question`);
+      assert.equal(result.state.note, NOTHING_TO_ASK_MESSAGE);
+    }
+  });
+
+  test('a question past the cap is refused with the COUNT in it, and nothing is sent', () => {
+    const { effects, calls } = fakeEffects();
+    const text = 'q'.repeat(MAX_ASK_TEXT + 1);
+    const result = handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:ask', payload: { text } }, effects);
+
+    assert.deepEqual(calls, NOTHING, 'the cap is a cap on the learner\'s money as much as on this panel\'s work');
+    assert.equal(result.state.note, askTooLongMessage(MAX_ASK_TEXT + 1));
+    assert.deepEqual(result.post, { type: 'step:note', payload: { note: askTooLongMessage(MAX_ASK_TEXT + 1) } });
+    // The exported sentence really does carry the two numbers — a vague "too long" would leave
+    // the learner guessing at a limit the page never named.
+    assert.match(result.state.note ?? '', new RegExp(String(MAX_ASK_TEXT + 1)));
+    assert.match(result.state.note ?? '', new RegExp(String(MAX_ASK_TEXT)));
+  });
+
+  test('the LENGTH that is measured is the trimmed one, so padding cannot push a legal question over', () => {
+    const { effects, calls } = fakeEffects();
+    const text = `${'q'.repeat(MAX_ASK_TEXT)}${' '.repeat(50)}`;
+    handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:ask', payload: { text } }, effects);
+    assert.equal(calls.ask.length, 1, 'trailing whitespace is not part of the question');
+  });
+});
+
+suite('handleStepMessage — tutor:cancel (AC4)', () => {
+  test('drives cancelAsk once, changes nothing, and posts no reply', () => {
+    const { effects, calls } = fakeEffects();
+    const state = stateAt('st-2-file-parse', { tutor: { thinking: true } });
+    const result = handleStepMessage(state, { type: 'tutor:cancel' }, effects);
+
+    assert.deepEqual(calls, { ...NOTHING, cancelAsk: 1 });
+    assert.equal(result.state, state, 'the spinner comes off on the session\'s push, which is the only thing that knows there was one');
+    assert.equal(result.post, undefined);
+  });
+
+  test('routes even when the state it holds shows nothing in flight', () => {
+    // Same rule as `reproduce:run`: the panel's snapshot can be one push out of date and the
+    // session cannot. A guard here would drop a Cancel pressed the instant before a refresh.
+    const { effects, calls } = fakeEffects();
+    handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:cancel' }, effects);
+    assert.equal(calls.cancelAsk, 1);
+  });
+});
+
+suite('parseStepMessage — the tutor\'s two messages', () => {
+  test('tutor:ask carries the text through, and drops anything smuggled beside it', () => {
+    assert.deepEqual(
+      parseStepMessage({ type: 'tutor:ask', payload: { text: 'why?', provider: 'evil', model: 'expensive' } }),
+      { type: 'tutor:ask', payload: { text: 'why?' } },
+      'the parser returns a message it built itself — a crafted provider cannot ride along to whatever reads it next',
+    );
+  });
+
+  test('a text that is not a string is null — SHAPE is what this function judges', () => {
+    for (const raw of [
+      { type: 'tutor:ask' },
+      { type: 'tutor:ask', payload: null },
+      { type: 'tutor:ask', payload: {} },
+      { type: 'tutor:ask', payload: { text: 42 } },
+      { type: 'tutor:ask', payload: { text: null } },
+      { type: 'tutor:ask', payload: { text: ['why?'] } },
+      { type: 'tutor:ask', payload: { text: { toString: 'why?' } } },
+    ]) {
+      assert.equal(parseStepMessage(raw), null, `expected null for ${JSON.stringify(raw)}`);
+    }
+  });
+
+  test('an empty or oversized text still PARSES — the refusal belongs to the handler, not here', () => {
+    // The split this pair exists to pin. If the parser rejected these, the panel would log one
+    // line to an output channel and the learner would watch the button do nothing; because it
+    // accepts them, `handleStepMessage` gets to answer with a sentence.
+    for (const text of ['', '   ', 'q'.repeat(MAX_ASK_TEXT + 1000)]) {
+      assert.deepEqual(parseStepMessage({ type: 'tutor:ask', payload: { text } }), { type: 'tutor:ask', payload: { text } });
+    }
+  });
+
+  test('and both parse straight into the handler (the two ends line up)', () => {
+    const { effects, calls } = fakeEffects();
+    const ask = parseStepMessage({ type: 'tutor:ask', payload: { text: 'why?' } });
+    assert.ok(ask);
+    handleStepMessage(stateAt('st-2-file-parse'), ask, effects);
+    assert.deepEqual(calls, { ...NOTHING, ask: ['why?'] });
+
+    const { effects: e2, calls: c2 } = fakeEffects();
+    const cancel = parseStepMessage({ type: 'tutor:cancel', payload: {} });
+    assert.ok(cancel);
+    handleStepMessage(stateAt('st-2-file-parse'), cancel, e2);
+    assert.deepEqual(c2, { ...NOTHING, cancelAsk: 1 });
   });
 });

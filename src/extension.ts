@@ -27,6 +27,7 @@ import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
+import { tutorCoreFor, type TutorCore } from './tutor/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
 
 let outputChannel: vscode.OutputChannel | undefined;
@@ -344,6 +345,11 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
       return choice === 'Overwrite';
     },
     git: realGit,
+
+    // ── T-6: the tutor ───────────────────────────────────────────────────────────────────
+    tutorCore: () => ensureTutorCore(context),
+    tutorSettings: tutorSettingsNow,
+
     commitPerStep: () => vscode.workspace.getConfiguration('buildTutorials').get<boolean>('commitPerStep', true),
     // The walk's channel for a failure the LEARNER has to know about — today, a
     // `progress.json` that cannot be written (a read-only checkout, a full disk), which costs
@@ -449,6 +455,44 @@ function ensureDialCore(context: vscode.ExtensionContext): Promise<DialCore | un
     core.found ? dialCoreFor(core.loaded) : undefined,
   );
   return walkDialCore;
+}
+
+/**
+ * The tutor's slice of repo-tour, loaded once and memoised — a promise for the same reason
+ * `ensureDialCore` is one: `activate()` is synchronous and the walk opens before `loadCore`
+ * resolves.
+ *
+ * Separate from the dial's core rather than merged into it because the two answer to different
+ * questions. The dial's is reached on every navigation and must not be optional in practice;
+ * the tutor's is reached only when someone asks, and a missing one is a sentence in the panel
+ * rather than a broken walk.
+ */
+let walkTutorCore: Promise<TutorCore | undefined> | undefined;
+
+function ensureTutorCore(context: vscode.ExtensionContext): Promise<TutorCore | undefined> {
+  walkTutorCore ??= loadCore(configuredRepoTourRoot(context)).then((core) =>
+    core.found ? tutorCoreFor(core.loaded) : undefined,
+  );
+  return walkTutorCore;
+}
+
+/**
+ * The tutor's provider, model and deadline.
+ *
+ * `tutorModel` is deliberately NOT `llmModel`. repo-tour keeps the two apart and its reasoning
+ * transfers exactly: the build model is picked for what interpreting a whole repository costs,
+ * once, in the background, while an ask is one question from one learner at the moment they
+ * are already stuck. Empty means unset, which `resolveTutorChoice` reads as the provider's
+ * STRONGEST model — the right way round for the only place in this extension where a wrong
+ * answer is read by a person who is already confused.
+ */
+function tutorSettingsNow(): { provider: string; model: string; timeoutMs: number } {
+  const config = vscode.workspace.getConfiguration('buildTutorials');
+  return {
+    provider: config.get<string>('llmProvider', 'claude'),
+    model: config.get<string>('tutorModel', ''),
+    timeoutMs: Math.max(5, config.get<number>('tutorTimeoutSeconds', 120)) * 1000,
+  };
 }
 
 function registerWalk(context: vscode.ExtensionContext): void {

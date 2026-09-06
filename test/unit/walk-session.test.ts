@@ -70,6 +70,8 @@ import {
   type Progress,
   type RangeLike,
 } from '../../src/walk/model.js';
+import type { AskMessage, Availability, LlmReply, TutorCore } from '../../src/tutor/core.js';
+import { getTranscript } from '../../src/tutor/transcript.js';
 import { WalkSession, type WalkAdapters, type WalkView } from '../../src/walk/session.js';
 import { fixturePlan, fixtureProgress, writeFixtureTarget } from './walk-fixtures.js';
 
@@ -106,7 +108,15 @@ type Call =
   // `planWrite` at all, and it is invisible from the outside if the core is silent.
   | { fn: 'stubFile'; language: string; ranges: RangeLike[]; questions: StubQuestion[] }
   | { fn: 'coreCheck'; relPath: string; language: string; learnerSource: string }
-  | { fn: 'coreExtract'; root: string; paths: string[] };
+  | { fn: 'coreExtract'; root: string; paths: string[] }
+  // ── T-6 ───────────────────────────────────────────────────────────────────────────────────
+  | { fn: 'tutorCore' }
+  | { fn: 'tutorSettings' }
+  | { fn: 'availability'; providerId: string }
+  // What was actually SENT to a model, as `askTutor` composed it. The prompt is the whole
+  // point: it is how a test can tell "the tutor was given this step" from "something was
+  // asked", without a provider anywhere near the suite.
+  | { fn: 'runLlm'; prompt: string; provider: string; model: string; cwd: string; timeoutMs: number | undefined };
 
 interface Fake {
   adapters: WalkAdapters;
@@ -155,6 +165,28 @@ interface FakeOptions {
   noGitIdentity?: boolean;
   /** Make `git commit` reject, the way a stale lock file or an unchanged tree does. */
   gitFails?: string;
+
+  // ── T-6 ─────────────────────────────────────────────────────────────────────────────────
+
+  /** Wire NO tutor adapters at all — a walk with no *Ask* behind it, which is what every
+   *  suite written before this ticket gets, and what `test/dial.test.ts` gets in production
+   *  code. The two adapters are optional precisely so that stays possible. */
+  noTutor?: boolean;
+  /** `tutorCore()` resolves `undefined` — repo-tour is not loadable, so there is nobody to
+   *  ask. Distinct from `noTutor`: the adapter is wired and answers honestly. */
+  tutorCoreMissing?: boolean;
+  /** What the provider's own `available()` says. Default: reachable. */
+  availability?: Availability;
+  /** What the injected runner answers with. */
+  tutorReply?: string;
+  /** A runner of the test's own — a promise that never settles, one that rejects, one that
+   *  counts its calls. Overrides `tutorReply`. NOTHING in this suite may reach a real model. */
+  tutorRunner?: TutorCore['runLlm'];
+  /** `buildTutorials.tutorTimeoutSeconds`, in milliseconds. Small on purpose: the behaviour
+   *  under test is the race, never the duration. */
+  tutorTimeoutMs?: number;
+  tutorProvider?: string;
+  tutorModel?: string;
 }
 
 /** What the fake core's `stubFile` hands back: nothing like the reference file, so a test can
@@ -236,6 +268,60 @@ function fakeGit(log: Call[], options: FakeOptions): GitRunner {
   };
 }
 
+/** What a poisoned `runLlm` says when a test forgets to inject a runner. Byte-for-byte the
+ *  same guard `test/unit/tutor-ask.test.ts` uses, for the same reason: a suite that quietly
+ *  started dialling a provider must FAIL rather than bill somebody. */
+const SPEND_GUARD = 'a test in walk-session.test.ts reached the real model';
+
+/**
+ * The tutor's slice of repo-tour, faked whole.
+ *
+ * Faked rather than real, and the split is the one `fakeCore` already draws: `tutor-ask.test.ts`
+ * loads the genuine core because its questions are about repo-tour's own prompt building and
+ * thirty-turn trimming, which no fake can answer honestly. The question HERE is what the
+ * SESSION does with an outcome — what it persists, what it pushes, what it says — and for that
+ * a fake is not a weaker version of the real thing, it is the only version that lets a test
+ * choose the outcome.
+ *
+ * `runLlm` is POISONED unless a test injects a runner, so nothing in this suite can reach a
+ * provider by omission. `askTutor` calls whatever `TutorDeps.run` holds and falls back to this,
+ * so the poison is the backstop rather than the path.
+ */
+function fakeTutorCore(log: Call[], options: FakeOptions): TutorCore {
+  const canned = options.tutorReply;
+  const runner: TutorCore['runLlm'] = options.tutorRunner
+    // POISONED by default. A test that drives an ask without saying what the model answers has
+    // not decided what it is testing, and the honest failure is a loud one rather than a canned
+    // sentence appearing from nowhere. `the poison is real` below proves this arm is reachable,
+    // which is what makes every other test's answer evidence that it went through the seam.
+    ?? (canned === undefined
+      ? (): Promise<LlmReply> => Promise.reject(new Error(SPEND_GUARD))
+      : (): Promise<LlmReply> => Promise.resolve({
+        text: canned, inputTokens: 0, outputTokens: 0, usd: 0, metered: false,
+      }));
+  return {
+    // Pure string work, and deliberately recognisable: a test asserting the tutor was told
+    // about THIS step reads the prompt this builds.
+    buildAskPrompt: (messages: AskMessage[], ctx) =>
+      `PROMPT stop=${ctx.stopTitle ?? ''} file=${ctx.file ?? ''} diff=${ctx.build?.learnerDiff ?? ''} turns=${messages.map((m) => `${m.role}:${m.content}`).join('|')}`,
+    buildContextBlock: (ctx) => `CONTEXT ${ctx.file ?? ''}`,
+    trimMessages: (raw) => (Array.isArray(raw) ? (raw as AskMessage[]) : []),
+    resolveChoice: (choice) => ({ provider: choice?.provider ?? 'claude', model: choice?.model ?? 'default' }),
+    resolveTutorChoice: (stored, build) => ({
+      provider: stored?.provider ?? build.provider,
+      model: stored?.model === undefined || stored.model === '' ? 'strongest' : stored.model,
+    }),
+    runLlm: (prompt, choice, cwd, timeoutMs) => {
+      log.push({ fn: 'runLlm', prompt, provider: choice.provider, model: choice.model, cwd, timeoutMs });
+      return runner(prompt, choice, cwd, timeoutMs);
+    },
+    availability: (providerId) => {
+      log.push({ fn: 'availability', providerId });
+      return Promise.resolve(options.availability ?? { ok: true, detail: 'a stubbed provider probe' });
+    },
+  };
+}
+
 function fakeAdapters(options: FakeOptions = {}): Fake {
   const plan = options.plan ?? fixturePlan();
   const target = options.target ?? TARGET;
@@ -246,6 +332,7 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
   if (options.progress) saved.set(target, options.progress);
   const log: Call[] = [];
   const core = fakeCore(log, options);
+  const tutorCore = fakeTutorCore(log, options);
 
   const adapters: WalkAdapters = {
     setTree: (view) => { log.push({ fn: 'setTree', view }); },
@@ -317,6 +404,28 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
       log.push({ fn: 'commitPerStep' });
       return options.commitPerStep ?? true;
     },
+
+    // ── T-6 ─────────────────────────────────────────────────────────────────────────────
+
+    // Spread in rather than assigned, so `noTutor` produces an adapter set with the two keys
+    // genuinely ABSENT — which is the shape `test/dial.test.ts` really has, and the shape
+    // every suite written before this ticket has been running under all along.
+    ...(options.noTutor
+      ? {}
+      : {
+        tutorCore: () => {
+          log.push({ fn: 'tutorCore' });
+          return Promise.resolve(options.tutorCoreMissing ? undefined : tutorCore);
+        },
+        tutorSettings: () => {
+          log.push({ fn: 'tutorSettings' });
+          return {
+            provider: options.tutorProvider ?? 'claude',
+            model: options.tutorModel ?? '',
+            timeoutMs: options.tutorTimeoutMs ?? 5_000,
+          };
+        },
+      }),
   };
 
   return {
@@ -2005,5 +2114,504 @@ suite('the dial, the check and the commit (T-5)', () => {
           'and nothing was persisted or pushed on behalf of a walk that is no longer running');
       });
     });
+  });
+});
+
+// ── T-6: the tutor ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * `request.json` pointing at a reference that is not on disk — the T-5 suite keeps a helper of
+ * the same name inside its own scope, and this is the in-memory twin of it.
+ *
+ * It is the right fixture for every suite below, and not merely a convenience. What
+ * `src/tutor/context.ts` does with a reference file it cannot find is answer `learnerDiff` with
+ * its own `NO_FILE_YET` sentence and spawn no git at all — so these suites are deterministic,
+ * touch nothing on disk, and still exercise the REAL context builder rather than a stand-in for
+ * it. The one thing they are not about is what a diff looks like; `tutor-context.test.ts` owns
+ * that, against real files.
+ */
+function tutorRequest(): ResolvedRequest {
+  return { idea: '', recreate: true, repo: '/fixture/reference', referenceRoot: '/fixture/reference', target: TARGET, dial: 'manual' };
+}
+
+/**
+ * `WalkSession.ask` / `cancelAsk` — the walk's one asynchronous job that spends money, driven
+ * with a fake core and never a provider.
+ *
+ * What these suites are actually guarding, in the order the criteria are numbered:
+ *
+ *   - **AC2, the durable half.** A question and its answer are appended to
+ *     `progress.steps[id].transcript`, through the same atomic `saveProgress` as everything
+ *     else, and read back through `getTranscript`. Switching steps switches transcripts and
+ *     returning restores — asserted through a real reload (`dispose` then `open`), not by
+ *     asking the session what it remembers.
+ *   - **AC3.** What reaches the runner is the step's own context, with the conversation so
+ *     far, at the provider and model the settings resolve to, in the LEARNER's folder.
+ *   - **AC4, in one sentence: no spinner is ever left running.** Every path is asserted to end
+ *     with `tutor.thinking` false — a reply, a timeout, a failure, an unreachable provider, a
+ *     cancel, and a session disposed mid-ask. That is the whole criterion, and it is the one
+ *     thing a suite of only-happy-path tests would miss.
+ *   - **The unreachable / timed out / failed outcomes are NOTES, not turns.** A failure stored
+ *     in the transcript would be sent back to the model on the next question as though the
+ *     tutor had said it.
+ *   - **Not one token is spent.** The fake core's `runLlm` is poisoned unless a test says what
+ *     the model answers, so a suite that quietly started dialling out fails rather than bills.
+ */
+suite('the tutor — asking, and what is remembered (AC2, AC3)', () => {
+  const STEP = 'st-2-file-parse';
+
+  /** The tutor block off the last view pushed to the panel — what the page would draw. */
+  function tutorOf(fake: Fake): { thinking: boolean; unreachable?: string; note?: string } | undefined {
+    const pushes = pick(fake, 'setPanel');
+    return pushes[pushes.length - 1]?.view?.tutor;
+  }
+
+  /** The transcript as the last push carried it — the panel's copy, not the session's. */
+  function shownTranscript(fake: Fake): AskMessage[] {
+    const pushes = pick(fake, 'setPanel');
+    return pushes[pushes.length - 1]?.view?.transcript ?? [];
+  }
+
+  function asking(options: FakeOptions = {}): { session: WalkSession; fake: Fake } {
+    const { session, fake } = opened({ request: tutorRequest(), ...options });
+    return { session, fake };
+  }
+
+  test('a question and its answer both land in the transcript, in order, and on disk', async () => {
+    const { session, fake } = asking({ tutorReply: 'Because the parser would otherwise have two jobs.' });
+
+    session.ask('Why not keep it inline?');
+    await session.settled();
+
+    assert.deepEqual(getTranscript(session.getView()!.progress, STEP), [
+      { role: 'user', content: 'Why not keep it inline?' },
+      { role: 'assistant', content: 'Because the parser would otherwise have two jobs.' },
+    ]);
+    // Through the SAVE, not merely in memory: AC2 is about `progress.json`.
+    assert.deepEqual(getTranscript(fake.stored()!, STEP), getTranscript(session.getView()!.progress, STEP));
+    assert.deepEqual(shownTranscript(fake), getTranscript(fake.stored()!, STEP), 'and the panel is handed exactly what was stored');
+  });
+
+  test('the question is saved BEFORE the model is asked, with the spinner up', async () => {
+    // A window closed mid-ask comes back with the question in the conversation and no answer
+    // under it, which is what really happened. Recording it only on success would lose
+    // questions exactly when a learner most wants to know what they asked.
+    let released: (() => void) | undefined;
+    const { session, fake } = asking({
+      tutorRunner: () => new Promise((resolve) => {
+        released = () => resolve({ text: 'late', inputTokens: 0, outputTokens: 0, usd: 0, metered: false });
+      }),
+    });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(getTranscript(fake.stored()!, STEP), [{ role: 'user', content: 'why?' }], 'the question is on disk while the model is still thinking');
+    assert.equal(tutorOf(fake)?.thinking, true, 'and the page says so');
+
+    released!();
+    await session.settled();
+    assert.equal(tutorOf(fake)?.thinking, false);
+  });
+
+  test('AC3: the runner is handed this step\'s context, the conversation, and the learner\'s folder', async () => {
+    const { session, fake } = asking({ tutorReply: 'because', tutorProvider: 'claude', tutorModel: '', tutorTimeoutMs: 9_000 });
+
+    session.ask('why?');
+    await session.settled();
+
+    const sent = pick(fake, 'runLlm');
+    assert.equal(sent.length, 1, 'one ask is one call — there is no retry and no fallback provider');
+    assert.match(sent[0]!.prompt, /stop=Why does the tokenizer/, 'the tutor is told which decision the learner is inside of');
+    assert.match(sent[0]!.prompt, /file=src\/parse\.ts/);
+    assert.match(sent[0]!.prompt, /diff=The learner has not created this file yet/, 'and how their file differs — here, that there is not one');
+    assert.match(sent[0]!.prompt, /turns=user:why\?/, 'with the conversation so far, this question included');
+    assert.equal(sent[0]!.cwd, TARGET, 'run in the LEARNER\'s folder, never the reference');
+    assert.equal(sent[0]!.timeoutMs, 9_000);
+    // `resolveTutorChoice`, not `resolveChoice`: an unset tutor model means the provider's
+    // STRONGEST, which is the right way round for the one place a wrong answer is read by
+    // somebody who is already confused.
+    assert.deepEqual({ provider: sent[0]!.provider, model: sent[0]!.model }, { provider: 'claude', model: 'strongest' });
+  });
+
+  test('the settings are read PER ASK, so switching provider mid-walk is obeyed', async () => {
+    const { session, fake } = asking({ tutorReply: 'because', tutorProvider: 'codex', tutorModel: 'gpt-5' });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(pick(fake, 'tutorSettings').length, 1, 'read at the moment of the ask, not captured at open');
+    assert.deepEqual(
+      { provider: pick(fake, 'runLlm')[0]!.provider, model: pick(fake, 'runLlm')[0]!.model },
+      { provider: 'codex', model: 'gpt-5' },
+    );
+  });
+
+  test('the second question carries the first exchange with it', async () => {
+    const { session, fake } = asking({ tutorReply: 'because' });
+
+    session.ask('first?');
+    await session.settled();
+    session.ask('second?');
+    await session.settled();
+
+    assert.match(pick(fake, 'runLlm')[1]!.prompt, /turns=user:first\?\|assistant:because\|user:second\?/);
+    assert.equal(getTranscript(fake.stored()!, STEP).length, 4);
+  });
+
+  test('AC2: switching steps switches transcripts, and returning restores — through a real reload', async () => {
+    const { session, fake } = asking({ tutorReply: 'about parse' });
+
+    session.ask('about parse?');
+    await session.settled();
+    session.goTo('st-3-symbol-handle');
+    await session.settled();
+
+    assert.deepEqual(shownTranscript(fake), [], 'a step nobody has asked about has an empty conversation, not the last one');
+
+    session.ask('about handle?');
+    await session.settled();
+    assert.equal(shownTranscript(fake).length, 2);
+
+    // The reload drill, exactly as AC4 of T-4 does it: the second session reads the file back
+    // rather than sharing an object with the first, so a transcript that "survives" only
+    // because two sessions share memory cannot pass here.
+    session.dispose();
+    const reopened = WalkSession.open(TARGET, fake.adapters);
+    await reopened.settled();
+    assert.deepEqual(getTranscript(reopened.getView()!.progress, 'st-3-symbol-handle').map((t) => t.content), ['about handle?', 'about parse']);
+    reopened.goTo(STEP);
+    assert.deepEqual(getTranscript(reopened.getView()!.progress, STEP).map((t) => t.content), ['about parse?', 'about parse']);
+    reopened.dispose();
+  });
+
+  test('an ask that lands after the learner has navigated joins the conversation it belongs to', async () => {
+    // The same rule an entry pass follows, and for the same reason: the learner asked for it.
+    // What must NOT follow them is the spinner, which is tagged with its step.
+    let released: (() => void) | undefined;
+    const { session, fake } = asking({
+      tutorRunner: () => new Promise((resolve) => {
+        released = () => resolve({ text: 'the late answer', inputTokens: 0, outputTokens: 0, usd: 0, metered: false });
+      }),
+    });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.goTo('st-3-symbol-handle');
+    assert.equal(tutorOf(fake)?.thinking, false, 'no spinner on a step the learner merely walked to');
+
+    released!();
+    await session.settled();
+
+    assert.deepEqual(getTranscript(fake.stored()!, STEP).map((t) => t.content), ['why?', 'the late answer']);
+    assert.deepEqual(getTranscript(fake.stored()!, 'st-3-symbol-handle'), [], 'and nothing landed under the step they moved to');
+  });
+});
+
+suite('the tutor is honest, and never leaves a spinner running (AC4)', () => {
+  const STEP = 'st-2-file-parse';
+
+  function tutorOf(fake: Fake): { thinking: boolean; unreachable?: string; note?: string } | undefined {
+    const pushes = pick(fake, 'setPanel');
+    return pushes[pushes.length - 1]?.view?.tutor;
+  }
+
+  function asking(options: FakeOptions = {}): { session: WalkSession; fake: Fake } {
+    return opened({ request: tutorRequest(), ...options });
+  }
+
+  test('an unreachable provider is answered IMMEDIATELY, with its own words, and nothing is spent', async () => {
+    const { session, fake } = asking({ availability: { ok: false, detail: 'claude: not found on PATH' } });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.deepEqual(pick(fake, 'runLlm'), [], 'the probe comes BEFORE the send — nothing was asked and nothing was charged');
+    assert.equal(tutorOf(fake)?.thinking, false, 'and the panel never entered the thinking state at all');
+    assert.equal(tutorOf(fake)?.unreachable, 'claude: not found on PATH', "the provider's own sentence, carried through");
+    assert.match(tutorOf(fake)?.note ?? '', /not found on PATH/);
+    assert.deepEqual(getTranscript(fake.stored() ?? emptyProgress(fixturePlan()), STEP), [], 'a refusal is a note, never a turn');
+  });
+
+  test('the unreachable line OUTLIVES the step, because the condition does', async () => {
+    const { session, fake } = asking({ availability: { ok: false, detail: 'claude: not found on PATH' } });
+
+    session.ask('why?');
+    await session.settled();
+    session.goTo('st-3-symbol-handle');
+    await session.settled();
+
+    const pushes = pick(fake, 'setPanel');
+    const latest = pushes[pushes.length - 1]?.view;
+    assert.equal(latest?.tutor?.unreachable, 'claude: not found on PATH', 'a claude that is not installed is not installed on the next step either');
+    assert.equal(latest?.tutor?.note, undefined, 'but the sentence about that one ask does not follow the learner around');
+  });
+
+  test('a timeout is a REPLY, not a hang — the spinner comes off and the question stays', async () => {
+    const { session, fake } = asking({
+      tutorTimeoutMs: 20,
+      tutorRunner: () => new Promise<LlmReply>(() => { /* never settles: a wedged provider */ }),
+    });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.thinking, false, 'this is the whole of AC4');
+    assert.match(tutorOf(fake)?.note ?? '', /did not answer within/);
+    assert.deepEqual(getTranscript(fake.stored()!, STEP), [{ role: 'user', content: 'why?' }],
+      'their question really was asked and stays in the conversation; the timeout is not a turn');
+  });
+
+  test('a provider that throws is reported as a note, and takes nothing down', async () => {
+    const { session, fake } = asking({ tutorRunner: () => Promise.reject(new Error('the CLI exited with code 127')) });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.thinking, false);
+    assert.match(tutorOf(fake)?.note ?? '', /the CLI exited with code 127/);
+    assert.deepEqual(getTranscript(fake.stored()!, STEP).map((t) => t.role), ['user'], 'a failure is not something the tutor said');
+    assert.deepEqual(pick(fake, 'reportError'), [], 'and a provider that failed is not a broken walk');
+  });
+
+  test('with no tutor wired at all, Ask says so once and writes nothing', async () => {
+    const { session, fake } = asking({ noTutor: true });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.thinking, false);
+    assert.match(tutorOf(fake)?.note ?? '', /nobody to ask/);
+    assert.deepEqual(getTranscript(fake.stored() ?? emptyProgress(fixturePlan()), STEP), []);
+  });
+
+  test('a core that will not load is the same answer, and is reported ONCE per session', async () => {
+    const { session, fake } = asking({ tutorCoreMissing: true });
+
+    session.ask('why?');
+    await session.settled();
+    session.ask('why again?');
+    await session.settled();
+
+    assert.match(tutorOf(fake)?.note ?? '', /nobody to ask/);
+    assert.equal(pick(fake, 'reportError').length, 1, 'a standing condition is stated once, not once per question');
+  });
+
+  test('a walk with no reference recorded refuses rather than paying for half a question', async () => {
+    const plan = fixturePlan();
+    const fake = fakeAdapters({ plan, progress: setCurrent(fixtureProgress(plan), STEP) });
+    const session = WalkSession.open(TARGET, fake.adapters); // no `request`, so no referenceRoot
+    fake.clearLog();
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.deepEqual(pick(fake, 'runLlm'), []);
+    const pushes = pick(fake, 'setPanel');
+    assert.match(pushes[pushes.length - 1]?.view?.tutor?.note ?? '', /no reference repository/);
+    assert.equal(pushes[pushes.length - 1]?.view?.tutor?.thinking, false);
+    session.dispose();
+  });
+
+  test('the poison is real: an ask with no injected answer FAILS rather than dialling out', async () => {
+    // What makes every other test in these suites evidence of anything. `tutorReply` and
+    // `tutorRunner` are the only two ways a model answers here, so a test that forgot to say
+    // what it expects gets this instead of a canned sentence from nowhere.
+    const { session, fake } = asking({});
+
+    session.ask('why?');
+    await session.settled();
+
+    const pushes = pick(fake, 'setPanel');
+    assert.match(pushes[pushes.length - 1]?.view?.tutor?.note ?? '', /reached the real model/);
+  });
+});
+
+suite('the tutor — Cancel detaches, and a late answer can never land (AC4)', () => {
+  const STEP = 'st-2-file-parse';
+
+  function tutorOf(fake: Fake): { thinking: boolean; unreachable?: string; note?: string } | undefined {
+    const pushes = pick(fake, 'setPanel');
+    return pushes[pushes.length - 1]?.view?.tutor;
+  }
+
+  /** An ask that will not answer until the test says so. */
+  function held(): { runner: TutorCore['runLlm']; release: (text: string) => void; calls: () => number } {
+    let resolveWith: ((reply: LlmReply) => void) | undefined;
+    let calls = 0;
+    return {
+      runner: () => {
+        calls += 1;
+        return new Promise<LlmReply>((resolve) => {
+          resolveWith = (reply) => resolve(reply);
+        });
+      },
+      release: (text) => resolveWith?.({ text, inputTokens: 0, outputTokens: 0, usd: 0, metered: false }),
+      calls: () => calls,
+    };
+  }
+
+  test('Cancel takes the spinner off at once, and says the model is still finishing', async () => {
+    const gate = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: gate.runner });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(tutorOf(fake)?.thinking, true);
+
+    session.cancelAsk();
+
+    // SYNCHRONOUS. The whole promise of Cancel is that the spinner goes now, and a Cancel that
+    // waited behind a two-minute model call on the job chain would take two minutes to work.
+    assert.equal(tutorOf(fake)?.thinking, false, 'no await in between');
+    assert.match(tutorOf(fake)?.note ?? '', /still finishing/);
+    assert.match(tutorOf(fake)?.note ?? '', /billed/, 'a cancel that quietly kept costing money would be the dishonest version of the same mechanism');
+  });
+
+  test('the answer to a cancelled question can NEVER appear in the transcript', async () => {
+    // The safety property `AskRun.detach` exists for. The request is still running and still
+    // costing money — nothing here can stop that without killing every other live child — but
+    // the answer has nowhere to land.
+    const gate = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: gate.runner });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.cancelAsk();
+    gate.release('an answer to a question you walked away from');
+    await session.settled();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(getTranscript(fake.stored()!, STEP), [{ role: 'user', content: 'why?' }],
+      'the question they really asked stays; the answer they walked away from never arrives');
+    assert.equal(tutorOf(fake)?.thinking, false);
+  });
+
+  test('Cancel with nothing in flight is a no-op, not a note about nothing', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why?');
+    await session.settled();
+    fake.clearLog();
+    session.cancelAsk();
+
+    assert.deepEqual(fake.names(), [], 'the answer landed while the press was in the air; the reply on screen says more than any sentence about it could');
+  });
+
+  test('after a cancel the learner can ask again, and that answer DOES land', async () => {
+    // The other direction, without which "cancel works" could mean "the tutor is broken now".
+    const gate = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: gate.runner });
+
+    session.ask('first?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.cancelAsk();
+
+    const second = held();
+    const { session: s2, fake: f2 } = opened({ request: tutorRequest(), tutorRunner: second.runner });
+    s2.ask('second?');
+    await new Promise((resolve) => setImmediate(resolve));
+    second.release('a real answer');
+    await s2.settled();
+
+    assert.deepEqual(getTranscript(f2.stored()!, STEP).map((t) => t.content), ['second?', 'a real answer']);
+    assert.equal(gate.calls(), 1, 'and the cancelled one was asked exactly once — no retry, no second bill');
+    void fake;
+    session.dispose();
+    s2.dispose();
+  });
+
+  test('a second ask while one is in flight is refused, and does not spend twice', async () => {
+    const gate = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: gate.runner });
+
+    session.ask('first?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.ask('second?');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(gate.calls(), 1, 'one question with the model at a time');
+    assert.match(tutorOf(fake)?.note ?? '', /already with the tutor/);
+    assert.deepEqual(getTranscript(fake.stored()!, STEP), [{ role: 'user', content: 'first?' }], 'the refused question is not recorded as asked');
+  });
+
+  test('a session disposed mid-ask detaches, and the late answer touches nothing', async () => {
+    // The liveness rule the whole of T-5's async half is built on, now for the longest await
+    // in the extension: a disposed session's target may already belong to the session that
+    // replaced it, and a `commit` from a dead one drives surfaces the new one has claimed.
+    const gate = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: gate.runner });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    const savedBefore = pick(fake, 'saveProgress').length;
+    session.dispose();
+    fake.clearLog();
+
+    gate.release('an answer for a walk that is not running');
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(fake.names(), [], 'a torn-down session persists nothing and paints nothing');
+    assert.equal(getTranscript(fake.stored()!, STEP).length, 1, 'the question survives; the answer to a walk that ended does not');
+    assert.ok(savedBefore > 0, 'and the question really had been saved before the session went away');
+  });
+
+  test('every mutator is a no-op after dispose, the tutor\'s two included', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+    session.dispose();
+    fake.clearLog();
+
+    session.ask('why?');
+    session.cancelAsk();
+    await session.settled();
+
+    assert.deepEqual(fake.names(), []);
+  });
+});
+
+suite('the tutor — the spinner comes off even when a surface misbehaves (AC4)', () => {
+  const STEP = 'st-2-file-parse';
+
+  test('a push that throws mid-ask does not strand the thinking state', async () => {
+    /*
+     * The last of AC4's locks, and the one no ordinary path reaches. `commit` persists and then
+     * pushes to four surfaces, any of which is an adapter that can throw — and a throw inside
+     * the job escapes to `enqueue`, which reports it and moves on. If the ask were registered
+     * for delivery AFTER that push, the failure would leave `asking` set and `thinking` true
+     * with nothing left to take it down: a spinner that runs until the window closes, which is
+     * exactly what the criterion forbids.
+     *
+     * So the delivery hook goes on BEFORE the commit, and this drives it: a `setPanel` that
+     * throws on the push that raises the spinner, and then an answer that still lands.
+     */
+    const plan = fixturePlan();
+    const fake = fakeAdapters({
+      plan,
+      progress: setCurrent(fixtureProgress(plan), STEP),
+      request: tutorRequest(),
+      tutorReply: 'because the parser has one job',
+    });
+    const session = WalkSession.open(TARGET, fake.adapters);
+    await session.settled();
+
+    let explode = true;
+    const realSetPanel = fake.adapters.setPanel.bind(fake.adapters);
+    fake.adapters.setPanel = (view) => {
+      realSetPanel(view);
+      if (explode) {
+        explode = false;
+        throw new Error('the panel threw while the spinner was going up');
+      }
+    };
+
+    session.ask('why?');
+    await session.settled();
+
+    const pushes = pick(fake, 'setPanel');
+    assert.equal(pushes[pushes.length - 1]?.view?.tutor?.thinking, false, 'the answer still cleared it');
+    assert.deepEqual(getTranscript(fake.stored()!, STEP).map((t) => t.content), ['why?', 'because the parser has one job']);
+    assert.equal(pick(fake, 'reportError').length, 1, 'and the throw was reported rather than swallowed');
+    session.dispose();
   });
 });

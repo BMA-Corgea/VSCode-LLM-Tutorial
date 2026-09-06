@@ -8,11 +8,11 @@ suite — the two share one core.
 
 ## What's here right now
 
-This is **T-2 through T-5**: the extension skeleton and its doctor (T-2), the start screen,
-the shared skin contract and building the plan with resume (T-3), the walk itself — decision
-tree, step panel, editor driving, progress that survives a reload (T-4) — and now the dial,
-which is where your hands actually meet the code (T-5). There is still no tutor and no
-detour; those arrive in T-6 and T-7.
+This is **T-2 through T-6**: the extension skeleton and its doctor (T-2), the start screen,
+the shared skin contract and building the plan with resume (T-3), the walk — decision tree,
+step panel, editor driving, progress that survives a reload (T-4) — the dial, where your hands
+meet the code (T-5), and now a tutor you can ask when a step does not land (T-6). The detour
+is still to come (T-7).
 
 T-2 proved this extension can load repo-tour's core — an ESM package that finds its own
 assets (skins, tree-sitter grammars) via `import.meta.url` — from inside the VS Code
@@ -127,6 +127,31 @@ not counted. If the file does not parse, it says so and shows no missing-symbol 
 nothing can be found in a tree that could not be built, and a list claiming every export is
 missing when one bracket is would be worse than saying nothing.
 
+## Ask the tutor
+
+Under the step there is a chat. Ask it anything about the decision you are looking at and it
+answers with the step already in hand — the question, the road the author took **and** the
+alternatives they did not, the *why* with its source named, and a diff of your file against
+theirs. You never have to explain where you are.
+
+**One conversation per step.** It lives in your own `progress.json` beside everything else, so
+moving to another step switches conversations and coming back restores yours.
+
+**It tells you when it can't help.** If no model provider is reachable, the panel says so where
+the input is, with the provider's own reason — immediately, not after a spinner that never
+ends. A request that takes too long comes back as an answer saying so. Cancelling detaches you
+from the request rather than pretending the model stopped, and a cancelled answer never
+reappears later.
+
+**Its answers are text, not markup.** Everything is escaped and only ``` code fences render as
+anything — a model that emits stray angle brackets cannot rewrite the page.
+
+**It has its own model setting**, `buildTutorials.tutorModel`, deliberately separate from the
+build's. The build model is chosen for what analysing a whole repository costs, once, in the
+background; the tutor is one question you ask when you are already stuck. Left empty it uses
+your provider's strongest model, which is the right way round for the one place a wrong answer
+is read by someone who is already confused.
+
 ## A commit per step
 
 Each completed step is committed in the tutorial folder — `<ordinal>: <the question> — <the
@@ -174,6 +199,8 @@ A missing or misconfigured core is a report, never a crash.
 | `buildTutorials.llmProvider` | `claude` | Which LLM provider repo-tour's interpret stage asks for each step's why and its roads-not-taken. The default runs the local `claude` CLI — a subscription tool, not an API key. |
 | `buildTutorials.llmModel` | *(empty)* | Model name passed to the provider. Empty uses repo-tour's own recommended default at run time, so this setting never hardcodes a copy that can drift out of sync with repo-tour. |
 | `buildTutorials.commitPerStep` | `true` | Commit each completed step in the tutorial folder. The commits use that folder's own git identity; with none configured, nothing is committed and the panel says so rather than inventing an author. |
+| `buildTutorials.tutorModel` | *(empty)* | The model the **tutor** asks — separate from `llmModel` on purpose. Empty means your provider's strongest model, rather than the one chosen for what a whole build costs. |
+| `buildTutorials.tutorTimeoutSeconds` | `120` | How long to wait for a tutor answer. A timeout is reported as a reply, never as a spinner that does not end. |
 
 The chosen **skin** is not a setting — it lives in VS Code's `globalState`, the same
 per-person, per-machine scope repo-tour's own web pages keep it in via `localStorage`.

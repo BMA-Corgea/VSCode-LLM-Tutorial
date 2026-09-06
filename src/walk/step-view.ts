@@ -139,6 +139,28 @@
  * not re-derive "am I in manual" from the dial, because two places deciding that is how the
  * page ends up disagreeing with what was actually written to disk.
  *
+ * **What T-6 added, and the one rule it is built on.** The tutor section under the step (AC2)
+ * — the conversation, a box, *Ask* — plus the honest lines AC4 asks for and the escaping rule
+ * AC5 is entirely about.
+ *
+ * *AC5 is a security fix, not a formatting choice.* A model's answer is untrusted text and it
+ * is drawn HERE, so this is where it is made safe: every character escaped, ``` fences and
+ * NOTHING else honoured as markup, the fence's own language tag discarded rather than put in
+ * an attribute. repo-tour's `askpanel.ts` states the same rule for the same reason, and the
+ * reason is ordinary rather than exotic — a tutor explaining generics writes angle brackets in
+ * the normal course of its work, and a tutor asked about this very panel will quote an
+ * `<img onerror=…>` back at the learner. `answerHtml` is where that holds or fails.
+ *
+ * *A reply is unbounded text and gets the same announced treatment as everything else.*
+ * `src/tutor/ask.ts` deliberately does no clipping and says so: clipping belongs next to the
+ * escaping. Hence `MAX_REPLY_TEXT` and `MAX_TURNS_RENDERED`, both announced on the page, both
+ * argued at their own declarations.
+ *
+ * *AC4 in one sentence: no spinner is ever left running.* The page's half of that is that the
+ * thinking state is DERIVED from `state.tutor.thinking` and never from anything the page keeps
+ * for itself, so there is no local flag anyone can forget to clear — and that `thinking` is in
+ * `stepRenderKey`, without which the session would clear it and the page would never find out.
+ *
  * The client script itself lives inside a TS template literal for the same reason
  * `src/start/view.ts`'s does (repo-tour lesson, T-3, 2026-08-26: a bad escape here ships a
  * page that parses and does nothing) and touches nothing beyond `document.getElementById`,
@@ -153,8 +175,9 @@ import { DIALS, type Dial } from '../start/request.js';
 import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
 import { renderPage } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
+import type { AskMessage } from '../tutor/core.js';
 import { FALLBACK_DIAL, type OptionLike, type StepLike, type WhySource } from './model.js';
-import type { StepViewState } from './step-protocol.js';
+import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
 
 /** Verbatim — a test asserts this exact phrase when `step.witness.sha` is `null`. */
 export const NO_HISTORY_MESSAGE = 'no history to show';
@@ -353,6 +376,86 @@ export function reproduceOfferMessage(count: number): string {
 /** The label on the offer's button. Exported so the test asserts the control the page ships. */
 export const REPRODUCE_BUTTON_LABEL = 'Copy them in';
 
+// ── T-6: the tutor (AC2, AC4, AC5) ─────────────────────────────────────────────────────────
+
+/** The section's heading, and the two control labels. Exported like every other visible
+ *  string on this page: one home, asserted rather than copied. */
+export const TUTOR_HEADING = 'Ask the tutor';
+export const ASK_BUTTON_LABEL = 'Ask';
+export const CANCEL_BUTTON_LABEL = 'Cancel';
+
+/**
+ * The two speakers, named on the page rather than distinguished by colour alone.
+ *
+ * Which of them said a thing is the single most important fact about a transcript — the
+ * learner is reading a model's claims about their own code, and "this is the part I wrote" has
+ * to survive a narrow sidebar, a high-contrast theme and a screen reader. A bubble that relies
+ * on an alignment or a background tint says nothing to any of the three.
+ */
+export const USER_TURN_LABEL = 'You';
+export const TUTOR_TURN_LABEL = 'Tutor';
+
+/** What the section says before anybody has asked anything about this step. It names what the
+ *  tutor can already see, because the commonest first question is one the context has already
+ *  answered ("what file am I in?"), and a learner who knows what it was told asks better. */
+export const TUTOR_EMPTY_MESSAGE =
+  'Nothing asked about this step yet. The tutor is told this step’s question, its options, why the author chose as they did, and how your file differs from theirs.';
+
+/** The placeholder in the box — and the one place the Enter/Shift+Enter rule is stated to the
+ *  person it is a rule for. A keyboard shortcut nobody is told about is not a feature. */
+export const ASK_PLACEHOLDER = 'Ask about this step — Enter sends, Shift+Enter for a new line';
+
+/** What stands where the button was while an ask is in flight (AC4). Lower case and with the
+ *  ellipsis, because it is a state and not a heading. */
+export const THINKING_MESSAGE = 'thinking…';
+
+/**
+ * How many turns of one step's conversation this panel draws, newest last.
+ *
+ * 30 is repo-tour's own number, borrowed on purpose rather than invented: `ask.trimMessages`
+ * sends the last thirty turns to the model however many are stored, so what this panel draws
+ * is exactly what the tutor can still see. A learner scrolling back past it would be reading
+ * conversation the model has already forgotten — and would then ask a follow-up about it and
+ * get an answer that made no sense. `src/tutor/transcript.ts` keeps 200 on disk, so nothing is
+ * destroyed by this cap; the count of what is not drawn is printed under the log, the same way
+ * every other cap on this page announces itself.
+ */
+export const MAX_TURNS_RENDERED = 30;
+
+/**
+ * How many characters of any ONE turn this panel draws.
+ *
+ * `src/tutor/ask.ts` deliberately does no clipping — it says so in its own header — because
+ * clipping belongs next to the escaping, and the escaping is here. A model reply is unbounded
+ * text arriving from outside this extension, exactly like a `why` lifted from a stranger's
+ * docstring, and `webview.html = renderStepHtml(...)` is still a synchronous assignment the
+ * whole window waits for (T-4 security review, finding 3).
+ *
+ * It is not `MAX_PLAN_TEXT`'s 20,000, and the difference is arithmetic rather than taste: a
+ * `why` appears ONCE per render and a turn appears up to `MAX_TURNS_RENDERED` times, so the
+ * prose cap would put six hundred thousand characters on one page and the same again into the
+ * repaint key that is computed on every push. 4,000 mirrors `MAX_ASK_TEXT` — a question may be
+ * four thousand characters and so may its answer be drawn — which is roughly six hundred words,
+ * comfortably past any real answer about one tutorial decision, and bounds the whole log at
+ * 120,000 characters however large the file on disk is.
+ */
+export const MAX_REPLY_TEXT = 4000;
+
+/**
+ * `TRUNCATION_MARKER`'s counterpart for a turn, and a separate string because it makes a
+ * different claim. That one says the text "is longer in the plan"; this text is not in a plan
+ * at all — it is what the tutor said, or what the learner asked — and telling somebody their
+ * own question is longer in the plan would be a confident piece of nonsense.
+ */
+export const REPLY_TRUNCATION_MARKER = '… (cut off here — this turn is longer than the panel will draw)';
+
+/** The count under a capped conversation. Older turns are dropped rather than newer ones, so
+ *  the sentence says "earlier": a learner who reads it knows which end was cut and that the
+ *  turns are still in `progress.json`. */
+export function turnsOmittedMessage(omitted: number): string {
+  return `${omitted} earlier turn${omitted === 1 ? '' : 's'} in this conversation, not shown here`;
+}
+
 /**
  * One plan-sourced string, made safe to BUILD with. (Not safe to INJECT with — that is still
  * `escapeHtml`/`escapeAttr`'s job, and every caller below still escapes.) Two failures, both
@@ -469,6 +572,36 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .hint { color:var(--kw); font-size:12px; min-height:14px; }
 .note { color:var(--muted); font-size:12px; min-height:14px; }
 
+/* T-6, the tutor. The log is a plain list with a NAMED speaker per row rather than left/right
+   bubbles: this page lives in a ~300px sidebar where an alignment cue has no room to read, and
+   "who said this" is the one fact a learner must never have to infer about a model's claims
+   regarding their own code. The border on the left carries the same distinction a second way,
+   for anyone reading in a theme where the muted label is hard to pick out. */
+.tutor-log { list-style:none; margin:0 0 12px; padding:0; display:flex; flex-direction:column; gap:10px; }
+.tutor-turn { border-left:2px solid var(--line); padding:0 0 0 10px; }
+.tutor-turn.turn-user { border-left-color:var(--accent); }
+.turn-who { display:block; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); margin-bottom:3px; }
+/* pre-wrap, so a model's own line breaks survive without this page turning them into markup —
+   the whole of AC5 is that a fence and nothing else becomes an element, and a newline is
+   presentation rather than structure. (No backticks anywhere in this sheet: it lives inside a
+   TS template literal, so one would end the string and ship a page that does not parse.) */
+.turn-text { white-space:pre-wrap; }
+/* A fenced block is the ONE construct this page renders from a reply. It scrolls inside itself
+   rather than widening the panel: code has no wrap opportunities, and overflow-wrap:anywhere
+   on an example would break identifiers across lines, which is worse than a scrollbar. */
+.turn-text pre.tutor-code { white-space:pre; overflow-x:auto; margin:8px 0; padding:8px 10px; background:var(--chip); border-radius:var(--radius); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+.tutor-empty { color:var(--muted); font-size:12px; margin:0 0 12px; }
+/* The note takes the same colour as the write note — both are news about something that just
+   happened, and both are the panel's answer to a control the learner pressed. The unreachable
+   line is muted instead: it is a standing condition of their machine, not an event. */
+.tutor-note { color:var(--kw); font-size:12px; margin:0 0 8px; }
+.tutor-unreachable { color:var(--muted); font-size:12px; margin:0 0 8px; }
+.tutor-ask { display:flex; flex-direction:column; gap:8px; }
+.tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); color:inherit; resize:vertical; }
+.tutor-input:disabled { opacity:0.6; }
+.tutor-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.tutor-thinking { color:var(--muted); font-size:12px; }
+
 /* This page lives in a SIDEBAR, and everything on it is someone else's text — a docstring,
    a commit subject, a generated sentence. The real plan already ships a \`why\` that is a
    docstring beginning with a rule of box-drawing characters
@@ -478,7 +611,7 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 main, section, .option { min-width:0; }
 .step-head h1, .option-label, .option-consequence, .why-text, .why-source, .witness-text,
 .note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
-.write-note, .reproduce { overflow-wrap:anywhere; }
+.write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty { overflow-wrap:anywhere; }
 
 /* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
    title and the skin picker stop competing for one line and 48px of horizontal padding
@@ -794,6 +927,177 @@ function reproduceHtml(offer: StepViewState['reproduce']): string {
   return `<p class="reproduce" id="reproduce-offer"><span>${escapeHtml(message)}</span><button type="button" class="btn" id="btn-reproduce">${escapeHtml(REPRODUCE_BUTTON_LABEL)}</button></p>`;
 }
 
+// ── T-6: the tutor section (AC2, AC4) and its escaping rule (AC5) ──────────────────────────
+
+/**
+ * One turn's text, capped and marked — `planText`'s job for a string that did not come from a
+ * plan. Separate rather than a fourth `max` argument to that function because the STAND-IN and
+ * the MARKER both have to differ: a turn that is somehow not a string is not "the plan has
+ * nothing readable here", it is a transcript entry that should never have survived
+ * `sanitizeTranscript`, and saying so out loud is how anyone would ever find that out.
+ *
+ * The non-string branch is genuinely unreachable through the session — `getTranscript` drops
+ * any entry whose `content` is not a string, and `WalkView.transcript` is typed from its
+ * output — and it is here anyway for the reason every other total lookup on this page is: the
+ * type is a promise made by a function, `renderStepHtml` is also called by tests and by
+ * `test/walk.test.ts` with hand-built states, and a `.slice` on `undefined` inside a render
+ * throws out of a voided activation promise where the only symptom is a panel that never
+ * appears.
+ */
+function replyText(value: unknown): string {
+  if (typeof value !== 'string') return '(this turn holds nothing readable)';
+  if (value.length <= MAX_REPLY_TEXT) return value;
+  return value.slice(0, MAX_REPLY_TEXT) + REPLY_TRUNCATION_MARKER;
+}
+
+/**
+ * **AC5, and it is the security one: a model's answer is untrusted text.**
+ *
+ * repo-tour's `src/askpanel.ts` states the rule and this is the same rule, moved server-side:
+ * escape everything, and honour ``` fences and NOTHING else as markup. The threat is not
+ * hypothetical and is not about a malicious model in particular — it is about ANY text a model
+ * emits. A tutor answering "why does `<T>` need a constraint?" writes angle brackets in the
+ * ordinary course of its work, and a tutor asked about this very panel will happily quote
+ * `<img onerror=...>` back at a learner reading about escaping. If that reached the page as
+ * markup it would execute inside a webview holding this extension's `postMessage` bridge.
+ *
+ * Three properties make the rule hold, and each is a line somebody could delete:
+ *
+ *   1. **Every character of `text` passes through `escapeHtml` exactly once.** The slices
+ *      between fences are escaped; the body inside each fence is escaped; the tail after the
+ *      last fence is escaped. There is no branch that emits a substring raw.
+ *   2. **The fence's INFO STRING is discarded, not rendered.** ```` ```js ```` produces a
+ *      bare `<pre class="tutor-code">` — the language is never interpolated into a class, an
+ *      attribute or anything else. An attribute injection is precisely the hole that escaping
+ *      the surrounding TEXT would not close (the same reasoning as `CHECK_STATUS_CLASS`), and
+ *      the cheapest way to have no such hole is to have no such attribute.
+ *   3. **An unclosed fence is not a fence.** The pattern requires the closing ```` ``` ````,
+ *      so a reply that opens one and stops stays entirely escaped text. That is the safe
+ *      direction: the failure of a "helpful" version that closed the fence for you is a `<pre>`
+ *      swallowing the rest of the answer, and the failure of this one is a visible ```` ``` ````
+ *      in the prose.
+ *
+ * The cap is applied BEFORE the scan, deliberately. A cut that lands inside a fence leaves its
+ * closer behind and the fence stops being one, so the tail renders as escaped text rather than
+ * as markup — again the safe direction — and the marker that says the text was cut can never
+ * end up inside a `<pre>` pretending to be part of the code.
+ *
+ * Nothing else is markup. No bold, no links, no lists, no inline `code` spans. The rule is
+ * deliberately the narrowest one that keeps a code example readable, because every construct
+ * added here is another parser between a model's output and a learner's webview.
+ */
+function answerHtml(text: unknown): string {
+  const source = replyText(text);
+  // Local to the call: a `g`-flagged regex carries `lastIndex` between uses, and a shared one
+  // would make the second turn on a page start scanning where the first left off.
+  const fence = /```[^\n]*\n([\s\S]*?)```/g;
+  let out = '';
+  let pos = 0;
+  let match: RegExpExecArray | null;
+  while ((match = fence.exec(source)) !== null) {
+    out += escapeHtml(source.slice(pos, match.index));
+    out += `<pre class="tutor-code">${escapeHtml(match[1] ?? '')}</pre>`;
+    pos = match.index + match[0].length;
+  }
+  return out + escapeHtml(source.slice(pos));
+}
+
+/**
+ * The conversation so far (AC2) — one `<li>` per turn, each naming who spoke.
+ *
+ * The tail rather than the head is what survives the cap, which is the opposite of every other
+ * capped list on this page and is right for the same reason those are: what a learner has to
+ * act on must not be the thing the cap drops. In an options list that is the author's own
+ * choice; in a conversation it is the last thing said. `optionsHtml`'s cap keeps the marked
+ * option by moving it into the window, and this one keeps the newest turns by taking the window
+ * from the other end — same rule, different end of the list.
+ */
+function transcriptHtml(turns: AskMessage[]): string {
+  const all = Array.isArray(turns) ? turns : [];
+  if (all.length === 0) return `<p class="tutor-empty">${escapeHtml(TUTOR_EMPTY_MESSAGE)}</p>`;
+
+  const shown = all.slice(-MAX_TURNS_RENDERED);
+  const omitted = all.length - shown.length;
+  const omittedNote = omitted > 0
+    ? `<p class="list-omitted">${escapeHtml(turnsOmittedMessage(omitted))}</p>`
+    : '';
+
+  const items = shown
+    .map((turn) => {
+      // The role picks between two FIXED class names and two fixed labels — never interpolated,
+      // for the reason `CHECK_STATUS_CLASS` exists: `transcript` reaches this page from
+      // `progress.json`, and `class="turn-${role}"` on a role of `a" onclick="…` is an
+      // attribute injection that escaping the surrounding text would never see. Anything that
+      // is not one of the two known roles is drawn as the tutor's, which is the conservative
+      // direction: mislabelling the learner's own words as the model's costs a moment of
+      // confusion, while labelling a model's words as the learner's own would hand a stranger's
+      // sentence the authority of something they wrote themselves.
+      const mine = turn?.role === 'user';
+      return `<li class="tutor-turn ${mine ? 'turn-user' : 'turn-tutor'}">`
+        + `<span class="turn-who">${escapeHtml(mine ? USER_TURN_LABEL : TUTOR_TURN_LABEL)}</span>`
+        + `<div class="turn-text">${answerHtml(turn?.content)}</div>`
+        + '</li>';
+    })
+    .join('');
+
+  return `${omittedNote}<ul class="tutor-log">${items}</ul>`;
+}
+
+/**
+ * The whole tutor section: the conversation, the honest lines about it, and either an input
+ * with *Ask* or "thinking…" with *Cancel* (ACs 2, 4).
+ *
+ * **The controls are swapped, not disabled, and that is AC4's shape rather than a style
+ * choice.** While an ask is in flight there is no `#btn-ask` in the markup at all — the same
+ * "a control that was never rendered cannot be pressed by accident" argument the options list
+ * makes — and the textarea is `disabled` with `thinking…` written beside it, which is the
+ * explanation this codebase requires next to every disabled control. When nothing is in flight
+ * there is no `#btn-cancel`, because there is nothing to cancel and a button that would do
+ * nothing is worse than no button.
+ *
+ * **An unreachable provider does not take the input away.** The reason goes where the input is
+ * and the box stays exactly where it was (the ticket's own wording: "the panel shows the reason
+ * where the input is and disables nothing silently"). A learner who installs `claude` in the
+ * next terminal over should be able to press *Ask* again without reloading the window, and a
+ * box that had vanished would tell them the feature was gone rather than that a binary was
+ * missing.
+ *
+ * The section is drawn on EVERY step, with or without a `tutor` block, because "you can ask
+ * about this" is true of every step. A missing block is read as nothing in flight — the same
+ * total-lookup discipline the rest of this file uses, since `state` crosses a `JSON.parse`d
+ * boundary in tests and a hand-built state in `test/walk.test.ts`.
+ */
+function tutorHtml(state: StepViewState): string {
+  const tutor = state.tutor;
+  const thinking = tutor?.thinking === true;
+
+  const unreachable = typeof tutor?.unreachable === 'string' && tutor.unreachable !== ''
+    ? `<p class="tutor-unreachable">${escapeHtml(planText(tutor.unreachable, MAX_CHECK_TEXT))}</p>`
+    : '';
+  const note = typeof tutor?.note === 'string' && tutor.note !== ''
+    ? `<p class="tutor-note" id="tutor-note">${escapeHtml(planText(tutor.note))}</p>`
+    : '';
+
+  // `maxlength` is the browser's half of `MAX_ASK_TEXT`: it stops a learner AT the cap instead
+  // of letting them write past it and be told afterwards. The host's half
+  // (`handleStepMessage`) is not redundant — a `maxlength` is a courtesy to a person and never
+  // a guarantee about a value arriving from a webview.
+  const input = `<textarea class="tutor-input" id="tutor-input" rows="3" maxlength="${MAX_ASK_TEXT}"`
+    + ` placeholder="${escapeAttr(ASK_PLACEHOLDER)}"${thinking ? ' disabled' : ''}></textarea>`;
+
+  const controls = thinking
+    ? `<span class="tutor-thinking" id="tutor-thinking">${escapeHtml(THINKING_MESSAGE)}</span>`
+      + `<button type="button" class="btn" id="btn-tutor-cancel">${escapeHtml(CANCEL_BUTTON_LABEL)}</button>`
+    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
+
+  return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
+    + transcriptHtml(state.transcript)
+    + note
+    + unreachable
+    + `<div class="tutor-ask">${input}<div class="tutor-controls">${controls}</div></div>`
+    + '</section>';
+}
+
 function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   const step = state.step;
   const currentDial: Dial = resolvedDial(state.dial);
@@ -842,6 +1146,8 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   ${state.check ? checkHtml(state.check) : ''}
 
   ${reproduceHtml(state.reproduce)}
+
+  ${tutorHtml(state)}
 </main>`;
 }
 
@@ -861,17 +1167,36 @@ const CLIENT_SCRIPT = `
   var mainEl = document.getElementById('step-main');
   var stepId = mainEl ? mainEl.getAttribute('data-step-id') : null;
 
-  // AC5, and ONLY AC5: re-apply a note the host already sent us, after this view was torn
-  // down while hidden (retainContextWhenHidden: false). The saved blob is scoped to the
-  // whole VIEW, not to a step, so it is keyed by step id and dropped when it does not match
-  // what is on screen — navigate away while hidden and the note that comes back belongs to
-  // the step you left, which would be a lie told confidently. The host's own render stays
+  // AC5, and ONLY AC5: re-apply what the host already sent us — and what the learner was in
+  // the middle of typing — after this view was torn down while hidden
+  // (retainContextWhenHidden: false). The saved blob is scoped to the whole VIEW, not to a
+  // step, so it is keyed by step id and dropped when it does not match what is on screen —
+  // navigate away while hidden and the note that comes back belongs to the step you left,
+  // which would be a lie told confidently, while the DRAFT that comes back would be a
+  // question about one step typed into the box under another. The host's own render stays
   // authoritative for everything else (spec §5.1).
+  var savedNote = '';
+  var savedDraft = '';
   var initial = restore();
-  if (initial && typeof initial.note === 'string' && initial.stepId === stepId) {
-    var initialNoteEl = document.getElementById('step-note');
-    if (initialNoteEl) { initialNoteEl.textContent = initial.note; }
+  if (initial && initial.stepId === stepId) {
+    if (typeof initial.note === 'string') { savedNote = initial.note; }
+    if (typeof initial.draft === 'string') { savedDraft = initial.draft; }
   }
+  // ONE blob, written whole every time. Two writers each calling save() with only their own
+  // field would each erase the other's — the note would eat the draft on the next reply, and
+  // the draft would eat the note on the next keystroke.
+  function persist() { save({ stepId: stepId, note: savedNote, draft: savedDraft }); }
+
+  var initialNoteEl = document.getElementById('step-note');
+  if (savedNote && initialNoteEl) { initialNoteEl.textContent = savedNote; }
+
+  // T-6. The box is empty in the markup — the host does not know what somebody is halfway
+  // through typing — so this is the only thing that can put a draft back. It matters far more
+  // here than the note does: the panel REPAINTS when the transcript grows, which is exactly
+  // the moment the tutor answers, which is exactly when a learner is most likely to be typing
+  // their follow-up. Without this, every answer would delete the next question.
+  var inputEl = document.getElementById('tutor-input');
+  if (inputEl && savedDraft) { inputEl.value = savedDraft; }
 
   function on(id, type, handler) {
     var el = document.getElementById(id);
@@ -885,6 +1210,54 @@ const CLIENT_SCRIPT = `
   // Only on the page while the offer stands (see reproduceHtml); \`on\` is null-safe, so the
   // rest of the time this line hooks nothing rather than needing a condition of its own.
   on('btn-reproduce', 'click', function () { post('reproduce:run', {}); });
+
+  // ── T-6: the tutor ────────────────────────────────────────────────────────────────────
+
+  /**
+   * Send whatever is in the box, INCLUDING an empty box.
+   *
+   * Not guarding empty here is deliberate. The host answers a blank press with a sentence
+   * (\`NOTHING_TO_ASK_MESSAGE\`, posted straight back into the note node without a repaint), and
+   * a button that quietly does nothing is the one thing this project's conventions rule out.
+   * Guarding it here would make that sentence unreachable and turn the control silent again.
+   *
+   * The draft is cleared BEFORE the post, not after: the text is about to become a turn in the
+   * transcript, the repaint that draws it will rebuild this box empty, and a saved draft left
+   * behind would then be re-applied on top and the learner would find their question typed
+   * twice — once in the conversation and once in the box.
+   */
+  function askTutor() {
+    var box = document.getElementById('tutor-input');
+    if (!box) { return; }
+    var text = box.value;
+    box.value = '';
+    savedDraft = '';
+    persist();
+    post('tutor:ask', { text: text });
+  }
+
+  on('btn-tutor-ask', 'click', askTutor);
+  on('btn-tutor-cancel', 'click', function () { post('tutor:cancel', {}); });
+
+  // Enter sends, Shift+Enter makes a newline — sql-gauntlet's pattern, which the owner asked
+  // for by name. Every other key falls straight through, so nothing here interferes with
+  // typing, and the guard order matters: an event with no \`key\` at all (an older browser, a
+  // synthetic one) must return before anything is called ON it rather than throw inside a
+  // keystroke handler where the symptom would be a box that has silently stopped working.
+  on('tutor-input', 'keydown', function (e) {
+    if (!e || e.key !== 'Enter' || e.shiftKey) { return; }
+    e.preventDefault();
+    askTutor();
+  });
+
+  // Saved on every keystroke rather than on blur: a webview view is torn down when the sidebar
+  // is collapsed or the panel repaints, neither of which is a blur, and the whole value of
+  // this is surviving exactly those.
+  on('tutor-input', 'input', function () {
+    var box = document.getElementById('tutor-input');
+    savedDraft = box ? box.value : '';
+    persist();
+  });
 
   ['manual', 'scaffolded', 'automated'].forEach(function (dial) {
     on('dial-' + dial, 'change', function () { post('dial:set', { dial: dial }); });
@@ -910,8 +1283,12 @@ const CLIENT_SCRIPT = `
       var el = document.getElementById('step-note');
       if (el) { el.textContent = note; }
       // Keyed by the step it belongs to, so the restore above can tell "the same view came
-      // back" from "a different step is on screen now".
-      save({ stepId: stepId, note: note });
+      // back" from "a different step is on screen now" — and written through \`persist\` so it
+      // carries the learner's draft along rather than erasing it. The whole reason this
+      // channel exists is that it reaches the page WITHOUT a repaint; a save that dropped the
+      // draft would undo that in a different way.
+      savedNote = note;
+      persist();
     }
   });
 })();
@@ -984,6 +1361,14 @@ export function renderNoticeHtml(notice: string): string {
  *   - `state.check`                    → the whole check report (AC5) — summary, verdict
  *                                        colour, every symbol and import row
  *   - `state.reproduce`                → the offer line and its button, present until done
+ *   - `state.transcript[]`             → every turn drawn in the tutor log — `role` (which
+ *                                        label and which class) and `content` (the escaped
+ *                                        text and its ``` fences) — and, through the array's
+ *                                        LENGTH, the "n earlier turns" note
+ *   - `state.tutor.thinking`           → *Ask* versus "thinking…" and *Cancel*, and whether
+ *                                        the box is `disabled`
+ *   - `state.tutor.unreachable`        → the provider's reason, beside the input
+ *   - `state.tutor.note`               → the sentence about the last outcome
  *   - `skins.SKINS`                    → the skin picker's `<option>`s
  *
  * **Four displayed fields are deliberately NOT here, and this is the only place that says
@@ -1006,6 +1391,16 @@ export function renderNoticeHtml(notice: string): string {
  *     owner, and nothing on the page keeps it current.)
  *   - **`state.progress`**, which nothing on this page reads any more: the dial it used to be
  *     consulted for is resolved by the session now (see `resolvedDial`).
+ *
+ * The tutor's DRAFT — what somebody is halfway through typing into the box — is a fifth of the
+ * same kind and is not in `StepViewState` at all, so it cannot be listed above. It is worth
+ * naming here anyway, because it is the field that made the exclusions matter: the panel
+ * repaints when the transcript grows, which is precisely the moment the tutor answers, which is
+ * precisely when a learner is typing their follow-up. The host never learns the draft; the
+ * client script saves it into the same view-scoped blob the note uses and puts it back on the
+ * next load. Do not "fix" that by pushing the draft to the host — a webview that told the host
+ * what was in its own input would be the second source of truth this whole design exists to
+ * refuse (spec §5.1).
  *
  * If any of those ever starts changing from a source OTHER than the page's own controls, the
  * fix is a targeted `postMessage` to update that one node — the way `note` already works —
@@ -1049,6 +1444,30 @@ function keyOfList<T>(value: unknown, max: number, project: (entry: T) => unknow
   return [value.slice(0, max).map((entry) => project(entry as T)), value.length];
 }
 
+/**
+ * The transcript's own version of `keyOfList`, and it exists for ONE reason: it takes the
+ * TAIL.
+ *
+ * `transcriptHtml` draws the last `MAX_TURNS_RENDERED` turns, because in a conversation the
+ * newest is what a learner is looking at. `keyOfList` takes the head, which is right for every
+ * other list on this page and would be quietly wrong here — with two hundred stored turns the
+ * key would describe the first thirty while the page drew the last thirty, so an answer
+ * arriving into a full transcript would move nothing in the key except the count. The count
+ * alone would in fact save it today (an appended turn always changes the length), which is
+ * exactly the sort of accidental correctness that stops being correct the moment somebody adds
+ * a way to edit a turn. Mirroring the render is the property worth having, not the coincidence.
+ *
+ * The per-turn cap is `MAX_REPLY_TEXT`, the SAME cap the render applies, which is what keeps
+ * the capped-value-plus-length trick exact here as everywhere else: two transcripts that
+ * differ only past the cap render identically — that is what the cap means — and their lengths
+ * differ, so the key still moves.
+ */
+function keyOfTranscript(turns: unknown): unknown {
+  if (!Array.isArray(turns)) return null;
+  const shown = (turns as Array<AskMessage | undefined>).slice(-MAX_TURNS_RENDERED);
+  return [shown.map((turn) => [turn?.role, keyOf(turn?.content, MAX_REPLY_TEXT)]), turns.length];
+}
+
 export function stepRenderKey(state: StepViewState, skins: SkinsModule): string {
   const { decision, id, witness } = state.step;
   const report = state.check?.report;
@@ -1083,6 +1502,15 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
         ]
       : null,
     state.reproduce ? [state.reproduce.count, state.reproduce.done] : null,
+    // ── T-6: the tutor. Every one of these four is drawn by `tutorHtml`, and every one of
+    // them is a "stored on the host and never shown" bug if it is dropped from here. The
+    // thinking state is the worst of the four to lose: the *Ask* button would go on looking
+    // pressable while a question was in flight, and the answer would appear only when
+    // something else forced a repaint — which reads exactly like a tutor that ignores you.
+    keyOfTranscript(state.transcript),
+    state.tutor
+      ? [state.tutor.thinking, keyOf(state.tutor.unreachable ?? null), keyOf(state.tutor.note ?? null, MAX_PLAN_TEXT)]
+      : null,
     keyOfList<SkinRow | undefined>(skins.SKINS, MAX_LIST_ROWS, (row) => [keyOf(row?.name), keyOf(row?.label), keyOf(row?.note)]),
   ]);
 }

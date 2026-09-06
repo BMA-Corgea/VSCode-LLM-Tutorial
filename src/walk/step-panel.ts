@@ -25,9 +25,11 @@
  *     `src/skins.ts`). It says nothing about this tutorial, so it has no business in
  *     `<target>/.repo-tour/build/progress.json`, which is a record of the learner's progress
  *     through a specific plan and is read back by every future session.
- *   - `note` is the panel's transient reply line — today only `step:check`'s honest "arrives
- *     with T-5" sentence. Writing a UI message into `progress.json` would make it outlive the
- *     window that produced it and reappear, stale, on a walk reopened next week.
+ *   - `note` is the panel's transient reply line — today, the two answers `tutor:ask` gives
+ *     when it refuses to send (an empty box, a question past the cap). It took `step:check`'s
+ *     place there when T-5 made that button real. Writing a UI message into `progress.json`
+ *     would make it outlive the window that produced it and reappear, stale, on a walk
+ *     reopened next week.
  *
  * **The note's lifetime is the subtle part.** It is cleared when the learner actually
  * NAVIGATES (the pushed view names a different step) and it SURVIVES a same-step refresh,
@@ -141,6 +143,16 @@ export interface WalkSessionLike {
   runCheck(): void;
   reproduce(): void;
   setDial(stepId: string, dial: Dial): void;
+  /**
+   * T-6's two: one question for the tutor (AC2, AC3) and the press that stops waiting for it
+   * (AC4). `void` like the four above, and for a sharper version of the same reason — an ask
+   * waits on a MODEL, and a rejected promise raised inside a webview message listener has
+   * nobody listening for it, so the session owns the whole asynchronous life of the ask and
+   * routes any failure to its own `reportError`. Its answers come back the way every other
+   * change does: as a fresh `WalkView` through `setView`.
+   */
+  ask(text: string): void;
+  cancelAsk(): void;
 }
 
 export interface StepPanelDeps {
@@ -185,7 +197,15 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   /** The previous push, kept only to answer "did the current step actually change?" — see the
    *  file header on why a same-step refresh must not clear the note. */
   private lastView: WalkView | undefined;
-  /** The panel's own transient reply line (`step:check`). Never persisted anywhere. */
+  /**
+   * The panel's own transient reply line. Never persisted anywhere, and produced by exactly
+   * one message: `tutor:ask` refusing to send (an empty box, or a question past
+   * `MAX_ASK_TEXT`). It took `step:check`'s place as this channel's producer when T-5 made
+   * that button real, and the reason those two answers use this channel rather than the
+   * server-rendered `tutor.note` is the same reason the channel exists at all: they are the
+   * only sentences on this page that must reach the learner WITHOUT a repaint, because a
+   * repaint tears the iframe down and takes the question they are still holding with it.
+   */
   private note: string | undefined;
   /** The panel's own skin choice, read once from `globalState` and written through on change. */
   private skin: string;
@@ -242,6 +262,8 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       openFile: () => { this.deps.session()?.openFile(); },
       runCheck: () => { this.deps.session()?.runCheck(); },
       reproduce: () => { this.deps.session()?.reproduce(); },
+      ask: (text: string) => { this.deps.session()?.ask(text); },
+      cancelAsk: () => { this.deps.session()?.cancelAsk(); },
       persistDial: (stepId: string, dial: Dial) => { this.deps.session()?.setDial(stepId, dial); },
       persistSkin: (name: string) => {
         // Updated here, not merely taken from `handleStepMessage`'s returned state: `setView`
@@ -484,11 +506,14 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
    * covered the injection half) — the reason to refuse it is that it is durable, global, and
    * not a skin.
    *
-   * Nothing here re-renders, deliberately. `step:check`'s reply is posted to the page, which
-   * writes it into the note node itself; `dial:set`/`skin:set` are already reflected in the
-   * control the learner just touched; and `step:next`/`step:prev`/`step:open` drive the
-   * session, which comes back through `setView` with a fresh view and re-renders then. A
-   * render here would either duplicate that or race it.
+   * Nothing here re-renders, deliberately. `tutor:ask`'s refusal is POSTED to the page, which
+   * writes it into the note node itself — the whole point of that channel, since a repaint
+   * would destroy the question the learner is being told to shorten; `dial:set`/`skin:set`
+   * are already reflected in the control the learner just touched; and everything else
+   * (`step:next`, `step:prev`, `step:open`, `step:check`, `reproduce:run`, `tutor:ask` when
+   * it really does send, `tutor:cancel`) drives the session, which comes back through
+   * `setView` with a fresh view and re-renders then. A render here would duplicate that or
+   * race it.
    */
   private onMessage(raw: unknown): OutboundMessage | undefined {
     const message = parseStepMessage(raw);
