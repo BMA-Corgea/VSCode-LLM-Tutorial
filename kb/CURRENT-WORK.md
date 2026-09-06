@@ -13,7 +13,6 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — auto-review
 - **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — plan
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
@@ -22,27 +21,29 @@ here and found via the reference table below.
 
 ### Where that stands
 
-**T-5 — the dial. BUILT; in review.** Branch `feature/T-5-dial`, worktree
-`../VSCode-LLM-Tutorial-T-5`, 10 commits. All 8 plan steps, all 7 ACs. Tests went from
-261 + 39 at the start of the ticket to **429 unit + 50 vscode-test**, green under both a real
-DISPLAY and `xvfb-run`. Full account: `.autodev/handoffs/T-5.md`.
+**T-5 — the dial. COMPLETE.** Merged as `1167f91`; the full pipeline ran. Tests across T-4 and
+T-5 went from 89 unit + 20 vscode-test to **479 + 50**. Verified on the INSTALLED `.vsix`
+against the real 61-step plan, not the dev host: automated mode wrote the step's file
+byte-for-byte, copied all 15 never-taught files, and committed under the folder's own git
+identity. Evidence and screenshot in `.autodev/evidence/T-5/`.
 
-AC6 is proven the way it is worded — a real plan built through the core with `cachedOnly`,
-walked in automated mode, then compared to the reference file-for-file and byte-for-byte, with
-a mutation proof that flips a byte a string comparison could not see.
+**One delta from T-1 §5.4 is on the record for the owner**, not decided: he wrote that
+automated mode's panel "walks each load-bearing range and narrates"; what ships reveals and
+decorates the STEP's range. Identical for a symbol step, visible only on a multi-range file
+step. Whether a per-range walk earns its complexity is a feel question.
 
-**Its own acceptance suite found a real bug rather than passing.** `applyDial`'s staleness
-check sat before its await, so a queued entry pass for a step already navigated past was
-dropped rather than deferred: two `next()` calls in one tick left two files unwritten and one
-commit instead of three, silently. Fixed in `fbf6805`. Nothing caught it earlier because the
-fixture had a single `file` step, and a walk with one file step cannot be walked past one. The
-generalisable form is now in `kb/wiki/lessons.md`.
+**Both machine reviews found things worth more than the feature**, all fixed in-diff: a write
+that could escape the target through a symlinked directory, a commit that took the whole index
+rather than the step's file, a file the dial wrote but never revealed, and — before that — an
+entry pass that was dropped rather than deferred when the learner navigated quickly. The
+durable form of each is in `kb/wiki/lessons.md`, which is now nine lessons rather than a stub.
 
-**T-6 must reconcile before it builds, exactly as T-5 had to.** T-6 was refined against T-4's
-PLAN, and T-5 has since moved more of the same surfaces. Two things it will trip on: the
-panel's repaint key (`stepRenderKey` — a rendered field missing from it is stored and never
-drawn, failing no test), and the fact that the panel's client-side `note` channel now has no
-producer, because T-5 deleted the placeholder that fed it and T-6's tutor is what fills it.
+**T-6 is next and must RECONCILE FIRST.** It was refined against T-4's plan, and both T-4 and
+T-5 have since moved the surfaces it edits. The two it will trip on: `stepRenderKey` (a
+rendered field missing from the repaint key is stored and never drawn, failing no test), and
+the panel's client-side `note` channel, which has had no producer since T-5 deleted the
+"arrives with T-5" placeholder — T-6's tutor is what fills it, and its clearing-on-navigation
+is currently untested as a result.
 
 **T-1** is complete and routed into T-2…T-10 here plus repo-tour T-11…T-13.
 
@@ -61,6 +62,7 @@ producer, because T-5 deleted the placeholder that fed it and T-6's tutor is wha
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-06 **T-5 COMPLETE** — The dial — manual, scaffolded, automated — with the structural check and a comm…
 - 2026-09-06 **T-4 COMPLETE** — The walk — decision tree, step panel, editor driving, and progress that survive…
 - 2026-09-05 **T-11 COMPLETE** — The owner's name leaves the public repo
 - 2026-09-05 **T-3 COMPLETE** — The start screen, shared skins, and building the plan with resume
