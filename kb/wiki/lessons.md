@@ -9,6 +9,61 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## `git add <paths>` does not scope a commit (T-5)
+
+`git commit -m <subject>` with no pathspec commits **the whole index**, not the paths you just
+staged. An extension that stages one file and commits can therefore sweep up whatever the user
+had staged themselves — and in a folder the extension `git init`ed for them, "Stage All
+Changes" is one click away.
+
+The second half is worse than the first: the test covering it asserted the **argv handed to a
+fake git**. A fake that records arguments can only tell you what you asked for, never what
+happened — it proved the staging, said nothing about the commit, and passed for the whole time
+the behaviour was wrong. Where a real tool is cheap to run (git in a temp directory is),
+assert the RESULT, not the request.
+
+Same ticket, same family: `fs.existsSync('<dir>/.git')` answers "is this a repo ROOT", not "is
+this inside a working tree". Ask git — `git rev-parse --is-inside-work-tree` — or you will
+create a nested repository inside someone's existing one and put their commits where their own
+`git log` will never show them.
+
+## A lexical path check is not a filesystem check (T-5)
+
+`path.resolve` plus `startsWith(root + sep)` catches `..`, absolute paths and sibling-prefix
+paths. It does **not** catch a symlinked directory *component*: a repository can commit
+`up -> ../..`, git recreates it on clone, and `up/anything` is then contained by arithmetic and
+outside the folder on disk. `mkdirSync(recursive)` follows it happily. There is a
+non-adversarial trigger too — pnpm makes `node_modules/<pkg>` a directory symlink.
+
+Two things it taught beyond the fix:
+
+- **Order the real check before you create anything.** Resolve the deepest already-existing
+  ancestor first, or `mkdirSync(recursive)` has already followed the link and made directories
+  outside on the way down before any check fires.
+- **A comment claiming a defence is complete stops the next reader looking.** The file said the
+  symlink half "lives with the fs gate in extension.ts" — true of the READ path, false of the
+  write path the next ticket added, and precisely the sentence that let the hole ship.
+
+## When work moves to an async chain, re-make every decision the chain invalidates (T-5)
+
+Two bugs, one shape. The editor reveal was decided synchronously in `refresh(true)`, before the
+queued write ran, so it looked at a file that did not exist yet, cleared the decorations, and
+never revisited the question once the write landed. The liveness check had the mirror problem:
+`applyCheck` decided nothing after either of its awaits, so a disposed session still wrote
+progress, repainted every surface and ran git.
+
+Ask, of every await introduced: what did we already decide that this could make untrue?
+
+## A test fake that answers from a table can manufacture the blind spot (T-5)
+
+The session suite's fake `fileExists` returned `true` for every path, so the suites using a
+real target could not observe a file *appearing* — exactly the transition the missing-reveal
+bug lived in. The fake was not merely failing to catch the bug; its convenience was what made
+the bug unobservable.
+
+Where the real thing is cheap — the filesystem, git, a temp directory — the fake should answer
+from it, and keep the table only for what is genuinely in-memory.
+
 ## A staleness guard placed BEFORE the await it was written for drops work instead of deferring it (T-5)
 
 `WalkSession.applyDial` opened with "if the walk has moved on, return", justified by a comment
