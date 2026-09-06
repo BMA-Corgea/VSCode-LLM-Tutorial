@@ -42,14 +42,25 @@
 import * as assert from 'node:assert/strict';
 import { DIALS } from '../../src/start/request.js';
 import { type SkinsModule } from '../../src/start/view.js';
-import { FALLBACK_DIAL, type OptionLike, type PlanLike, type StepLike } from '../../src/walk/model.js';
-import { CHECK_NOTE, parseStepMessage, type StepViewState } from '../../src/walk/step-protocol.js';
+import type { CheckReport } from '../../src/dial/core.js';
+import { FALLBACK_DIAL, stepDial, type OptionLike, type PlanLike, type StepLike } from '../../src/walk/model.js';
+import { parseStepMessage, type StepViewState } from '../../src/walk/step-protocol.js';
 import {
-  AUTHOR_BADGE, FILE_MISSING_MESSAGE, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, NOT_TEXT_MESSAGE,
-  NO_HISTORY_MESSAGE, T10_BADGE, TRUNCATION_MARKER, UNKNOWN_WHY_SOURCE_MESSAGE,
-  optionsOmittedMessage, renderNoticeHtml, renderStepHtml, stepScript,
+  AUTHOR_BADGE, CHECK_HEADING, CHECK_PARSE_MESSAGE, EXPORTS_HEADING, FILE_MISSING_MESSAGE,
+  IMPORTS_HEADING, SHAPE_HEADING,
+  MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, NOT_TEXT_MESSAGE,
+  NO_HISTORY_MESSAGE, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_NOTE_MESSAGE, T10_BADGE,
+  TRUNCATION_MARKER, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, listOmittedMessage,
+  optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey,
+  stepScript,
 } from '../../src/walk/step-view.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
+
+/** A note the host might send — any sentence at all. T-4's tests used `A_NOTE` for this,
+ *  which T-5 deleted along with the placeholder reply it named; the note CHANNEL is what these
+ *  tests are about, not whichever message happens to feed it, so a local string is the honest
+ *  stand-in and cannot go stale the same way. */
+const A_NOTE = 'a sentence the host put on the page';
 
 const FAKE_SKINS: SkinsModule = {
   SKINS: [
@@ -77,10 +88,48 @@ function planStep(plan: PlanLike, id: string): StepLike {
   return step;
 }
 
-/** The exact state the real panel hands the view: the current step already resolved. */
+/**
+ * The exact state the real panel hands the view: the current step already resolved, and the
+ * DIAL already resolved too (AC1) — through `model.ts`'s own `stepDial`, the same function
+ * `WalkSession.refresh` calls, so this fixture cannot disagree with what a real push carries.
+ */
 function stateAt(id: string, overrides: Partial<StepViewState> = {}): StepViewState {
   const plan = fixturePlan();
-  return { plan, progress: fixtureProgress(plan), step: planStep(plan, id), fileExists: true, skin: 'system', ...overrides };
+  const progress = fixtureProgress(plan);
+  return {
+    plan, progress, step: planStep(plan, id), fileExists: true,
+    dial: stepDial(progress, id), skin: 'system', ...overrides,
+  };
+}
+
+/** The three replacements `src/webview/html.ts` makes, written out here rather than imported:
+ *  a test that reused the implementation would only prove the file agrees with itself. */
+function escapeForHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** A whole page with the per-render nonce blanked, so two renders of the SAME state compare
+ *  equal — `renderPage` mints a fresh one every call, which is the entire reason
+ *  `step-panel.ts` cannot rely on VS Code's identical-html short-circuit. */
+function pageWithoutNonce(html: string): string {
+  return html.replace(/nonce="[^"]*"/g, 'nonce=""').replace(/'nonce-[^']*'/g, "'nonce-'");
+}
+
+/** The `<li>` rows of one `<ul class="check-list">` — the first is Exports, the second
+ *  Imports, in the order `checkHtml` emits them. */
+function checkLists(html: string): string[] {
+  return [...html.matchAll(/<ul class="check-list">([\s\S]*?)<\/ul>/g)].map((m) => m[1]!);
+}
+
+/** Every check row as (status, name) — enough to say WHICH symbols were called what. */
+function checkRows(list: string): Array<{ status: string; name: string }> {
+  return [...list.matchAll(/<span class="check-status">([^<]*)<\/span><code class="check-name">([^<]*)<\/code>/g)]
+    .map((m) => ({ status: m[1]!, name: m[2]! }));
+}
+
+/** A `CheckReport` with only the fields a test cares about spelled out. */
+function report(overrides: Partial<CheckReport> = {}): CheckReport {
+  return { symbols: [], imports: [], parseErrors: 0, ok: true, ...overrides };
 }
 
 /** The text inside one of the page's single-purpose paragraphs, so a test can assert what
@@ -214,20 +263,51 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     // this page are the four actions, and the only inputs are the dial's three radios.
     assert.equal(occurrences(html, /<button/g), 4, 'Previous, Open the file, Check my work, Next — and nothing else');
     assert.equal(occurrences(html, /<input/g), 3, 'the three dial radios — and nothing else');
+
+    // T-5's reproduce offer is the ONLY thing that adds a fifth button, and it still adds
+    // nothing to the options list — the alternatives stay unselectable whatever else the page
+    // grows (the page-wide count is asserted here so a stray control cannot hide behind it).
+    const withOffer = renderStepHtml(stateAt('st-4-symbol-render', { reproduce: { count: 3, done: false } }), FAKE_SKINS);
+    assert.equal(occurrences(withOffer, /<button/g), 5, 'the four actions plus Copy them in');
+    assert.equal(occurrences(withOffer, /<input/g), 3, 'and still only the dial radios');
+    assert.ok(!/<button/i.test(optionsList(withOffer)), 'and nothing selectable moved into the options list');
   });
 
   test('the dial renders exactly three radios with the step\'s own override checked', () => {
-    // fixtureProgress drags step 2's dial to `scaffolded`.
+    // fixtureProgress drags step 2's dial to `scaffolded`, and `stateAt` resolves it the way
+    // the session does — so this asserts the whole path, not the view agreeing with itself.
     const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
     assert.equal(occurrences(html, /<input type="radio" name="dial"/g), 3, 'exactly three dial positions');
     assert.match(html, /id="dial-scaffolded" value="scaffolded" checked>/);
     assert.equal(occurrences(html, / checked>/g), 1, 'one position checked, never two');
   });
 
-  test('a step with no dial recorded falls back to manual — both "no override" shapes', () => {
+  test('every dial position renders, one checked, with its own label (AC1)', () => {
+    const LABEL = { manual: "I'll type it", scaffolded: 'Scaffold it for me', automated: 'Watch me build it' };
+    for (const dial of DIALS) {
+      const html = renderStepHtml(stateAt('st-2-file-parse', { dial }), FAKE_SKINS);
+      assert.match(html, new RegExp(`id="dial-${dial}" value="${dial}" checked>`), `${dial} is the checked position`);
+      assert.equal(occurrences(html, / checked>/g), 1, `${dial}: one position checked, never two`);
+      for (const [name, label] of Object.entries(LABEL)) {
+        assert.ok(html.includes(label), `${dial}: the ${name} position is still offered, by its own label`);
+      }
+    }
+  });
+
+  test('the GLOBAL dial reaches the page for a step with no override of its own (AC1)', () => {
+    // The half T-4 could not show. `st-4-symbol-render` has no progress entry at all, so the
+    // old panel — which read `progress.steps[id].dial` and nothing else — checked `manual` at
+    // a learner whose start screen said `automated`, on a walk that was writing whole files.
+    const html = renderStepHtml(stateAt('st-4-symbol-render', { dial: 'automated' }), FAKE_SKINS);
+    assert.match(html, /id="dial-automated" value="automated" checked>/);
+    assert.equal(occurrences(html, / checked>/g), 1);
+  });
+
+  test('a step with no dial recorded anywhere falls back to manual — both "no override" shapes', () => {
     // st-1 HAS a progress entry (it is marked done) but no `dial` on it; st-4 has no entry
     // at all. Both mean "nothing has been done to this step", and manual is the one label
-    // that cannot overstate that.
+    // that cannot overstate that. `stateAt` runs the real resolution, so this pins the
+    // session's fallback and the page's rendering of it together.
     for (const id of ['st-1-shape-src', 'st-4-symbol-render']) {
       const html = renderStepHtml(stateAt(id), FAKE_SKINS);
       assert.match(html, /id="dial-manual" value="manual" checked>/, `${id} should fall back to manual`);
@@ -504,27 +584,21 @@ suite('renderStepHtml — every plan lookup is TOTAL: no throw from a render nob
     assert.ok(!text.includes('[object Object]'), 'never a coerced object');
   });
 
-  test('a step id naming an Object.prototype member still checks exactly one dial', () => {
-    // `progress.steps['constructor']` is not `undefined` — it is a function off the prototype.
-    for (const id of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
-      const state = stateAt('st-2-file-parse');
-      state.step.id = id;
+  test('a dial value nothing recognises checks FALLBACK_DIAL rather than leaving the fieldset blank', () => {
+    // The value now arrives already resolved from the session — but it has still travelled
+    // through `progress.json` AND `request.json`, both `JSON.parse`d and cast, so a fourth
+    // position is a value this page can really be handed. A fieldset with nothing checked
+    // says nothing at all, and says it silently.
+    for (const dial of ['turbo', '', 'MANUAL', 42, null, undefined, {}, ['manual']]) {
+      const state = stateAt('st-2-file-parse', { dial: poison(dial) });
 
       let html = '';
-      assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); }, `step id ${id} threw`);
-      assert.match(html, new RegExp(`id="dial-${FALLBACK_DIAL}" value="${FALLBACK_DIAL}" checked>`), `step id ${id}`);
-      assert.equal(occurrences(html, / checked>/g), 1, `step id ${id}: one position checked, never none`);
+      assert.doesNotThrow(() => { html = renderStepHtml(state, FAKE_SKINS); }, `dial ${JSON.stringify(dial)} threw`);
+      assert.equal(occurrences(html, / checked>/g), 1, `dial ${JSON.stringify(dial)}: one position checked, never none`);
+      assert.match(html, new RegExp(`id="dial-${FALLBACK_DIAL}" value="${FALLBACK_DIAL}" checked>`));
     }
-  });
-
-  test('a dial value the plan invented checks FALLBACK_DIAL rather than leaving the fieldset blank', () => {
-    const state = stateAt('st-2-file-parse');
-    state.progress.steps[state.step.id] = poison({ status: 'pending', dial: 'turbo' });
-
-    const html = renderStepHtml(state, FAKE_SKINS);
-    assert.equal(occurrences(html, / checked>/g), 1, 'a fieldset with nothing checked would say nothing at all');
-    assert.match(html, new RegExp(`id="dial-${FALLBACK_DIAL}" value="${FALLBACK_DIAL}" checked>`));
-    assert.ok(!html.includes('turbo'), 'and the invented value is not echoed as though it were a position');
+    assert.ok(!renderStepHtml(stateAt('st-2-file-parse', { dial: poison('turbo') }), FAKE_SKINS).includes('turbo'),
+      'and the invented value is not echoed back as though it were a position');
   });
 
   test('the fallback dial is model.ts\'s exported constant — the local copy is gone', () => {
@@ -637,7 +711,7 @@ class FakeElement {
 }
 
 const ELEMENT_IDS = [
-  'step-main', 'step-note', 'btn-prev', 'btn-open', 'btn-check', 'btn-next',
+  'step-main', 'step-note', 'btn-prev', 'btn-open', 'btn-check', 'btn-next', 'btn-reproduce',
   'dial-manual', 'dial-scaffolded', 'dial-automated', 'skinpick',
 ];
 
@@ -728,6 +802,9 @@ suite('the step panel\'s client script, actually executed against a fake DOM (AC
       ['btn-check', 'step:check'],
       ['btn-next', 'step:next'],
     ];
+    // `step:check` is no longer answered by the host with a sentence (T-5 made it real), but
+    // the BUTTON's job is unchanged: post the message. What the host does with it is
+    // `test/unit/walk-step-protocol.test.ts`'s subject.
     for (const [id] of buttons) {
       dom.elements.get(id)!.dispatch('click');
     }
@@ -775,15 +852,45 @@ suite('the step panel\'s client script, actually executed against a fake DOM (AC
     assert.deepEqual(dom.posted, [{ type: 'skin:set', payload: { skin: 'system' } }]);
   });
 
+  test('the reproduce offer\'s button posts reproduce:run, and the host accepts it (AC6)', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-1-shape-src', { reproduce: { count: 12, done: false } }));
+    dom.elements.get('btn-reproduce')!.dispatch('click');
+
+    assert.deepEqual(dom.posted, [{ type: 'reproduce:run', payload: {} }]);
+    // Through the REAL parser, so a drift between what the button sends and what the host
+    // accepts fails here rather than silently, in a webview, on the one control that writes
+    // files into the learner's folder.
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'reproduce:run' });
+  });
+
+  test('with no offer on the page there is no button to click, and the script still loads', () => {
+    // The offer's ABSENCE is what removes the affordance — not a disabled attribute a later
+    // edit could drop. `id="btn-reproduce"`, not the bare id: the client script names it on
+    // every page, so only the attribute says whether the control was really rendered.
+    const html = renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS);
+    assert.ok(!html.includes('id="btn-reproduce"'), 'no offer, no button anywhere in the markup');
+
+    // And the script survives it. The harness pre-creates every id it knows about, so the
+    // missing node has to be taken away deliberately to reproduce what the browser really
+    // hands this script on a page with no offer on it: `getElementById` answering nothing.
+    const dom = buildFakeDom();
+    dom.elements.delete('btn-reproduce');
+    assert.doesNotThrow(() => { runScript(dom, stateAt('st-1-shape-src')); });
+
+    dom.elements.get('btn-next')!.dispatch('click');
+    assert.deepEqual(dom.posted, [{ type: 'step:next', payload: {} }], 'and the rest of the page is still wired');
+  });
+
   test('an inbound step:note writes the reply into the note node (AC5)', () => {
     const dom = buildFakeDom();
     runScript(dom, stateAt('st-2-file-parse'));
 
     const handlers = dom.windowListeners.get('message') ?? [];
     assert.equal(handlers.length, 1, 'the script should register exactly one message listener');
-    handlers[0]!({ data: { type: 'step:note', payload: { note: CHECK_NOTE } } });
+    handlers[0]!({ data: { type: 'step:note', payload: { note: A_NOTE } } });
 
-    assert.equal(dom.elements.get('step-note')!.textContent, CHECK_NOTE);
+    assert.equal(dom.elements.get('step-note')!.textContent, A_NOTE);
   });
 
   test('a message of some other type is ignored, not written anywhere', () => {
@@ -803,17 +910,17 @@ suite('the step panel\'s client script, actually executed against a fake DOM (AC
     runScript(dom, stateAt('st-2-file-parse'));
     const [onMessage] = dom.windowListeners.get('message') ?? [];
 
-    onMessage!({ data: { type: 'step:note', payload: { note: CHECK_NOTE } } });
+    onMessage!({ data: { type: 'step:note', payload: { note: A_NOTE } } });
 
     assert.equal(dom.states.length, 1);
-    assert.deepEqual(dom.states[0], { stepId: 'st-2-file-parse', note: CHECK_NOTE });
+    assert.deepEqual(dom.states[0], { stepId: 'st-2-file-parse', note: A_NOTE });
   });
 
   test('a note saved for THIS step comes back when the torn-down view reloads (AC5)', () => {
-    const dom = buildFakeDom({ stepId: 'st-2-file-parse', note: CHECK_NOTE });
+    const dom = buildFakeDom({ stepId: 'st-2-file-parse', note: A_NOTE });
     runScript(dom, stateAt('st-2-file-parse'));
 
-    assert.equal(dom.elements.get('step-note')!.textContent, CHECK_NOTE, 'the reply already on screen survives being hidden');
+    assert.equal(dom.elements.get('step-note')!.textContent, A_NOTE, 'the reply already on screen survives being hidden');
   });
 
   test('a note saved for a DIFFERENT step is ignored — the guard against a confident lie', () => {
@@ -829,8 +936,589 @@ suite('the step panel\'s client script, actually executed against a fake DOM (AC
     // And it does not overwrite a note the HOST itself rendered for the step now on screen —
     // the host's render stays authoritative (spec §5.1).
     const rendered = buildFakeDom(stale);
-    runScript(rendered, stateAt('st-2-file-parse', { note: CHECK_NOTE }));
-    assert.equal(rendered.elements.get('step-note')!.textContent, CHECK_NOTE);
+    runScript(rendered, stateAt('st-2-file-parse', { note: A_NOTE }));
+    assert.equal(rendered.elements.get('step-note')!.textContent, A_NOTE);
     assert.ok(!rendered.elements.get('step-note')!.textContent.includes('already left'));
+  });
+});
+
+// ── T-5: what the dial's work looks like on the page ───────────────────────────────────────
+
+suite('renderStepHtml — the check report (AC5)', () => {
+  test('a pass leads with the summary, marked as a pass, and lists every symbol and import', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'every part is there: 2 exports and 1 import present',
+        report: report({
+          symbols: [
+            { name: 'tokenize', kind: 'function', status: 'present' },
+            { name: 'Token', kind: 'interface', status: 'present' },
+          ],
+          imports: [{ raw: '../parse.js', status: 'present' }],
+        }),
+      },
+    }), FAKE_SKINS);
+
+    assert.equal(paragraph(html, 'check-summary check-pass'), 'every part is there: 2 exports and 1 import present');
+    assert.ok(html.includes(`<h2>${CHECK_HEADING}</h2>`), 'the block names itself, and not with the button\'s own label');
+    assert.ok(!html.includes('class="check-summary check-fail"'), 'a pass is never dressed as a failure');
+
+    const [exportsList, importsList] = checkLists(html);
+    assert.deepEqual(checkRows(exportsList ?? ''), [
+      { status: 'present', name: 'tokenize' },
+      { status: 'present', name: 'Token' },
+    ]);
+    assert.deepEqual(checkRows(importsList ?? ''), [{ status: 'present', name: '../parse.js' }]);
+    // AC5 asks for present/missing/extra PER SYMBOL, so the kind rides along with the name.
+    assert.ok(exportsList!.includes('<span class="check-kind">function</span>'), 'a symbol\'s kind is shown beside it');
+    assert.ok(html.includes(`<h3>${EXPORTS_HEADING}</h3>`) && html.includes(`<h3>${IMPORTS_HEADING}</h3>`));
+  });
+
+  test('a missing export is NAMED, marked as a failure, and drawn first', () => {
+    // AC5 names this case out loud. "1 missing" is a riddle; the name is a next action — and
+    // the row has to be at the top, because that is the row the learner came here for.
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'missing export: rank',
+        report: report({
+          ok: false,
+          symbols: [
+            { name: 'tokenize', kind: 'function', status: 'present' },
+            { name: 'rank', kind: 'function', status: 'missing' },
+            { name: 'debugDump', kind: 'function', status: 'extra' },
+          ],
+        }),
+      },
+    }), FAKE_SKINS);
+
+    assert.equal(paragraph(html, 'check-summary check-fail'), 'missing export: rank');
+    assert.deepEqual(checkRows(checkLists(html)[0] ?? ''), [
+      { status: 'missing', name: 'rank' },
+      { status: 'extra', name: 'debugDump' },
+      { status: 'present', name: 'tokenize' },
+    ], 'news first: missing, then extra, then the bulk');
+    assert.ok(checkLists(html)[0]!.includes('class="check-row check-missing"'), 'and the missing row is marked as one');
+  });
+
+  test('a renamed local is invisible to the report, so a pass really is a pass', () => {
+    // The premise of the whole extension (src/dial/check.ts's header): the check is
+    // STRUCTURAL, so a learner who wrote their own body with their own names passes. There is
+    // no field in `CheckReport` that can express "the body differs" — asserted here as a fact
+    // about what this page can therefore ever draw.
+    const html = renderStepHtml(stateAt('st-3-symbol-handle', {
+      check: {
+        summary: 'every part is there: 1 export present, and no imports to match',
+        report: report({ symbols: [{ name: 'handleRequest', kind: 'function', status: 'present' }] }),
+      },
+    }), FAKE_SKINS);
+
+    assert.ok(html.includes('class="check-summary check-pass"'));
+    const rows = checkRows(checkLists(html)[0] ?? '');
+    assert.deepEqual(rows, [{ status: 'present', name: 'handleRequest' }]);
+    assert.ok(!rows.some((r) => r.status !== 'present'), 'nothing on this page can call a correct body wrong');
+  });
+
+  test('a parse failure leads with the core\'s own reason and lists NOTHING', () => {
+    // The trap this branch exists for: repo-tour's `check` finds no symbols in a tree it could
+    // not build, so EVERY export comes back `missing`. Rendering that list would tell a learner
+    // one stray brace away from correct that their whole file is missing.
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'unexpected token at line 12 — a closing brace is missing',
+        report: report({
+          ok: false,
+          parseErrors: 3,
+          reason: 'unexpected token at line 12 — a closing brace is missing',
+          symbols: [
+            { name: 'zzUnparsedExport', kind: 'function', status: 'missing' },
+            { name: 'Token', kind: 'interface', status: 'missing' },
+          ],
+          imports: [{ raw: '../parse.js', status: 'missing' }],
+        }),
+      },
+    }), FAKE_SKINS);
+
+    assert.equal(paragraph(html, 'check-summary check-fail'), 'unexpected token at line 12 — a closing brace is missing');
+    assert.equal(checkLists(html).length, 0, 'no symbol list and no import list at all');
+    assert.ok(!html.includes('zzUnparsedExport'), 'and no name from the would-be missing list leaks onto the page');
+    assert.equal(paragraph(html, 'check-aside'), CHECK_PARSE_MESSAGE, 'the page says WHY there is no list');
+  });
+
+  test('a parse failure whose reason differs from the summary shows both, once each', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'this file did not parse — 3 errors — so its shape could not be compared yet',
+        report: report({ ok: false, parseErrors: 3, reason: 'unterminated string starting at line 4' }),
+      },
+    }), FAKE_SKINS);
+
+    assert.equal(paragraph(html, 'check-reason'), 'unterminated string starting at line 4');
+    assert.equal(occurrences(html, /unterminated string/g), 1, 'said once, not twice');
+  });
+
+  test('a parse failure with no usable reason still explains the absent list', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: { summary: 'this file did not parse', report: report({ ok: false, parseErrors: 1 }) },
+    }), FAKE_SKINS);
+
+    assert.ok(!html.includes('<p class="check-reason">'), 'nothing to say means no empty line pretending otherwise');
+    assert.equal(paragraph(html, 'check-aside'), CHECK_PARSE_MESSAGE);
+  });
+
+  test('extras are shown and never scolded — the page agrees with what the core does', () => {
+    // repo-tour's `compare` only fails on `missing`, so an export of the learner's own is a
+    // pass with a note. A page that coloured it like a failure would teach the wrong lesson.
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'every part is there: 1 export present · plus 1 export of your own (debugDump) — extras never fail the check',
+        report: report({
+          symbols: [
+            { name: 'tokenize', kind: 'function', status: 'present' },
+            { name: 'debugDump', kind: 'function', status: 'extra' },
+          ],
+        }),
+      },
+    }), FAKE_SKINS);
+
+    assert.ok(html.includes('class="check-summary check-pass"'), 'extras do not turn a pass into a failure');
+    assert.ok(checkLists(html)[0]!.includes('class="check-row check-extra"'));
+  });
+
+  test('no check at all renders no report section — never an empty one, never a fake pass', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
+    assert.ok(!html.includes('class="check"'), 'nobody has pressed the button, so there is nothing to show');
+    assert.ok(!html.includes(CHECK_HEADING));
+    // `class="…"`, not the bare class name: PAGE_CSS declares every one of these selectors on
+    // every page, so a bare `includes` would be true whatever the markup did.
+    assert.ok(!html.includes('class="check-summary'));
+  });
+
+  test('every string in a report is escaped — a report is plan-adjacent, third-party text', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: '<script>alert("s")</script> & co',
+        report: report({
+          ok: false,
+          symbols: [{ name: '<script>alert("n")</script>', kind: '<img src=x onerror=alert(1)>', status: 'missing' }],
+          imports: [{ raw: '"><script>alert("i")</script>', status: 'missing' }],
+        }),
+      },
+    }), FAKE_SKINS);
+
+    assert.equal(occurrences(html, /<script/g), 1, 'the page still ships exactly one script tag: its own');
+    // The `onerror=` TEXT survives (escapeHtml has no reason to touch an equals sign); what
+    // must not survive is the tag it needed to become an attribute of.
+    assert.ok(!html.includes('<img'), 'no tag was forged out of a symbol kind');
+    assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'the kind is shown, inert, exactly as the report gave it');
+    assert.ok(html.includes('&lt;script&gt;alert("n")&lt;/script&gt;'), 'shown, escaped — never silently dropped');
+    assert.ok(html.includes('&amp; co'), 'a bare ampersand never survives into the markup');
+  });
+
+  test('a status the core invented is labelled honestly and reaches no class attribute', () => {
+    // `status` crosses a duck-typed boundary from a core loaded at run time, so
+    // `class="check-${status}"` would be an attribute injection escapeHtml never sees.
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'a summary',
+        report: report({ symbols: [poison({ name: 'rank', kind: 'function', status: 'a" onclick="alert(1)' })] }),
+      },
+    }), FAKE_SKINS);
+
+    assert.ok(!/ onclick="/.test(html), 'nothing broke out of the class attribute');
+    assert.ok(html.includes('class="check-row check-unknown"'), 'an unrecognised status gets the one fixed class');
+    assert.deepEqual(checkRows(checkLists(html)[0] ?? ''), [{ status: UNKNOWN_CHECK_STATUS_MESSAGE, name: 'rank' }]);
+  });
+
+  test('a report whose shape is nothing like a report renders, and does not throw', () => {
+    // Same discipline as every other lookup on this page (T-4 security finding 5): a throw
+    // from a render lands inside a promise the activation path voids, and the panel simply
+    // never appears.
+    for (const bad of [
+      report({ symbols: poison(null) }),
+      report({ symbols: poison('tokenize') }),
+      report({ symbols: poison([null, 42, 'x']) }),
+      report({ imports: poison({ 0: { raw: 'x' } }) }),
+      report({ parseErrors: poison('3') }),
+      report({ ok: poison('yes') }),
+    ]) {
+      let html = '';
+      assert.doesNotThrow(
+        () => { html = renderStepHtml(stateAt('st-2-file-parse', { check: { summary: 'a summary', report: bad } }), FAKE_SKINS); },
+        `report ${JSON.stringify(bad)} threw`,
+      );
+      assert.ok(html.includes('check-summary'), 'and the summary is still drawn');
+    }
+    // A row with nothing readable in it says so, rather than rendering the word "undefined".
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: { summary: 'a summary', report: report({ symbols: poison([{ status: 'missing' }]) }) },
+    }), FAKE_SKINS);
+    assert.deepEqual(checkRows(checkLists(html)[0] ?? ''), [{ status: 'missing', name: NOT_TEXT_MESSAGE }]);
+  });
+});
+
+suite('renderStepHtml — a hostile report renders BOUNDED, and says what it left out', () => {
+  function flood(count: number, status: string, prefix: string) {
+    return Array.from({ length: count }, (_, i) => ({ name: `${prefix}${i}`, kind: 'function', status }));
+  }
+
+  test(`a report with ${MAX_LIST_ROWS * 10} exports draws MAX_LIST_ROWS rows and counts the rest, accurately`, () => {
+    const symbols = flood(MAX_LIST_ROWS * 10, 'present', 'sym');
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: { summary: 'a summary', report: report({ symbols: poison(symbols) }) },
+    }), FAKE_SKINS);
+
+    const drawn = occurrences(checkLists(html)[0] ?? '', /<li /g);
+    assert.equal(drawn, MAX_LIST_ROWS, 'the list stops at the cap');
+    const omitted = symbols.length - MAX_LIST_ROWS;
+    assert.equal(paragraph(html, 'list-omitted'), listOmittedMessage(omitted, 'export'));
+    assert.equal(drawn + omitted, symbols.length, 'the count on the page adds up');
+  });
+
+  test('the omitted line counts in the singular, and names the right noun per list', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'a summary',
+        report: report({
+          symbols: poison(flood(MAX_LIST_ROWS + 1, 'present', 'sym')),
+          imports: poison(Array.from({ length: MAX_LIST_ROWS + 1 }, (_, i) => ({ raw: `./m${i}.js`, status: 'present' }))),
+        }),
+      },
+    }), FAKE_SKINS);
+
+    const lines = [...html.matchAll(/<p class="list-omitted">([^<]*)<\/p>/g)].map((m) => m[1]!);
+    assert.deepEqual(lines, [listOmittedMessage(1, 'export'), listOmittedMessage(1, 'import')]);
+    assert.ok(!lines[0]!.includes('exports'), 'one export, not "1 more exports"');
+  });
+
+  test('AC5 outranks the cap: a lone missing export survives a flood of present ones', () => {
+    // The interaction that makes the cap safe. In report order the missing row sits past the
+    // cap and the page would name nothing at all — meeting the security fix by breaking the
+    // acceptance criterion it was capping (`optionsHtml` makes the same trade for AC2).
+    const symbols = [...flood(MAX_LIST_ROWS * 3, 'present', 'sym'), { name: 'rank', kind: 'function', status: 'missing' }];
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: { summary: 'missing export: rank', report: report({ ok: false, symbols: poison(symbols) }) },
+    }), FAKE_SKINS);
+
+    const rows = checkRows(checkLists(html)[0] ?? '');
+    assert.equal(rows.length, MAX_LIST_ROWS, 'the cap still holds');
+    assert.deepEqual(rows[0], { status: 'missing', name: 'rank' }, 'and the one row AC5 is about is the FIRST one drawn');
+  });
+
+  test('a giant identifier is cut at MAX_CHECK_TEXT with a VISIBLE marker', () => {
+    const name = `${'n'.repeat(MAX_CHECK_TEXT)}THIS TAIL IS PAST THE CAP`;
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: { summary: 'a summary', report: report({ symbols: [{ name, kind: 'function', status: 'missing' }] }) },
+    }), FAKE_SKINS);
+
+    const drawn = checkRows(checkLists(html)[0] ?? '')[0]!.name;
+    assert.equal(drawn, name.slice(0, MAX_CHECK_TEXT) + TRUNCATION_MARKER);
+    assert.ok(!html.includes('THIS TAIL IS PAST THE CAP'));
+  });
+
+  test('the SUMMARY keeps the prose cap, not the identifier one — it is a sentence', () => {
+    const summary = 'w'.repeat(MAX_CHECK_TEXT + 500);
+    const html = renderStepHtml(stateAt('st-2-file-parse', { check: { summary, report: report() } }), FAKE_SKINS);
+    assert.equal(paragraph(html, 'check-summary check-pass'), summary, 'well under MAX_PLAN_TEXT, so nothing is cut');
+    assert.ok(!html.includes(TRUNCATION_MARKER));
+  });
+
+  test('neither cap can fire on a report a real file produces', () => {
+    // Measured, not assumed: the widest export surface across the three repos on hand is 28
+    // (src/start/build.ts) and the widest import list 21 (repo-tour's src/cli.ts). A cap that
+    // fired on those would be the cap doing harm rather than work.
+    const WIDEST_REAL_EXPORT_SURFACE = 28;
+    const WIDEST_REAL_IMPORT_LIST = 21;
+    assert.ok(MAX_LIST_ROWS > WIDEST_REAL_EXPORT_SURFACE * 4, 'four times the widest real file, at least');
+    assert.ok(MAX_LIST_ROWS > WIDEST_REAL_IMPORT_LIST * 4);
+    // And the longest exported identifier measured is 26 characters.
+    assert.ok(MAX_CHECK_TEXT > 26 * 4, 'four times the longest real identifier, at least');
+
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      check: {
+        summary: 'every part is there: 28 exports and 21 imports present',
+        report: report({
+          symbols: poison(flood(WIDEST_REAL_EXPORT_SURFACE, 'present', 'exported')),
+          imports: poison(Array.from({ length: WIDEST_REAL_IMPORT_LIST }, (_, i) => ({ raw: `../module-${i}.js`, status: 'present' }))),
+        }),
+      },
+    }), FAKE_SKINS);
+    assert.ok(!html.includes('<p class="list-omitted">'), 'a real file is drawn whole');
+    assert.ok(!html.includes(TRUNCATION_MARKER));
+  });
+});
+
+suite('renderStepHtml — the manual-mode shape block (AC2)', () => {
+  const SHAPE = {
+    signatures: ['export function tokenize(line: string): Token[] {', 'export const VERSION = 1;'],
+    imports: ["import { tokenize } from '../parse.js';"],
+  };
+
+  test('renders the reference\'s imports and signature lines, with a caption saying what they are not', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', { shape: SHAPE }), FAKE_SKINS);
+
+    assert.ok(html.includes(`<h2>${SHAPE_HEADING}</h2>`));
+    assert.equal(paragraph(html, 'shape-note'), SHAPE_NOTE_MESSAGE);
+    for (const line of [...SHAPE.signatures, ...SHAPE.imports]) {
+      assert.ok(html.includes(escapeForHtml(line)), `the block shows: ${line}`);
+    }
+    // Imports first, then signatures — the order a file is actually written in.
+    assert.ok(html.indexOf(`<h3>${IMPORTS_HEADING}</h3>`) < html.indexOf(`<h3>${EXPORTS_HEADING}</h3>`));
+  });
+
+  test('it shows LINES and never a body — the block must not become the answer', () => {
+    // The whole premise of manual mode is that the extension writes nothing. A shape block
+    // that quietly grew into the finished file would defeat the position of the dial the
+    // learner deliberately chose, and no test below this line would notice.
+    const html = renderStepHtml(stateAt('st-2-file-parse', { shape: SHAPE }), FAKE_SKINS);
+    const section = /<section class="shape">[\s\S]*?<\/section>/.exec(html)?.[0] ?? '';
+
+    assert.ok(section.length > 0, 'the block is on the page');
+    assert.equal(occurrences(section, /<li>/g), 3, 'exactly the three lines it was given, and nothing else');
+    assert.ok(!section.includes('const out'), 'no body from the fixture\'s real parse.ts leaked in');
+    assert.ok(!/<button|<input/i.test(section), 'and nothing in it is selectable');
+  });
+
+  test('no shape means no block — the mode gate is the field\'s presence, not a dial re-read', () => {
+    // Deliberate: the session decides what mode wrote (or did not write) the file, and a page
+    // that re-derived "am I in manual" from the dial could disagree with what is on disk.
+    for (const dial of DIALS) {
+      const html = renderStepHtml(stateAt('st-2-file-parse', { dial }), FAKE_SKINS);
+      assert.ok(!html.includes('class="shape"'), `${dial}: no shape sent, so no block`);
+      assert.ok(!html.includes(SHAPE_NOTE_MESSAGE));
+    }
+  });
+
+  test('a shape with nothing in it says so, rather than showing an empty heading', () => {
+    const html = renderStepHtml(stateAt('st-1-shape-src', { shape: { signatures: [], imports: [] } }), FAKE_SKINS);
+    assert.equal(paragraph(html, 'check-aside'), SHAPE_EMPTY_MESSAGE);
+    assert.ok(!html.includes(`<h3>${EXPORTS_HEADING}</h3>`), 'and no heading over a list that is not there');
+    assert.ok(!html.includes(SHAPE_NOTE_MESSAGE), 'nor a caption about lines there are none of');
+  });
+
+  test('one empty half draws the other half alone', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', { shape: { signatures: SHAPE.signatures, imports: [] } }), FAKE_SKINS);
+    assert.ok(html.includes(`<h3>${EXPORTS_HEADING}</h3>`));
+    assert.ok(!html.includes(`<h3>${IMPORTS_HEADING}</h3>`), 'a file with no imports gets no Imports heading');
+    assert.equal(paragraph(html, 'shape-note'), SHAPE_NOTE_MESSAGE, 'and the caption still applies');
+  });
+
+  test('every line is escaped — a signature is source text from someone else\'s repository', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      shape: { signatures: ['export const x = "</script><script>alert(1)</script>";'], imports: ['import "&<>";'] },
+    }), FAKE_SKINS);
+
+    assert.equal(occurrences(html, /<script/g), 1);
+    assert.ok(html.includes('&lt;/script&gt;&lt;script&gt;alert(1)'), 'shown, escaped');
+    assert.ok(html.includes('import "&amp;&lt;&gt;";'));
+  });
+
+  test('the block is capped and counted the same visible way everything else is', () => {
+    const signatures = Array.from({ length: MAX_LIST_ROWS + 3 }, (_, i) => `export function f${i}(): void {`);
+    const html = renderStepHtml(stateAt('st-2-file-parse', { shape: { signatures, imports: [] } }), FAKE_SKINS);
+
+    assert.equal(occurrences(html, /<li><code class="shape-line">/g), MAX_LIST_ROWS);
+    assert.equal(paragraph(html, 'list-omitted'), listOmittedMessage(3, 'signature'));
+  });
+
+  test('a shape whose halves are not arrays renders, and does not throw', () => {
+    type Shape = StepViewState['shape'];
+    for (const shape of [
+      poison<Shape>({ signatures: null, imports: null }),
+      poison<Shape>({ signatures: 'export function f()', imports: 7 }),
+      poison<Shape>({}),
+    ]) {
+      let html = '';
+      assert.doesNotThrow(() => { html = renderStepHtml(stateAt('st-2-file-parse', { shape }), FAKE_SKINS); });
+      assert.equal(paragraph(html, 'check-aside'), SHAPE_EMPTY_MESSAGE, 'nothing readable is nothing to show');
+    }
+  });
+});
+
+suite('renderStepHtml — the write note, and the reproduce offer (AC6)', () => {
+  test('the write note is rendered in its own node, escaped, where the eye already is', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      writeNote: 'your version was kept — nothing was overwritten <ok>',
+    }), FAKE_SKINS);
+
+    const written = /<p class="write-note" id="write-note">([\s\S]*?)<\/p>/.exec(html);
+    assert.ok(written, 'the write note gets a node of its own');
+    assert.equal(written[1], 'your version was kept — nothing was overwritten &lt;ok&gt;');
+    // Between the dial that caused the write and the actions the write is about, and NOT in
+    // `#step-note`: that node is the client script's, updated without a repaint, and this one
+    // is the session's, server-rendered and keyed.
+    assert.ok(html.indexOf('<fieldset class="dial">') < html.indexOf('<p class="write-note"'));
+    assert.ok(html.indexOf('<p class="write-note"') < html.indexOf('<div class="actions">'));
+    assert.match(html, /<div class="note" id="step-note"><\/div>/, 'and the panel\'s own note line is untouched');
+  });
+
+  test('no write note means no node at all — never an empty paragraph under the dial', () => {
+    for (const writeNote of [undefined, '', poison<string>(42), poison<string>(null), poison<string>({})]) {
+      const html = renderStepHtml(stateAt('st-2-file-parse', { writeNote }), FAKE_SKINS);
+      assert.ok(!html.includes('id="write-note"'), `writeNote ${JSON.stringify(writeNote)} should render nothing`);
+    }
+  });
+
+  test('the offer names the count and ships a button, once, at the bottom of the page', () => {
+    const html = renderStepHtml(stateAt('st-1-shape-src', { reproduce: { count: 12, done: false } }), FAKE_SKINS);
+
+    assert.ok(html.includes(reproduceOfferMessage(12)), 'the count is in the sentence, not "some files"');
+    assert.ok(html.includes('12 files'), 'and it really is the number it was given');
+    assert.match(html, new RegExp(`<button type="button" class="btn" id="btn-reproduce">${REPRODUCE_BUTTON_LABEL}</button>`));
+    assert.equal(occurrences(html, /id="btn-reproduce"/g), 1);
+  });
+
+  test('one file is offered in the singular', () => {
+    const html = renderStepHtml(stateAt('st-1-shape-src', { reproduce: { count: 1, done: false } }), FAKE_SKINS);
+    assert.ok(html.includes(reproduceOfferMessage(1)));
+    assert.ok(html.includes('1 file here is'), 'not "1 files here are"');
+  });
+
+  test('once done, no offer — a taken offer left on the page invites a second press', () => {
+    const html = renderStepHtml(stateAt('st-1-shape-src', { reproduce: { count: 12, done: true } }), FAKE_SKINS);
+    assert.ok(!html.includes('id="btn-reproduce"'), 'no button');
+    assert.ok(!html.includes('id="reproduce-offer"'), 'and no line either — it has already happened');
+  });
+
+  test('nothing to copy is no offer, and nothing usable is no offer either', () => {
+    type Offer = StepViewState['reproduce'];
+    for (const reproduce of [
+      undefined,
+      { count: 0, done: false },
+      poison<Offer>({ count: -3, done: false }),
+      poison<Offer>({ count: Number.NaN, done: false }),
+      poison<Offer>({ count: '12', done: false }),
+      poison<Offer>({ count: null, done: false }),
+      poison<Offer>({ done: false }),
+      poison<Offer>({ count: 12, done: 1 }),
+    ]) {
+      const html = renderStepHtml(stateAt('st-1-shape-src', { reproduce }), FAKE_SKINS);
+      assert.ok(!html.includes('id="btn-reproduce"'), `reproduce ${JSON.stringify(reproduce)} should offer nothing`);
+    }
+  });
+});
+
+// ── the repaint key: the one bug in this ticket that fails no test unless this one exists ──
+
+/**
+ * `stepRenderKey` is what `src/walk/step-panel.ts` decides whether to repaint on, and the
+ * failure it guards is silent: a field this page DRAWS and that function OMITS is stored on
+ * the host and never appears on screen until something else forces a repaint. Nothing throws,
+ * no other test fails, and the button simply looks dead.
+ *
+ * So the proof is by mutation, in both directions:
+ *
+ *   - **change one rendered field and the key must move** — the table below carries every
+ *     field T-5 added plus the ones T-4 already had, and each case asserts the KEY changed AND
+ *     that the PAGE really did change (with the per-render nonce blanked, since `renderPage`
+ *     mints a fresh one every call). Asserting only the key would pass on a field that is in
+ *     the key and rendered nowhere; asserting only the page would pass on the very bug this
+ *     exists to catch.
+ *   - **change nothing and the key must not move** — otherwise "repaint only when the page
+ *     would change" degrades to "repaint always", which is T-4 code review finding 1 back
+ *     again, and the learner loses the radio holding keyboard focus on every dial click.
+ */
+suite('stepRenderKey — every field the page draws moves the repaint key', () => {
+  /** `[what changed, the page before, the page after]` — one field apart, never two. */
+  function mutations(): Array<[string, StepViewState, StepViewState]> {
+    const check = { summary: 'every part is there: 1 export present', report: report({ symbols: [{ name: 'tokenize', kind: 'function', status: 'present' }] }) };
+    const pair = (name: string, before: Partial<StepViewState>, after: Partial<StepViewState>): [string, StepViewState, StepViewState] =>
+      [name, stateAt('st-2-file-parse', before), stateAt('st-2-file-parse', after)];
+
+    const withQuestion = (q: string): StepViewState => {
+      const state = stateAt('st-2-file-parse');
+      state.step.decision.question = q;
+      return state;
+    };
+
+    return [
+      ['step.decision.question', withQuestion('one question'), withQuestion('a different question')],
+      pair('state.fileExists', { fileExists: true }, { fileExists: false }),
+
+      // ── the four T-5 added. Each of these is a "stored and never drawn" bug waiting. ──
+      pair('state.check appearing', {}, { check }),
+      pair('state.check changing verdict', { check }, {
+        check: { summary: 'missing export: rank', report: report({ ok: false, symbols: [{ name: 'rank', kind: 'function', status: 'missing' }] }) },
+      }),
+      pair('state.check summary only', { check }, { check: { summary: 'a different sentence entirely', report: check.report } }),
+      pair('state.shape appearing', {}, { shape: { signatures: ['export function f(): void {'], imports: [] } }),
+      pair('state.shape contents', { shape: { signatures: ['export function f(): void {'], imports: [] } }, { shape: { signatures: ['export function g(): void {'], imports: [] } }),
+      pair('state.writeNote appearing', {}, { writeNote: 'your version was kept' }),
+      pair('state.writeNote changing', { writeNote: 'your version was kept' }, { writeNote: 'the reference file was written' }),
+      pair('state.reproduce appearing', {}, { reproduce: { count: 12, done: false } }),
+      pair('state.reproduce count', { reproduce: { count: 12, done: false } }, { reproduce: { count: 3, done: false } }),
+      pair('state.reproduce done', { reproduce: { count: 12, done: false } }, { reproduce: { count: 12, done: true } }),
+    ];
+  }
+
+  test('changing one drawn field changes the key AND the page — every field, one at a time', () => {
+    for (const [what, before, after] of mutations()) {
+      assert.notEqual(
+        stepRenderKey(before, FAKE_SKINS), stepRenderKey(after, FAKE_SKINS),
+        `${what} changes the page, so it MUST change the repaint key — otherwise the panel stores it and never draws it`,
+      );
+      assert.notEqual(
+        pageWithoutNonce(renderStepHtml(before, FAKE_SKINS)), pageWithoutNonce(renderStepHtml(after, FAKE_SKINS)),
+        `${what} is in the key but changes nothing on the page — the key describes a render that does not happen`,
+      );
+    }
+  });
+
+  test('the same state twice is the same key and the same page', () => {
+    const state = stateAt('st-2-file-parse', {
+      check: { summary: 'a summary', report: report() },
+      shape: { signatures: ['export function f(): void {'], imports: ['import x from "y";'] },
+      writeNote: 'the reference file was written',
+      reproduce: { count: 4, done: false },
+    });
+    assert.equal(stepRenderKey(state, FAKE_SKINS), stepRenderKey(stateAt('st-2-file-parse', {
+      check: { summary: 'a summary', report: report() },
+      shape: { signatures: ['export function f(): void {'], imports: ['import x from "y";'] },
+      writeNote: 'the reference file was written',
+      reproduce: { count: 4, done: false },
+    }), FAKE_SKINS), 'two equal states, one key — or the panel repaints on every push');
+    assert.equal(
+      pageWithoutNonce(renderStepHtml(state, FAKE_SKINS)),
+      pageWithoutNonce(renderStepHtml(state, FAKE_SKINS)),
+      'and the page itself is a pure function of the state, once the nonce is set aside',
+    );
+  });
+
+  test('the deliberate exclusions really are excluded, and are the ones documented', () => {
+    // These four DO change the page and deliberately do NOT move the key, because the page
+    // itself keeps them current between repaints (the dial radio the browser already checked,
+    // the skin the client script already applied, the note the client script writes into its
+    // own node) or because nothing on the page reads them at all (`progress`). Asserted, not
+    // assumed: if one of them ever starts changing from a source other than the page's own
+    // controls, this test is where the decision gets revisited.
+    const base = stateAt('st-2-file-parse');
+    for (const [what, other] of [
+      ['dial', stateAt('st-2-file-parse', { dial: 'automated' })],
+      ['skin', stateAt('st-2-file-parse', { skin: 'dark' })],
+      ['note', stateAt('st-2-file-parse', { note: A_NOTE })],
+    ] as const) {
+      assert.equal(stepRenderKey(base, FAKE_SKINS), stepRenderKey(other, FAKE_SKINS), `${what} is excluded from the key on purpose`);
+      assert.notEqual(
+        pageWithoutNonce(renderStepHtml(base, FAKE_SKINS)), pageWithoutNonce(renderStepHtml(other, FAKE_SKINS)),
+        `${what} does change the page — which is exactly why the exclusion has to be a decision, not an oversight`,
+      );
+    }
+
+    // `progress` is the fourth: nothing on the page reads it any more, so it moves neither.
+    const withProgress = stateAt('st-2-file-parse');
+    withProgress.progress = { ...withProgress.progress, steps: { ...withProgress.progress.steps, 'st-9-invented': { status: 'done' } } };
+    assert.equal(stepRenderKey(base, FAKE_SKINS), stepRenderKey(withProgress, FAKE_SKINS));
+    assert.equal(
+      pageWithoutNonce(renderStepHtml(base, FAKE_SKINS)), pageWithoutNonce(renderStepHtml(withProgress, FAKE_SKINS)),
+      'the dial is resolved by the session now, so progress reaches this page through nothing at all',
+    );
+  });
+
+  test('a plan whose options are not an array does not throw the repaint decision', () => {
+    // A throw here would take down a PUSH rather than merely a render — the panel would stop
+    // updating and nothing would say why (T-4 security review, finding 5's whole family).
+    const state = stateAt('st-2-file-parse');
+    state.step.decision.options = poison({ 0: { id: 'author' } });
+    assert.doesNotThrow(() => stepRenderKey(state, FAKE_SKINS));
+    assert.doesNotThrow(() => stepRenderKey(stateAt('st-2-file-parse'), poison({ ...FAKE_SKINS, SKINS: null })));
   });
 });

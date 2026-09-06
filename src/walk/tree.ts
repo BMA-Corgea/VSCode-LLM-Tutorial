@@ -57,13 +57,78 @@ export type DecisionNode =
   | { kind: 'step'; step: TreeStepNode };
 
 /** AC1's three icons, as codicon ids — `$(check)` / `$(arrow-right)` / `$(circle-outline)`
- *  in the spec's own shorthand. A map rather than a switch so a fourth status (T-5's failed
- *  check is the obvious candidate) is one row here and a compile error at `TreeStepNode`. */
+ *  in the spec's own shorthand. A map rather than a switch so a fourth status is one row here
+ *  and a compile error at `TreeStepNode`. The CHECK's verdict is a separate axis and lives in
+ *  `stepMark` below; it is not a fourth status, because "checked and failed" is something
+ *  that happened TO a step, not where the learner is in the walk. */
 const STEP_ICON: Record<TreeStepNode['status'], string> = {
   done: 'check',
   current: 'arrow-right',
   pending: 'circle-outline',
 };
+
+/**
+ * AC5's other half: `✓` / `✗` on the tree node.
+ *
+ * `TreeStepNode.check` is THREE-valued and every one of the three has to look different.
+ * `undefined` is the one that matters most and is the easiest to get wrong: it means nobody
+ * has pressed *Check my work* on this step, which in a forty-step plan is nearly every step —
+ * so a default of ✗, or a red icon, would put the mark for "you got this wrong" on every step
+ * the learner has not reached yet. Unchecked therefore renders EXACTLY as it did before this
+ * ticket: the plain status icon, no suffix, no colour, nothing added to the tooltip.
+ *
+ * **The status wins the icon whenever the learner is standing on the step.** There is one
+ * icon slot per `TreeItem` and two things worth saying in it, and in a long tree "you are
+ * here" is the one that cannot be recovered from anywhere else — the panel and the status bar
+ * both already state the verdict in words, at length, on the step the learner is looking at.
+ * A failed check on the current step is also the commonest verdict there is (you fail, you
+ * fix it, you pass and move on), so letting it eat the arrow would mean the arrow is missing
+ * exactly when the learner is busiest. Everywhere else — a step they have passed and left, a
+ * step they broke and walked away from — the verdict is the news and takes the icon.
+ *
+ * The `✓`/`✗` suffix rides in `description` beside the ordinal REGARDLESS, so the current
+ * step's verdict is still on its row, and the tooltip says it in words for anyone reading the
+ * tree with a screen reader rather than looking at a glyph.
+ *
+ * Returned as plain data rather than as a `vscode.TreeItem` so the decision is one readable
+ * function with no host objects in it. (It is not reachable from `test/unit/` — this file
+ * imports `vscode`, so the unit bundle cannot resolve it — which is why the DATA side, that
+ * `treeModel` yields exactly these three values, is pinned in `test/unit/walk-model.test.ts`
+ * instead, and this side belongs to `test/walk.test.ts`.)
+ */
+export interface StepMark {
+  /** codicon id for `vscode.ThemeIcon` */
+  icon: string;
+  /** a `vscode.ThemeColor` id, or `undefined` for the theme's own foreground */
+  colour: string | undefined;
+  /** appended to `description`, after the ordinal — `''` when nothing has been checked */
+  suffix: string;
+  /** appended to the tooltip's first line, in words — `''` when nothing has been checked */
+  tooltip: string;
+}
+
+export function stepMark(step: TreeStepNode): StepMark {
+  const plain: StepMark = { icon: STEP_ICON[step.status], colour: undefined, suffix: '', tooltip: '' };
+  if (step.check === undefined) return plain;
+
+  // `testing.icon*` rather than a red/green of our own: they are the two colours every VS Code
+  // theme already ships for exactly this meaning (a check that passed, a check that failed),
+  // so a high-contrast or colour-blind-adjusted theme gets its own answer instead of ours.
+  if (step.check === 'pass') {
+    return {
+      icon: step.status === 'current' ? plain.icon : 'pass-filled',
+      colour: 'testing.iconPassed',
+      suffix: ' ✓',
+      tooltip: ' · check passed',
+    };
+  }
+  return {
+    icon: step.status === 'current' ? plain.icon : 'error',
+    colour: 'testing.iconFailed',
+    suffix: ' ✗',
+    tooltip: ' · check failed',
+  };
+}
 
 /**
  * Chapters open COLLAPSED, except the one holding the current step. Opening a tutorial at
@@ -93,6 +158,11 @@ function chapterItem(chapter: TreeChapterNode): vscode.TreeItem {
  * it pairs with the status bar's "step N / M" without competing with the question for the
  * row's width.
  *
+ * The ✓/✗ AC5 asks for rides in `description` beside the ordinal, and the check's verdict
+ * colours (and, off the current step, replaces) the icon — see `stepMark` for why the arrow
+ * outranks a verdict on the step the learner is standing on, and why an UNCHECKED step is
+ * left looking exactly as it did before T-5.
+ *
  * The `command` is AC1's second half: clicking a step makes it current. It is not a
  * navigation-only affordance — `buildTutorials.goToStep` runs through `WalkSession.goTo`, so
  * one click persists the position, re-renders the panel and the status bar, and reveals the
@@ -101,10 +171,14 @@ function chapterItem(chapter: TreeChapterNode): vscode.TreeItem {
  */
 function stepItem(step: TreeStepNode): vscode.TreeItem {
   const item = new vscode.TreeItem(step.title, vscode.TreeItemCollapsibleState.None);
+  const mark = stepMark(step);
   item.id = `step:${step.id}`;
-  item.description = String(step.ordinal);
-  item.tooltip = `step ${step.ordinal} · ${step.kind} · ${step.status}\n${step.title}`;
-  item.iconPath = new vscode.ThemeIcon(STEP_ICON[step.status]);
+  item.description = `${step.ordinal}${mark.suffix}`;
+  item.tooltip = `step ${step.ordinal} · ${step.kind} · ${step.status}${mark.tooltip}\n${step.title}`;
+  item.iconPath = new vscode.ThemeIcon(
+    mark.icon,
+    mark.colour === undefined ? undefined : new vscode.ThemeColor(mark.colour),
+  );
   item.contextValue = 'step';
   item.command = {
     command: 'buildTutorials.goToStep',

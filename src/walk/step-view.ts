@@ -103,6 +103,42 @@
  * on a real navigation — see `step-panel.ts`, not this file) is still the only authority for
  * everything else on the page, exactly as `src/webview/page.ts`'s own doc comment requires.
  *
+ * **What T-5 added, and the one way to get it wrong.** Four new things reach this page from
+ * the session — the check report (AC5), the manual-mode shape block (AC2), the write note,
+ * and the reproduce offer — and every one of them is drawn from `StepViewState` fields that
+ * did not exist in T-4. `step-panel.ts` does NOT repaint on every push: it keys repaints on
+ * what this file actually draws, so a field rendered here and missing from that key is
+ * STORED AND NEVER SHOWN — no test fails, nothing throws, and the button simply looks dead.
+ * T-4 kept that key in the panel, one file away from the render it describes, which is
+ * exactly the distance a drift needs. It now lives HERE, as `stepRenderKey`, beside the
+ * markup it enumerates, so the two are read together and a unit test can prove by mutation
+ * that changing a rendered field changes the key. `step-panel.ts` calls it and adds only its
+ * own notice/step page choice.
+ *
+ * **The check report (AC5) leads with the summary, and on a parse failure says nothing else.**
+ * `src/dial/check.ts` already composes the one line a learner actually reads; this file draws
+ * it prominently and then the per-symbol and per-import detail underneath. A file that did not
+ * parse is the exception: repo-tour's `check` finds no symbols in a tree it could not build,
+ * so EVERY export comes back `missing` and a "missing" list there would be a confident lie
+ * about work that may be entirely correct bar one stray brace. So the parse case renders the
+ * core's own `reason` and an honest sentence about why there is no list, and no list.
+ *
+ * **A report is plan-adjacent, third-party text and is capped like one.** It is derived from
+ * the reference repository the learner pointed the build at — the same untrusted source as
+ * `why` and the option labels — and a hostile file can declare ten thousand exports as easily
+ * as three. `MAX_LIST_ROWS` bounds the rows and `MAX_CHECK_TEXT` the strings inside them,
+ * announced the same visible, counted way `MAX_OPTIONS_RENDERED` is (`listOmittedMessage`).
+ * Rows are ordered `missing` → `extra` → `present` BEFORE the cut, for the same reason the
+ * author's own option survives the options cap: what a learner has to act on must not be the
+ * thing a cap drops.
+ *
+ * **The shape block tells the learner what to write and must never become the answer.** It
+ * renders `view.shape` — the signature LINE of each load-bearing range and the reference's
+ * import lines — and nothing else. No bodies. It appears only when the session sends one,
+ * which it does only in manual mode, so the block's PRESENCE is the mode gate; this file does
+ * not re-derive "am I in manual" from the dial, because two places deciding that is how the
+ * page ends up disagreeing with what was actually written to disk.
+ *
  * The client script itself lives inside a TS template literal for the same reason
  * `src/start/view.ts`'s does (repo-tour lesson, T-3, 2026-08-26: a bad escape here ships a
  * page that parses and does nothing) and touches nothing beyond `document.getElementById`,
@@ -111,6 +147,7 @@
  * writes this file's own unit test can build an analogous harness with no surprises.
  */
 
+import type { CheckOutcome } from '../dial/check.js';
 import { type SkinsModule } from '../start/view.js';
 import { DIALS, type Dial } from '../start/request.js';
 import { bridgeCss, pickerHtml } from '../skins.js';
@@ -228,6 +265,95 @@ export function optionsOmittedMessage(omitted: number): string {
 }
 
 /**
+ * How many rows any of this page's OTHER lists will draw — the check report's exports and
+ * imports (AC5) and the manual-mode shape block's signatures and imports (AC2).
+ *
+ * A separate number from `MAX_OPTIONS_RENDERED`, because it bounds a completely different
+ * population and 24 would fire on honest data. An option list is legitimately three long;
+ * an export list is as long as the file's public surface, and measured across the three
+ * repos on hand the widest is 28 (`src/start/build.ts` in this extension) with the widest
+ * import list 21 (repo-tour's `src/cli.ts`). Capping a report at 24 would therefore tell a
+ * learner working on a real barrel module that four of their exports were "not shown here",
+ * which is the cap doing harm rather than work. 200 is roughly seven times the widest real
+ * file measured and still bounds a hostile report — repo-tour's `check` reports every symbol
+ * a tree-sitter parse found, and a generated file can declare tens of thousands — at a size
+ * one synchronous `webview.html =` assignment can build without the window noticing.
+ */
+export const MAX_LIST_ROWS = 200;
+
+/**
+ * How many characters of one check-report string this panel will draw.
+ *
+ * `MAX_PLAN_TEXT`'s 20,000 is sized for prose — a `why` lifted from someone's docstring —
+ * and these are not prose: a symbol name is an identifier and an import is a module
+ * specifier. The longest exported identifier in the three repos on hand is 26 characters and
+ * the longest import specifier 20, so 400 (repo-tour's own `SUMMARY_MAX`, borrowed for the
+ * symmetry rather than for any deep reason) is more than ten times what anything honest
+ * needs, while keeping a full report's worst case at a few hundred kilobytes rather than the
+ * sixteen megabytes `MAX_LIST_ROWS` × `MAX_PLAN_TEXT` would allow. The report's own SUMMARY
+ * is prose and keeps the prose cap.
+ */
+export const MAX_CHECK_TEXT = 400;
+
+/** `optionsOmittedMessage` for every other capped list on the page — same promise (a COUNT,
+ *  never a vague "and more"), with the noun the list is actually made of. Exported so a test
+ *  asserts the sentence this file renders rather than a copy of it. */
+export function listOmittedMessage(omitted: number, noun: string): string {
+  return `${omitted} more ${noun}${omitted === 1 ? '' : 's'}, not shown here`;
+}
+
+/**
+ * Why a check report that failed to PARSE shows no missing list.
+ *
+ * repo-tour's `check` compares the symbols a tree-sitter parse found, and a file that did not
+ * parse yields no symbols at all — so every single export the reference declares comes back
+ * `missing`. Rendered, that is a wall of red naming work the learner may have done perfectly,
+ * about a file that is one stray brace from correct. The summary already leads with the
+ * core's own `reason` (see `src/dial/check.ts`); this line is the page saying out loud why
+ * the detail underneath it is absent, rather than leaving a suspiciously empty section.
+ */
+export const CHECK_PARSE_MESSAGE =
+  'nothing below it could be compared: in a file that did not parse every export looks missing, which would not be true';
+
+/** The heading over each half of the report, and over each half of the shape block. Exported
+ *  for the same reason every other visible string here is: one home, asserted not copied. */
+export const EXPORTS_HEADING = 'Exports';
+export const IMPORTS_HEADING = 'Imports';
+
+/** The check report's own heading. Deliberately NOT "Check my work": that phrase is already
+ *  on the button three lines above, and a section repeating a button's label reads as the
+ *  button rather than as its answer. This one names what the block contains. */
+export const CHECK_HEADING = 'What the check found';
+
+/** The shape block's heading (AC2) — an instruction, because that is what the block is. */
+export const SHAPE_HEADING = 'What to write';
+
+/**
+ * The shape block's own caption (AC2). It is the one line standing between "here is what to
+ * write" and "here is the answer", so it says which of the two this is, out loud: the block
+ * carries signature LINES and import lines and never a body, and a learner who reads only the
+ * caption should not expect one.
+ */
+export const SHAPE_NOTE_MESSAGE = 'the shape of this file, not its contents — every body is yours to write';
+
+/** What the shape block says when the reference file has neither imports nor load-bearing
+ *  signatures to show. Manual mode still owes the learner a sentence: an empty section with a
+ *  heading over it reads as a bug, and "there is nothing to describe" is the truth. */
+export const SHAPE_EMPTY_MESSAGE = 'this file declares no imports and no load-bearing signatures — there is no shape to show';
+
+/** The offer to copy `plan.reproduce`'s never-taught files (AC6), with the count in it. A
+ *  count, again, rather than "some files": the learner is being asked to let this extension
+ *  write into their folder, and how much is exactly what they need to decide that. */
+export function reproduceOfferMessage(count: number): string {
+  return count === 1
+    ? '1 file here is generated, vendored or locked — never taught, and not yours to type'
+    : `${count} files here are generated, vendored or locked — never taught, and not yours to type`;
+}
+
+/** The label on the offer's button. Exported so the test asserts the control the page ships. */
+export const REPRODUCE_BUTTON_LABEL = 'Copy them in';
+
+/**
  * One plan-sourced string, made safe to BUILD with. (Not safe to INJECT with — that is still
  * `escapeHtml`/`escapeAttr`'s job, and every caller below still escapes.) Two failures, both
  * from the security review, both invisible to `tsc` because `StepLike` is a cast over
@@ -238,15 +364,17 @@ export function optionsOmittedMessage(omitted: number): string {
  *      the panel just never appears (finding 5, the same failure as the `whySource` lookup).
  *      A non-string is not content, so `NOT_TEXT_MESSAGE` says so rather than rendering the
  *      word "undefined" at a learner as though the plan had written it.
- *   2. It is enormous (finding 3 — see `MAX_PLAN_TEXT`). Cut, with `TRUNCATION_MARKER` left
+ *   2. It is enormous (finding 3 — see `MAX_PLAN_TEXT`, and `MAX_CHECK_TEXT` for the report's
+ *      identifiers, which `max` selects — the guard is one function because the two failures
+ *      above are one pair of failures whichever string is being drawn). Cut, with `TRUNCATION_MARKER` left
  *      exactly where the cut happened, because a panel that quietly shortened someone's
  *      docstring would be misrepresenting what the plan says. Whoever next reads this: the
  *      marker is the fix, not decoration on it. A silent `.slice()` is the wrong cap.
  */
-function planText(value: unknown): string {
+function planText(value: unknown, max: number = MAX_PLAN_TEXT): string {
   if (typeof value !== 'string') return NOT_TEXT_MESSAGE;
-  if (value.length <= MAX_PLAN_TEXT) return value;
-  return value.slice(0, MAX_PLAN_TEXT) + TRUNCATION_MARKER;
+  if (value.length <= max) return value;
+  return value.slice(0, max) + TRUNCATION_MARKER;
 }
 
 /**
@@ -267,19 +395,23 @@ function planId(value: unknown): string {
 }
 
 /**
- * Which dial position is checked for this step — `progress.steps[step.id]?.dial`, made total
- * for the same reason `whySourceLabel` is (finding 5). `progress` is read off disk by
- * `src/walk/store.ts` and, like the plan, is only TYPED, so a step id of `'constructor'` or
- * `'__proto__'` indexes into `Object.prototype` rather than into any recorded progress, and a
- * `dial` of `'turbo'` matches no radio at all — which renders a fieldset with NOTHING checked
- * and no hint that anything was wrong. `Object.hasOwn` blocks the first, membership in `DIALS`
- * blocks the second, and `FALLBACK_DIAL` catches both: a step with nothing valid recorded has
- * had nothing done to it, and "manual" is the one answer that can never overstate that.
+ * Which dial position is checked — `state.dial`, which the SESSION has already resolved
+ * (step override → the global one from `request.json` → `manual`; `model.ts`'s `stepDial`).
+ *
+ * T-4 resolved it here instead, from `progress.steps[step.id]?.dial` alone, and could
+ * therefore only ever show the override half of AC1: a learner who set the dial on the start
+ * screen and then opened a step they had not touched saw "manual" checked, on a walk that was
+ * about to scaffold their files. Reading one already-resolved value is not merely tidier, it
+ * is the only way this page and the status bar can agree about what mode the walk is in.
+ *
+ * Still total, for the reason `whySourceLabel` is (T-4 security review, finding 5): the value
+ * has travelled through `progress.json` and `request.json`, both `JSON.parse`d and cast, so
+ * `'turbo'` is a value this function can really be handed — and it matches no radio at all,
+ * which renders a fieldset with NOTHING checked and no hint that anything was wrong.
+ * `FALLBACK_DIAL` catches it: a step whose recorded position is not a position has had
+ * nothing done to it, and "manual" is the one answer that can never overstate that.
  */
-function stepDial(progress: StepViewState['progress'], stepId: unknown): Dial {
-  const key = planId(stepId);
-  if (!Object.hasOwn(progress.steps, key)) return FALLBACK_DIAL;
-  const dial = progress.steps[key]?.dial;
+function resolvedDial(dial: unknown): Dial {
   return DIALS.some((d) => d === dial) ? (dial as Dial) : FALLBACK_DIAL;
 }
 
@@ -305,6 +437,30 @@ section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; col
    other muted asides rather than like a warning: nothing has gone wrong, this panel has
    simply decided how much of a very large plan it is willing to draw at once. */
 .options-omitted { color:var(--muted); font-size:12px; margin:8px 0 0; }
+section h3 { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; margin:12px 0 6px; }
+/* One monospace stack, declared once. repo-tour's base sheet has no code token to borrow and
+   the bridge maps no VS Code font variable, so this is a plain stack rather than an invented
+   \`--mono\` that would look like a token other files could rely on. */
+.check-name, .shape-line { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+.check-list, .shape-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+.check-row { display:flex; align-items:baseline; gap:8px; }
+/* The verdict colours the SUMMARY and nothing else. A red section would read as "everything
+   here is wrong" when most of a failing report is rows that are perfectly present, and the
+   summary is the line the learner actually reads (src/dial/check.ts's own doc comment). */
+.check-summary { font-weight:600; margin:0 0 10px; }
+.check-pass { color:var(--str); }
+.check-fail { color:var(--kw); }
+.check-reason, .check-aside, .shape-note, .list-omitted { color:var(--muted); font-size:12px; margin:0 0 8px; }
+.check-status { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; padding:2px 8px; border-radius:999px; background:var(--chip); color:var(--muted); flex:none; }
+.check-missing .check-status { background:var(--accent-soft); color:var(--kw); }
+.check-kind { color:var(--muted); font-size:12px; }
+/* The write note is the session's news about the learner's OWN file — a refused overwrite, a
+   kept edit — so it takes the same colour as the open-file hint rather than the muted asides:
+   it is the one line on this page about something that just happened to their disk. Note that
+   this sheet is inlined into every page, so nothing in these comments may quote a string a
+   test asserts the ABSENCE of — a comment is markup here, not commentary. */
+.write-note { color:var(--kw); font-size:12px; margin:0 0 14px; }
+.reproduce { display:flex; align-items:center; gap:10px; flex-wrap:wrap; color:var(--muted); font-size:12px; margin:18px 0 0; }
 fieldset.dial { border:1px solid var(--line); border-radius:var(--radius); padding:10px 14px; margin:0 0 20px; }
 fieldset.dial legend { font-weight:600; padding:0 4px; }
 fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6px 18px 2px 0; font-weight:400; }
@@ -321,7 +477,8 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
    right strength here: break mid-token only when there is no other option. */
 main, section, .option { min-width:0; }
 .step-head h1, .option-label, .option-consequence, .why-text, .why-source, .witness-text,
-.note, .hint { overflow-wrap:anywhere; }
+.note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
+.write-note, .reproduce { overflow-wrap:anywhere; }
 
 /* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
    title and the skin picker stop competing for one line and 48px of horizontal padding
@@ -434,9 +591,212 @@ function openFileHint(fileExists: boolean): string {
   return `<span class="hint" id="open-hint">${fileExists ? '' : escapeHtml(FILE_MISSING_MESSAGE)}</span>`;
 }
 
+// ── the check report (AC5) ─────────────────────────────────────────────────────────────────
+
+/**
+ * The three statuses repo-tour's `check` reports, and the CLASS each one gets.
+ *
+ * A map to a fixed class name, never the status interpolated into the attribute. `report`
+ * crosses a duck-typed boundary (`src/dial/core.ts`) from a core loaded at run time, so
+ * `status` is whatever that module put there — and `class="check-${status}"` on a status of
+ * `a" onclick="…` is an attribute injection that `escapeHtml` on the surrounding text would
+ * never see. Naming the three classes here means no untrusted string ever reaches a class
+ * attribute at all.
+ */
+const CHECK_STATUS_CLASS: Record<string, string> = {
+  missing: 'check-missing',
+  extra: 'check-extra',
+  present: 'check-present',
+};
+
+/** What a row whose status this panel has no words for is labelled. Not an error and not a
+ *  blank: a row exists, we simply cannot say which of the three it is. */
+export const UNKNOWN_CHECK_STATUS_MESSAGE = 'unrecognised';
+
+/**
+ * Sort order for a report's rows: what the learner must ACT on first, then what is merely
+ * interesting, then the bulk.
+ *
+ * This is not cosmetic — it is what makes `MAX_LIST_ROWS` safe. A file with three hundred
+ * present exports and one missing one would, in report order, push the missing row past the
+ * cap and render a page that says "every part is there" nowhere and names the one thing that
+ * is not, nowhere either. The same reasoning as `optionsHtml`'s "AC2 outranks the cap": a cap
+ * may drop rows, but never the row the acceptance criterion is about. Extras rank above
+ * present because they are news (repo-tour's `compare` never fails on one, so a learner
+ * seeing an extra listed learns their helper is safe); an unrecognised status ranks last
+ * because today's core cannot produce one at all.
+ */
+function checkStatusRank(status: unknown): number {
+  if (status === 'missing') return 0;
+  if (status === 'extra') return 1;
+  if (status === 'present') return 2;
+  return 3;
+}
+
+function checkStatusLabel(status: unknown): string {
+  return typeof status === 'string' && Object.hasOwn(CHECK_STATUS_CLASS, status)
+    ? status
+    : UNKNOWN_CHECK_STATUS_MESSAGE;
+}
+
+function checkStatusClass(status: unknown): string {
+  if (typeof status !== 'string' || !Object.hasOwn(CHECK_STATUS_CLASS, status)) return 'check-unknown';
+  const cls: unknown = CHECK_STATUS_CLASS[status];
+  return typeof cls === 'string' ? cls : 'check-unknown';
+}
+
+/**
+ * One half of the report — the symbols, or the imports — sorted news-first, capped, and
+ * honest about what the cap left out.
+ *
+ * `rows` is deliberately typed loosely and read defensively at every field: everything here
+ * arrives from a core this extension duck-types rather than compiles against, so `symbols`
+ * being an array at all, and each row being an object with the fields its type claims, are
+ * run-time questions and not compile-time ones. Nothing throws; a row with nothing readable
+ * in it renders `NOT_TEXT_MESSAGE`, which is a true statement about that row.
+ */
+function checkListHtml(rows: unknown, noun: string, kindField: boolean): string {
+  const all = Array.isArray(rows) ? (rows as unknown[]) : [];
+  if (all.length === 0) return '';
+
+  const ordered = [...all].sort((a, b) => checkStatusRank(rowField(a, 'status')) - checkStatusRank(rowField(b, 'status')));
+  const shown = ordered.slice(0, MAX_LIST_ROWS);
+  const omitted = ordered.length - shown.length;
+
+  const items = shown
+    .map((row) => {
+      const status = rowField(row, 'status');
+      // `raw` for an import, `name` for a symbol — one row shape reads whichever it has, so
+      // this function serves both halves rather than being written twice.
+      const primary = kindField ? rowField(row, 'name') : rowField(row, 'raw');
+      const kind = kindField
+        ? `<span class="check-kind">${escapeHtml(planText(rowField(row, 'kind'), MAX_CHECK_TEXT))}</span>`
+        : '';
+      return `<li class="check-row ${checkStatusClass(status)}"><span class="check-status">${escapeHtml(checkStatusLabel(status))}</span><code class="check-name">${escapeHtml(planText(primary, MAX_CHECK_TEXT))}</code>${kind}</li>`;
+    })
+    .join('');
+
+  const omittedNote = omitted > 0
+    ? `<p class="list-omitted">${escapeHtml(listOmittedMessage(omitted, noun))}</p>`
+    : '';
+  const heading = kindField ? EXPORTS_HEADING : IMPORTS_HEADING;
+  return `<h3>${escapeHtml(heading)}</h3><ul class="check-list">${items}</ul>${omittedNote}`;
+}
+
+/** One field off a row that is only BELIEVED to be an object — `undefined` for anything that
+ *  is not, which `planText`/`checkStatusLabel` then turn into an honest stand-in. */
+function rowField(row: unknown, field: string): unknown {
+  return typeof row === 'object' && row !== null ? (row as Record<string, unknown>)[field] : undefined;
+}
+
+/**
+ * *Check my work*'s answer, drawn (AC5).
+ *
+ * The summary first and on its own line, because `src/dial/check.ts` composed it to carry the
+ * whole finding for someone who reads nothing else; then present / missing / extra per symbol
+ * and per import underneath it.
+ *
+ * **Except on a parse failure**, which leads with the core's own `reason` and shows no lists
+ * at all — see `CHECK_PARSE_MESSAGE` for why a "missing" list about a file that did not parse
+ * is a lie. The reason is rendered again here only when it is not already the summary
+ * (`summarize` leads with it, so usually it is); this file re-derives nothing and simply
+ * declines to say the same sentence twice.
+ */
+function checkHtml(outcome: CheckOutcome): string {
+  const report = outcome.report;
+  const summary = planText(outcome.summary);
+  const ok = report.ok === true;
+  const summaryHtml = `<p class="check-summary ${ok ? 'check-pass' : 'check-fail'}">${escapeHtml(summary)}</p>`;
+
+  // A number, checked as one: `parseErrors` crosses the same duck-typed boundary as the rows,
+  // and `NaN > 0` is false while `'3' > 0` is true — neither is an answer worth acting on.
+  const parseErrors = typeof report.parseErrors === 'number' && Number.isFinite(report.parseErrors) ? report.parseErrors : 0;
+  if (parseErrors > 0) {
+    const reason = typeof report.reason === 'string' ? report.reason : '';
+    const reasonHtml = reason === '' || reason === outcome.summary
+      ? ''
+      : `<p class="check-reason">${escapeHtml(planText(reason))}</p>`;
+    return `<section class="check"><h2>${escapeHtml(CHECK_HEADING)}</h2>${summaryHtml}${reasonHtml}<p class="check-aside">${escapeHtml(CHECK_PARSE_MESSAGE)}</p></section>`;
+  }
+
+  const symbols = checkListHtml(report.symbols, 'export', true);
+  const imports = checkListHtml(report.imports, 'import', false);
+  return `<section class="check"><h2>${escapeHtml(CHECK_HEADING)}</h2>${summaryHtml}${symbols}${imports}</section>`;
+}
+
+// ── the manual-mode shape block (AC2) ──────────────────────────────────────────────────────
+
+/** One list of source LINES — imports, or signatures. Capped and counted like everything else
+ *  on this page; `planText` keeps the prose cap here rather than `MAX_CHECK_TEXT`'s, because a
+ *  real generic signature line runs long in a way an identifier never does. */
+function shapeListHtml(heading: string, lines: unknown, noun: string): string {
+  const all = Array.isArray(lines) ? (lines as unknown[]) : [];
+  if (all.length === 0) return '';
+  const shown = all.slice(0, MAX_LIST_ROWS);
+  const omitted = all.length - shown.length;
+  const items = shown.map((line) => `<li><code class="shape-line">${escapeHtml(planText(line))}</code></li>`).join('');
+  const omittedNote = omitted > 0
+    ? `<p class="list-omitted">${escapeHtml(listOmittedMessage(omitted, noun))}</p>`
+    : '';
+  return `<h3>${escapeHtml(heading)}</h3><ul class="shape-list">${items}</ul>${omittedNote}`;
+}
+
+/**
+ * What the learner has to write, in manual mode and only in manual mode (AC2) — imports
+ * first, then signatures, which is the order a file is written in.
+ *
+ * It shows LINES the session read off the reference, never bodies, and says so in its own
+ * caption: the whole premise of manual mode is that the extension writes nothing, and a block
+ * that quietly grew into the finished file would defeat the position of the dial the learner
+ * deliberately chose. Whoever extends this: adding "and here is the body" is not a feature.
+ */
+function shapeHtml(shape: NonNullable<StepViewState['shape']>): string {
+  const imports = shapeListHtml(IMPORTS_HEADING, shape.imports, 'import');
+  const signatures = shapeListHtml(EXPORTS_HEADING, shape.signatures, 'signature');
+  const body = imports === '' && signatures === ''
+    ? `<p class="check-aside">${escapeHtml(SHAPE_EMPTY_MESSAGE)}</p>`
+    : `<p class="shape-note">${escapeHtml(SHAPE_NOTE_MESSAGE)}</p>${imports}${signatures}`;
+  return `<section class="shape"><h2>${escapeHtml(SHAPE_HEADING)}</h2>${body}</section>`;
+}
+
+// ── the write note, and the reproduce offer (AC6) ──────────────────────────────────────────
+
+/**
+ * What the dial just did to the learner's own file — refused to overwrite, kept theirs, wrote
+ * over it — where the eye already is, in the run of the page rather than in a toast that has
+ * since vanished (conventions.md: a surface that can have something to say, says it).
+ *
+ * Rendered only when there is really a sentence: unlike `#step-note` this node is not written
+ * by the client script, so an always-present empty one would serve nobody and would put an
+ * empty paragraph's margin under the dial on every ordinary step.
+ */
+function writeNoteHtml(note: unknown): string {
+  if (typeof note !== 'string' || note === '') return '';
+  return `<p class="write-note" id="write-note">${escapeHtml(planText(note))}</p>`;
+}
+
+/**
+ * The one-line offer to copy `plan.reproduce`'s never-taught files (AC6).
+ *
+ * Gated three ways, and all three matter. No `reproduce` at all means the session has not
+ * worked out whether there is anything to copy; a count that is not a positive, finite number
+ * means the plan said something unusable and offering "NaN files" would be worse than
+ * offering nothing; and `done` — anything truthy, not only `true`, because the conservative
+ * direction here is to under-offer — means it has already happened. Once done, no offer: an
+ * offer that stays on the page after being taken invites a second press that either copies
+ * over the learner's edits or does nothing, and neither is a good answer to a button.
+ */
+function reproduceHtml(offer: StepViewState['reproduce']): string {
+  if (!offer || offer.done) return '';
+  const count = offer.count;
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 1) return '';
+  const message = reproduceOfferMessage(Math.floor(count));
+  return `<p class="reproduce" id="reproduce-offer"><span>${escapeHtml(message)}</span><button type="button" class="btn" id="btn-reproduce">${escapeHtml(REPRODUCE_BUTTON_LABEL)}</button></p>`;
+}
+
 function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   const step = state.step;
-  const currentDial: Dial = stepDial(state.progress, step.id);
+  const currentDial: Dial = resolvedDial(state.dial);
 
   return `
 <main id="step-main" data-step-id="${escapeAttr(planId(step.id))}">
@@ -461,7 +821,11 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
     <p class="witness-text">${escapeHtml(witnessSentence(step.witness))}</p>
   </section>
 
+  ${state.shape ? shapeHtml(state.shape) : ''}
+
   ${dialFieldset(currentDial)}
+
+  ${writeNoteHtml(state.writeNote)}
 
   <div class="actions">
     <button type="button" class="btn" id="btn-prev">Previous</button>
@@ -474,6 +838,10 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   </div>
 
   <div class="note" id="step-note">${escapeHtml(state.note ?? '')}</div>
+
+  ${state.check ? checkHtml(state.check) : ''}
+
+  ${reproduceHtml(state.reproduce)}
 </main>`;
 }
 
@@ -514,6 +882,9 @@ const CLIENT_SCRIPT = `
   on('btn-open', 'click', function () { post('step:open', {}); });
   on('btn-check', 'click', function () { post('step:check', {}); });
   on('btn-next', 'click', function () { post('step:next', {}); });
+  // Only on the page while the offer stands (see reproduceHtml); \`on\` is null-safe, so the
+  // rest of the time this line hooks nothing rather than needing a condition of its own.
+  on('btn-reproduce', 'click', function () { post('reproduce:run', {}); });
 
   ['manual', 'scaffolded', 'automated'].forEach(function (dial) {
     on('dial-' + dial, 'change', function () { post('dial:set', { dial: dial }); });
@@ -570,6 +941,105 @@ export function renderNoticeHtml(notice: string): string {
     body: `<main class="notice-only"><p class="notice">${escapeHtml(notice)}</p></main>`,
     script: '',
   });
+}
+
+/**
+ * Everything `renderStepHtml` actually PUTS ON THE PAGE, as one comparable string — the key
+ * `src/walk/step-panel.ts` decides whether to repaint on.
+ *
+ * **Why a repaint has to be conditional at all.** `webview.html = renderStepHtml(...)` is
+ * neither free nor idempotent: `renderPage` mints a fresh nonce per call, so the string is
+ * different every time and VS Code's identical-html short-circuit can never fire, and every
+ * assignment tears the iframe down and builds it again. The session refreshes every surface
+ * for reasons that change nothing here — `setDial` refreshes so the STATUS BAR can show
+ * `· scaffolded` (AC6) — and the learner who had tabbed into the dial and pressed Down loses
+ * the radio holding focus, while everyone loses their scroll position. Two pushes with the
+ * same key produce the same page, so the second is skipped (T-4 code review, finding 1).
+ *
+ * **Why it lives here and not in the panel.** It enumerates what the markup above draws, so
+ * it belongs beside that markup: T-4 kept it in `step-panel.ts`, one file away, which is
+ * exactly the distance a drift needs — and the drift is silent. A field this file renders and
+ * this function omits is stored on the host and never appears on screen until something else
+ * forces a repaint: a panel that is stale, intermittently, which is far harder to find than
+ * the repaint storm the key replaces. Here, the two are read together, and a unit test can
+ * prove by mutation that changing a rendered field changes the key (there is no way to reach
+ * `step-panel.ts` from `test/unit/`, which imports no `vscode`).
+ *
+ * **ADDING A FIELD TO THE MARKUP MEANS ADDING IT HERE, IN THE SAME COMMIT.** The list is in
+ * the order `bodyHtml` reads them, so the two can be diffed side by side:
+ *
+ *   - `step.id`                        → `<main data-step-id>` (also the client script's key)
+ *   - `step.decision.question`         → the `<h1>`
+ *   - `step.decision.options[]`        → `id`, `label`, `consequence`, `taken` — the list, its
+ *                                        `.option-taken` marking, its two badges, and (through
+ *                                        the array's LENGTH) the "n not shown" note
+ *   - `step.decision.authorChoice`     → the same marking, when no option carries `taken`
+ *   - `step.decision.why`              → the why paragraph
+ *   - `step.decision.whySource`        → its "from the model / the author / not inferable" line
+ *   - `step.witness.{sha,subject,date}`→ the witness sentence, or `NO_HISTORY_MESSAGE`
+ *   - `state.shape`                    → the manual-mode shape block (AC2), and its ABSENCE is
+ *                                        what removes that block when the dial leaves manual
+ *   - `state.fileExists`               → *Open the file*'s `disabled`, and its hint text
+ *   - `state.writeNote`                → the write note under the dial
+ *   - `state.check`                    → the whole check report (AC5) — summary, verdict
+ *                                        colour, every symbol and import row
+ *   - `state.reproduce`                → the offer line and its button, present until done
+ *   - `skins.SKINS`                    → the skin picker's `<option>`s
+ *
+ * **Four displayed fields are deliberately NOT here, and this is the only place that says
+ * why.** Each is one the PAGE ITSELF keeps current between repaints, so a repaint would
+ * install a value the learner is already looking at:
+ *
+ *   - **`state.dial`** (which radio is `checked`). The learner moved that radio; the browser
+ *     checked it before the message was even posted. This is the exact push finding 1 is
+ *     about, and repainting for it is what destroys the radio holding keyboard focus
+ *     mid-arrow-key. Note that a dial change which really does change the PAGE still repaints,
+ *     through `shape`, `writeNote` and `fileExists` — leaving manual mode removes the shape
+ *     block, and scaffolding a file writes one — which is the correct trade: the paint is
+ *     spent when there is something new to see and skipped when there is not.
+ *   - **`state.skin`** (`<html data-theme>` and the picker's `selected`). The client script
+ *     sets `data-theme` itself, instantly, for zero flash; the host's only job is to remember
+ *     the choice for the next real render.
+ *   - **`state.note`** (`#step-note`). It arrives as a `step:note` message the page writes
+ *     into the node and saves, precisely so it survives a hidden view being torn down. (Its
+ *     server-rendered counterpart, `writeNote`, IS in the key — a different node, a different
+ *     owner, and nothing on the page keeps it current.)
+ *   - **`state.progress`**, which nothing on this page reads any more: the dial it used to be
+ *     consulted for is resolved by the session now (see `resolvedDial`).
+ *
+ * If any of those ever starts changing from a source OTHER than the page's own controls, the
+ * fix is a targeted `postMessage` to update that one node — the way `note` already works —
+ * not a full repaint, and not moving it into this key.
+ *
+ * The RAW values go in, never the rendered ones: this file truncates long strings and caps
+ * every list, so hashing what it emits would make two genuinely different plans compare EQUAL
+ * past the cap — stale, silently. Comparing the inputs can only err the other way, in an
+ * occasional repaint that changed nothing visible, which costs a nonce.
+ *
+ * Every array is guarded before it is walked, for the reason `planText` exists (T-4 security
+ * review, finding 5): `options` is only TYPED as an array, and a `.map` on a plan that made it
+ * an object throws — here, from inside the decision about whether to paint, which would take
+ * down a push rather than merely a render.
+ */
+export function stepRenderKey(state: StepViewState, skins: SkinsModule): string {
+  const { decision, id, witness } = state.step;
+  const options = Array.isArray(decision.options) ? decision.options : [];
+  const skinRows = Array.isArray(skins.SKINS) ? skins.SKINS : [];
+  return JSON.stringify([
+    id,
+    decision.question,
+    options.map((option) => [option?.id, option?.label, option?.consequence, option?.taken]),
+    decision.authorChoice,
+    decision.why,
+    decision.whySource,
+    [witness?.sha, witness?.subject, witness?.date],
+    state.shape ?? null,
+    state.fileExists,
+    state.writeNote ?? null,
+    state.check ?? null,
+    state.reproduce ?? null,
+    skinRows.map((row) => [row?.name, row?.label, row?.note]),
+  ]);
 }
 
 export function renderStepHtml(state: StepViewState, skins: SkinsModule): string {
