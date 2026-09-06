@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildDir, writeJsonAtomic } from '../start/build.js';
+import { DEFAULT_DIAL, DIALS, type BuildRequest, type Dial } from '../start/request.js';
 import { emptyProgress, type PlanLike, type Progress } from './model.js';
 
 export { buildDir };
@@ -78,6 +79,43 @@ function isProgressShape(value: unknown): value is Progress {
   return isRecord(value['steps']);
 }
 
+/**
+ * Drops any `check` that is not exactly `{ ok: boolean; at: string }` (T-5 code review,
+ * finding 9).
+ *
+ * The shape guard above is about surviving the read; this one is about not drawing a lie
+ * afterwards. `TreeStepNode.check` is three-valued on purpose — undefined, pass, fail — so
+ * that a step nobody has reached looks different from the one they got wrong. But `treeModel`
+ * asks `recorded.ok ? 'pass' : 'fail'`, and a malformed `check` (a hand edit, another tool, a
+ * future version writing a richer object) has an `ok` of `undefined`, which is falsy. The tree
+ * then draws ✗ on a step nobody ever checked — the precise failure the three-valued
+ * distinction exists to prevent, arriving through the file this codebase already treats as
+ * untrusted.
+ *
+ * Dropping the field, rather than refusing the whole file, is the proportionate answer: the
+ * learner's POSITION and their done/pending statuses are still perfectly good, and throwing
+ * those away over an unreadable verdict would cost them far more than the verdict was worth.
+ */
+function withCheckedVerdicts(progress: Progress): Progress {
+  let changed = false;
+  const steps: Progress['steps'] = {};
+  for (const [id, step] of Object.entries(progress.steps)) {
+    if (!isRecord(step)) { changed = true; continue; }
+    const check: unknown = step.check;
+    if (check === undefined) { steps[id] = step; continue; }
+    if (isRecord(check) && typeof check['ok'] === 'boolean' && typeof check['at'] === 'string') {
+      steps[id] = step;
+      continue;
+    }
+    // Rebuilt without `check` rather than destructured-and-spread: the lint rule against
+    // unused bindings is right, and naming a variable only to discard it is a worse way to
+    // say "drop this field" than simply not copying it.
+    steps[id] = { status: step.status, ...(step.dial ? { dial: step.dial } : {}), ...(step.transcript ? { transcript: step.transcript } : {}) };
+    changed = true;
+  }
+  return changed ? { ...progress, steps } : progress;
+}
+
 /** Missing, unreadable, or not actually shaped like progress at all — none of those are an
  *  error; each is what a build that has never been usefully walked looks like, so each comes
  *  back as `emptyProgress(plan)`, never a throw. */
@@ -88,7 +126,77 @@ export function loadProgress(target: string, plan: PlanLike): Progress {
   } catch {
     return emptyProgress(plan);
   }
-  return isProgressShape(parsed) ? parsed : emptyProgress(plan);
+  return isProgressShape(parsed) ? withCheckedVerdicts(parsed) : emptyProgress(plan);
+}
+
+function requestPath(target: string): string {
+  return path.join(buildDir(target), 'request.json');
+}
+
+/**
+ * What was ASKED for when this tutorial was built — `<target>/.repo-tour/build/request.json`,
+ * written by the start screen (T-3) beside the plan.
+ *
+ * Two things in it are load-bearing for the dial (T-5) and nothing had read either of them
+ * until now:
+ *
+ *   - **`repo`** is the REFERENCE ROOT. Scaffolded and automated mode both write from the
+ *     reference's own source, so without this there is nothing to copy from — the plan
+ *     records decisions, never file contents.
+ *   - **`dial`** is the GLOBAL setting. T-4 rendered and persisted a per-step override and
+ *     deliberately went no further, so `statusText` falls back to `manual` for any step
+ *     without one. AC1's "global, overridable per step" is only half true until this is read.
+ *
+ * Shape-checked and `null` on anything unusable, for the reason `loadProgress` is: this is
+ * read on the interaction path, and a `request.json` that is valid JSON but not a request
+ * would otherwise throw one property access later. A tutorial with no readable request is a
+ * real state — it can be walked, it just cannot be written into — so `null` is an answer
+ * callers must handle, not an error.
+ */
+export type ResolvedRequest = BuildRequest & { referenceRoot: string };
+
+export function loadRequest(target: string): ResolvedRequest | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(requestPath(target), 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const repo = parsed['repo'];
+  const dial = parsed['dial'];
+  if (typeof repo !== 'string') return null;
+
+  // Where the reference actually lives. `referenceRoot` is what the build resolved; `repo` is
+  // only a fallback for `request.json` files written before that field existed — correct
+  // precisely because a build old enough to lack it could only have been a local path.
+  const recorded = parsed['referenceRoot'];
+  const root = typeof recorded === 'string' && recorded.length > 0 ? recorded : repo;
+
+  // And it must be a DIRECTORY that exists. `repo` is whatever was typed, so it can be a
+  // GitHub URL, a path that has since been deleted, or a file — and every consumer of it
+  // (the writer, the check, the reproduce copy) does `path.resolve(root, relative)`, which
+  // turns a URL into a nonsense path relative to the process's cwd and then fails one read
+  // at a time, silently. Answering `null` once, here, is the honest version of that: the
+  // caller already knows how to say "this tutorial can be walked but not written into".
+  let referenceRoot: string;
+  try {
+    if (!fs.statSync(root).isDirectory()) return null;
+    referenceRoot = root;
+  } catch {
+    return null;
+  }
+  return {
+    idea: typeof parsed['idea'] === 'string' ? parsed['idea'] : '',
+    recreate: parsed['recreate'] === true,
+    repo,
+    referenceRoot,
+    target: typeof parsed['target'] === 'string' ? parsed['target'] : target,
+    // An unrecognised dial is the global default, never a guess: a value outside `DIALS`
+    // means the file was hand-edited or written by a future version, and "manual" is the
+    // only fallback that cannot overstate what has happened to the learner's files.
+    dial: typeof dial === 'string' && (DIALS as readonly string[]).includes(dial) ? (dial as Dial) : DEFAULT_DIAL,
+  };
 }
 
 export function saveProgress(target: string, progress: Progress): void {

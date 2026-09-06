@@ -21,6 +21,26 @@ will be overwritten.
 - Exports: CORE_MODULE_NAMES, loadAnyModule, loadCore, resolveCoreRoot
 - Imports: (none)
 
+## src/dial/check.ts
+
+- Exports: referenceExtract, runCheck
+- Imports: (none)
+
+## src/dial/commit.ts
+
+- Exports: commitStep, commitSubject, ensureRepo, identityConfigured
+- Imports: (none)
+
+## src/dial/core.ts
+
+- Exports: dialCoreFor, languageOf, stubQuestionsFor
+- Imports: (none)
+
+## src/dial/writer.ts
+
+- Exports: fileShape, isRefusal, planWrite, reproduceEntries, reproduceFiles, writeTextAtomic
+- Imports: (none)
+
 ## src/doctor.ts
 
 - Exports: CLAUDE_ENV_VAR, formatReport, runDoctor
@@ -68,7 +88,12 @@ will be overwritten.
 
 ## src/walk/model.ts
 
-- Exports: currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCurrent, setDial, statusText, treeModel
+- Exports: FALLBACK_DIAL, currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCheck, setCurrent, setDial, statusText, stepDial, treeModel
+- Imports: (none)
+
+## src/walk/paths.ts
+
+- Exports: resolveInsideTarget
 - Imports: (none)
 
 ## src/walk/session.ts
@@ -88,22 +113,22 @@ will be overwritten.
 
 ## src/walk/step-protocol.ts
 
-- Exports: CHECK_NOTE, handleStepMessage, parseStepMessage
+- Exports: handleStepMessage, parseStepMessage
 - Imports: (none)
 
 ## src/walk/step-view.ts
 
-- Exports: FILE_MISSING_MESSAGE, NO_HISTORY_MESSAGE, renderNoticeHtml, renderStepHtml, stepScript
+- Exports: AUTHOR_BADGE, CHECK_HEADING, CHECK_PARSE_MESSAGE, EXPORTS_HEADING, FILE_MISSING_MESSAGE, IMPORTS_HEADING, MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, NOT_TEXT_MESSAGE, NO_HISTORY_MESSAGE, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_HEADING, SHAPE_NOTE_MESSAGE, T10_BADGE, TRUNCATION_MARKER, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, listOmittedMessage, optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey, stepScript
 - Imports: (none)
 
 ## src/walk/store.ts
 
-- Exports: hasPlan, loadPlan, loadProgress, saveProgress
+- Exports: hasPlan, loadPlan, loadProgress, loadRequest, saveProgress
 - Imports: (none)
 
 ## src/walk/tree.ts
 
-- Exports: DecisionsTreeProvider
+- Exports: DecisionsTreeProvider, stepMark
 - Imports: (none)
 
 ## src/webview/html.ts

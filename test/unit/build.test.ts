@@ -265,10 +265,39 @@ suite('buildFromRequest — end to end on a synthetic TS fixture (AC5, cachedOnl
     const errors = validateBuildPlan(SCHEMA, writtenPlan);
     assert.deepEqual(errors, [], `plan.json should validate against schema/build-plan.schema.json:\n${errors.join('\n')}`);
 
+    // `referenceRoot` is written ALONGSIDE the request, not instead of it (T-5 security
+    // review, finding 2). For a local path the two are the same string; for a GitHub URL they
+    // are not, and recording only the URL is what made the dial silently refuse on every
+    // URL-built tutorial — `repo` is what the learner typed, `referenceRoot` is where the
+    // reference actually is.
     const writtenRequest: unknown = JSON.parse(fs.readFileSync(requestPath, 'utf8'));
-    assert.deepEqual(writtenRequest, request);
+    assert.deepEqual(writtenRequest, { ...request, referenceRoot: repo });
 
     assert.equal(readMarker(target), null, 'the marker must be gone on success');
+  });
+
+  test('a GitHub URL records the CLONE path as referenceRoot, not the URL (security review finding 2)', async () => {
+    // The bug this pins: `resolveRepo` computed the clone path into a local and the raw
+    // request was persisted, so `request.json.repo` stayed the URL and the clone path was
+    // never written down anywhere. Everything downstream then did `path.resolve(url, rel)`,
+    // got a nonsense path relative to the process cwd, and refused ONE READ AT A TIME —
+    // scaffolded and automated wrote nothing, Check my work said "nothing to check", and the
+    // acceptance criteria about reproducing the reference did not hold on the flow the README
+    // documents first. Nothing noticed, because every other test passes a local path.
+    const repo = makeTsFixture();
+    const target = tmpDir('build-tutorials-target-');
+    const storage = tmpDir('storage-');
+    const clone = path.join(storage, 'refs', 'BMA-Corgea-fixture');
+    fs.cpSync(repo, clone, { recursive: true });
+    fs.mkdirSync(path.join(clone, '.git'), { recursive: true });
+
+    const request = { ...requestFor(repo, target), repo: 'https://github.com/BMA-Corgea/fixture' };
+    const outcome = await buildFromRequest(request, { ...baseContext(), globalStorageRoot: storage, git: () => Promise.resolve('') });
+
+    assert.equal(outcome.ok, true, outcome.reason);
+    const written = JSON.parse(fs.readFileSync(path.join(buildDir(target), 'request.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(written['repo'], 'https://github.com/BMA-Corgea/fixture', 'what the learner typed is kept verbatim');
+    assert.equal(written['referenceRoot'], clone, 'and where it actually landed is recorded beside it');
   });
 
   test('a plan missing a required key would NOT validate (proves the checker actually checks something)', () => {

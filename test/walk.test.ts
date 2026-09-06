@@ -76,7 +76,6 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import { statusText, type PlanLike, type Progress, type StepLike } from '../src/walk/model.js';
-import { CHECK_NOTE } from '../src/walk/step-protocol.js';
 import { fixturePlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
@@ -642,9 +641,10 @@ suite('the step panel drives the session, and repaints only when the page would 
    * was previously driven with anywhere in this suite — re-enter nothing, so they cannot see
    * this at all.
    *
-   * `step:check` runs first on purpose, so BOTH halves of the overwrite are asserted: the
-   * stale state carries the note as well as the old step, and `setView` has by then correctly
-   * decided the note belongs to the step the learner has left.
+   * `step:check` runs first on purpose — it is one of the messages that re-enters nothing, so
+   * it leaves the panel holding the state the guard is about. T-5 removed the sentence it used
+   * to reply (the button drives the real check now), so what is asserted here is the step id
+   * alone; the note's own lifetime has no producer to drive it until T-6's tutor arrives.
    */
   test('code review finding 5 — Next pressed IN THE PANEL leaves the panel on the step it moved TO', async () => {
     const dir = newTarget();
@@ -652,7 +652,6 @@ suite('the step panel drives the session, and repaints only when the page would 
     assert.equal(panel.getStateForTest()?.step.id, STEPS.shape, 'a never-walked target opens on step 1');
 
     panel.dispatchForTest({ type: 'step:check' });
-    assert.equal(panel.getStateForTest()?.note, CHECK_NOTE, 'the honest reply is on the panel before we navigate');
 
     panel.dispatchForTest({ type: 'step:next' });
 
@@ -662,12 +661,6 @@ suite('the step panel drives the session, and repaints only when the page would 
       STEPS.file,
       'the panel must hold the step it moved TO — without the identity guard it adopts the handler\'s stale return value and lands a step behind the session, which is an AC5 failure produced by an AC2 message',
     );
-    assert.equal(
-      panel.getStateForTest()?.note,
-      undefined,
-      'and the note goes with the step it was produced on, rather than being restored along with it',
-    );
-
     panel.dispatchForTest({ type: 'step:prev' });
     assert.equal(panel.getStateForTest()?.step.id, STEPS.shape, 'Previous re-enters exactly the same way, and is guarded by the same check');
   });
@@ -847,19 +840,22 @@ suite('the step view survives being hidden (AC5)', () => {
     await vscode.commands.executeCommand(STEP_VIEW_FOCUS);
   });
 
-  test('AC5: hiding the view and showing it again keeps the step and the note on it', async () => {
+  test('AC5: hiding the view and showing it again keeps the step this panel was on', async () => {
     const dir = newTarget();
     const { panel } = await openWalk(dir);
     await goTo(STEPS.handle);
     await vscode.commands.executeCommand(STEP_VIEW_FOCUS);
     await settle();
 
-    // `step:check` is the one message that leaves a mark on the panel's own state — the
-    // honest "not built yet" reply, which is not in `progress.json` and not in the plan, so it
-    // can only come back from the host after a hide/show if the host is what re-renders.
+    // `step:check` used to be the one message that left a mark on the panel's own state — an
+    // honest "not built yet" reply carried in `note`. T-5 replaced it with the real check, so
+    // it posts nothing back and the panel keeps no sentence of its own; the note CHANNEL is
+    // still there (and still proven, script and all, in
+    // `test/unit/walk-step-view.test.ts`'s restore tests) but nothing drives it until T-6's
+    // tutor. What this test still proves is the half that needs a live host: the STEP and the
+    // rest of what the page renders from survive the view being torn down.
     const reply = panel.dispatchForTest({ type: 'step:check' });
-    assert.deepEqual(reply, { type: 'step:note', payload: { note: CHECK_NOTE } });
-    assert.equal(panel.getStateForTest()?.note, CHECK_NOTE);
+    assert.equal(reply, undefined, 'the real check answers through the session, never as a reply here');
 
     await vscode.commands.executeCommand('workbench.action.closeSidebar');
     await settle();
@@ -868,8 +864,8 @@ suite('the step view survives being hidden (AC5)', () => {
 
     const state = panel.getStateForTest();
     assert.equal(state?.step.id, STEPS.handle, 'the step must survive the view being torn down');
-    assert.equal(state?.note, CHECK_NOTE, 'and so must the reply the learner was reading');
     assert.equal(state?.fileExists, true, 'and the rest of what the page renders from');
+    assert.equal(state?.dial, 'manual', 'including the RESOLVED dial the session sent (AC1)');
   });
 
   test('AC5: the host is the truth — a step change made while the view was hidden is what comes back', async () => {
@@ -889,7 +885,6 @@ suite('the step view survives being hidden (AC5)', () => {
     const state = panel.getStateForTest();
     assert.equal(state?.step.id, STEPS.file, 'the panel must come back on the step the SESSION is on');
     assert.equal(state?.step.id, session.getView()?.step.id);
-    assert.equal(state?.note, undefined, 'the note belongs to the step it was produced on, and that step is gone');
   });
 
   test('AC5: the page is actually REPAINTED, not merely remembered', async () => {

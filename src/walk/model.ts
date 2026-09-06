@@ -25,6 +25,10 @@ export interface ProgressStep {
   /** One transcript slot per step, T-6's tutor. Untouched by T-4 — declared now so this
    *  shape never has to migrate later (same reasoning as repo-tour's own `Option[]` floor). */
   transcript?: unknown[];
+  /** The last structural check for this step (T-5, AC5). Absent means nobody has pressed
+   *  *Check my work* here yet, which is different from a check that ran and failed — the
+   *  tree renders those differently, and a learner deserves that distinction. */
+  check?: { ok: boolean; at: string };
 }
 
 /** `<target>/.repo-tour/build/progress.json` — schema §5.3 refinement notes, verbatim. */
@@ -32,6 +36,9 @@ export interface Progress {
   schemaVersion: 1;
   current: string | null;
   steps: Record<string, ProgressStep>;
+  /** When `plan.reproduce`'s never-taught files were copied into the target (ISO, T-5).
+   *  Absent means never — the offer is still worth making. */
+  reproduced?: string;
 }
 
 export interface RangeLike {
@@ -133,6 +140,26 @@ export function setDial(progress: Progress, stepId: string, dial: Dial): Progres
   return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, dial } } };
 }
 
+export function setCheck(progress: Progress, stepId: string, ok: boolean, at: string): Progress {
+  const existing = progress.steps[stepId];
+  return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, check: { ok, at } } } };
+}
+
+/**
+ * The dial that actually applies to a step: its own override, else the GLOBAL one from the
+ * start screen (`request.json`), else `manual`.
+ *
+ * This is the whole of AC1's "global, and overridable per step", and it is a pure function on
+ * purpose — T-4 shipped only the override half and fell back to `manual`, which quietly
+ * understated what mode the learner was in the moment they set a global. `manual` remains the
+ * last resort because it is the only value that cannot overstate what has happened to their
+ * files: it means nothing was written, and nothing written is always a safe thing to claim.
+ */
+export function stepDial(progress: Progress, stepId: string | null, globalDial?: Dial): Dial {
+  const own = stepId ? progress.steps[stepId]?.dial : undefined;
+  return own ?? globalDial ?? FALLBACK_DIAL;
+}
+
 // ── the decision tree (AC1) ─────────────────────────────────────────────────────────────────
 
 export interface TreeStepNode {
@@ -143,6 +170,10 @@ export interface TreeStepNode {
    *  separate short title, and the question IS what the learner is here to see. */
   title: string;
   status: 'done' | 'current' | 'pending';
+  /** The last check's verdict, when one has run (T-5, AC5). `undefined` means "not checked",
+   *  which the tree must show differently from "checked and failed" — otherwise every step a
+   *  learner has not reached yet looks like a step they got wrong. */
+  check?: 'pass' | 'fail';
 }
 
 export interface TreeChapterNode {
@@ -163,7 +194,15 @@ function stepStatus(progress: Progress, step: StepLike): TreeStepNode['status'] 
 export function treeModel(plan: PlanLike, progress: Progress): TreeChapterNode[] {
   const byChapter = new Map<string, TreeStepNode[]>();
   for (const step of orderedSteps(plan)) {
-    const node: TreeStepNode = { id: step.id, ordinal: step.ordinal, kind: step.kind, title: step.decision.question, status: stepStatus(progress, step) };
+    const recorded = progress.steps[step.id]?.check;
+    const node: TreeStepNode = {
+      id: step.id,
+      ordinal: step.ordinal,
+      kind: step.kind,
+      title: step.decision.question,
+      status: stepStatus(progress, step),
+      ...(recorded ? { check: recorded.ok ? ('pass' as const) : ('fail' as const) } : {}),
+    };
     const list = byChapter.get(step.chapter);
     if (list) list.push(node);
     else byChapter.set(step.chapter, [node]);
@@ -196,11 +235,10 @@ export function treeModel(plan: PlanLike, progress: Progress): TreeChapterNode[]
 export const FALLBACK_DIAL: Dial = 'manual';
 
 /** "step 7 / 40 · scaffolded" (AC6) — 1-indexed against the plan's own ordinal order. */
-export function statusText(plan: PlanLike, progress: Progress): string {
+export function statusText(plan: PlanLike, progress: Progress, globalDial?: Dial): string {
   const steps = orderedSteps(plan);
   const idx = steps.findIndex((s) => s.id === progress.current);
   const n = idx === -1 ? 1 : idx + 1;
   const m = steps.length;
-  const dial = (progress.current ? progress.steps[progress.current]?.dial : undefined) ?? FALLBACK_DIAL;
-  return `step ${n} / ${m} · ${dial}`;
+  return `step ${n} / ${m} · ${stepDial(progress, progress.current, globalDial)}`;
 }

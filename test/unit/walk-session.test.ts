@@ -53,20 +53,30 @@
  */
 
 import * as assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import type { GitRunner } from '../../src/start/build.js';
+import type { Dial } from '../../src/start/request.js';
+import type { ResolvedRequest } from '../../src/walk/store.js';
+import type { CheckReport, DialCore, StubQuestion } from '../../src/dial/core.js';
 import {
   emptyProgress,
   markDone,
   setCurrent,
+  setDial,
   statusText,
   type PlanLike,
   type Progress,
+  type RangeLike,
 } from '../../src/walk/model.js';
 import { WalkSession, type WalkAdapters, type WalkView } from '../../src/walk/session.js';
-import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
+import { fixturePlan, fixtureProgress, writeFixtureTarget } from './walk-fixtures.js';
 
-/** Nothing here touches the filesystem, so this only has to be a stable absolute path — the
- *  one every `fileExists` argument below is expected to be joined against. */
+/** The in-memory target: nothing under it exists, so `readText` answers `undefined` for every
+ *  path and no position can ever put bytes there. It is a stable absolute path and nothing
+ *  more — the one every `fileExists` argument in the T-4 suites is joined against. The T-5
+ *  suites that actually write use a real temporary directory instead; see `realBox`. */
 const TARGET = '/fixture/target';
 
 // ── the recording fake ──────────────────────────────────────────────────────────────────────
@@ -75,6 +85,7 @@ const TARGET = '/fixture/target';
 type Call =
   | { fn: 'loadPlan'; target: string }
   | { fn: 'loadProgress'; target: string }
+  | { fn: 'loadRequest'; target: string }
   | { fn: 'saveProgress'; target: string; progress: Progress }
   | { fn: 'fileExists'; absPath: string }
   | { fn: 'setTree'; view: WalkView | undefined }
@@ -83,7 +94,19 @@ type Call =
   | { fn: 'revealEditor'; view: WalkView }
   | { fn: 'clearEditor' }
   | { fn: 'openFile'; view: WalkView }
-  | { fn: 'reportError'; message: string };
+  | { fn: 'reportError'; message: string }
+  // ── T-5 ───────────────────────────────────────────────────────────────────────────────────
+  | { fn: 'core' }
+  | { fn: 'readText'; absPath: string }
+  | { fn: 'confirmOverwrite'; relPath: string }
+  | { fn: 'commitPerStep' }
+  | { fn: 'git'; args: string[]; cwd: string | undefined }
+  // Not adapters, but part of the same fake and worth the same log: what the DIAL asked
+  // repo-tour's core to do is the difference between "scaffolded" and "automated" reaching
+  // `planWrite` at all, and it is invisible from the outside if the core is silent.
+  | { fn: 'stubFile'; language: string; ranges: RangeLike[]; questions: StubQuestion[] }
+  | { fn: 'coreCheck'; relPath: string; language: string; learnerSource: string }
+  | { fn: 'coreExtract'; root: string; paths: string[] };
 
 interface Fake {
   adapters: WalkAdapters;
@@ -101,20 +124,128 @@ interface FakeOptions {
   plan?: PlanLike;
   /** Progress already "on disk"; absent means a build that has never been walked. */
   progress?: Progress;
-  /** Step target paths (relative to `TARGET`) that do NOT exist — everything else does. */
+  /** Step target paths (relative to the target) that do NOT exist — everything else does. */
   missing?: string[];
   /** Make every `saveProgress` throw, the way a read-only target folder, a full disk or sync
    *  software holding the rename does. Nothing is stored, so `stored()` keeps showing what was
    *  last written successfully — which is exactly what the learner gets back on reload. */
   saveFails?: boolean;
+
+  // ── T-5 ─────────────────────────────────────────────────────────────────────────────────
+
+  /** The folder the walk writes INTO. `TARGET` (nothing exists, nothing can be written) unless
+   *  a test hands over a real temporary directory. */
+  target?: string;
+  /** `request.json`. ABSENT MEANS `null`, and that is the T-4 default on purpose: a session
+   *  with no request has no reference root, so no position writes and every one of the suites
+   *  written before this ticket goes on describing a walk that touches nothing. */
+  request?: ResolvedRequest;
+  /** `core()` resolves `undefined` — repo-tour is not loadable at all. */
+  coreMissing?: boolean;
+  /** The core's `check` REJECTS — a missing grammar, an unloadable parser. Real breakage, and
+   *  the opposite of the `null` that means "there is nothing to check here". */
+  coreThrows?: boolean;
+  /** What the core's `check` reports when it does answer. Default: everything present. */
+  report?: CheckReport;
+  /** What `confirmOverwrite` answers. `true` (overwrite) unless a test says otherwise. */
+  overwrite?: boolean;
+  /** `buildTutorials.commitPerStep`; default on, as the setting is. */
+  commitPerStep?: boolean;
+  /** Make `git config` reject the way a folder with no identity configured does. */
+  noGitIdentity?: boolean;
+  /** Make `git commit` reject, the way a stale lock file or an unchanged tree does. */
+  gitFails?: string;
+}
+
+/** What the fake core's `stubFile` hands back: nothing like the reference file, so a test can
+ *  tell "the core stubbed this" from "the reference was copied" by looking at the bytes. */
+const STUB_OUTPUT = '// the core stubbed this file\n';
+
+/** A report where the learner's file has everything the reference had. */
+function okReport(): CheckReport {
+  return {
+    symbols: [{ name: 'tokenize', kind: 'function', status: 'present' }],
+    imports: [],
+    parseErrors: 0,
+    ok: true,
+  };
+}
+
+/** A report naming what is missing — AC5's "a missing export is named". */
+function failingReport(): CheckReport {
+  return {
+    symbols: [{ name: 'tokenize', kind: 'function', status: 'missing' }],
+    imports: [],
+    parseErrors: 0,
+    ok: false,
+  };
+}
+
+/**
+ * repo-tour's core, faked and recording.
+ *
+ * Faked rather than real, deliberately, and the split is with `test/unit/dial-writer.test.ts`
+ * and `dial-check.test.ts` — those two load the REAL core because their questions are about
+ * tree-sitter ("does the scaffold parse", "is a renamed local invisible"), which no fake can
+ * answer honestly. The question HERE is which core call the session makes, with which dial's
+ * arguments, and what it does with the answer — and for that a fake is not a weaker version of
+ * the real thing, it is the only version that lets a test choose the answer and watch what the
+ * session does with it. It also keeps this suite free of a grammar load per run.
+ */
+function fakeCore(log: Call[], options: FakeOptions): DialCore {
+  return {
+    stubFile: (source, loadBearing, language, questions) => {
+      log.push({ fn: 'stubFile', language, ranges: loadBearing, questions });
+      return STUB_OUTPUT;
+    },
+    check: (learnerSource, _referenceExtract, language, relPath) => {
+      log.push({ fn: 'coreCheck', relPath, language, learnerSource });
+      if (options.coreThrows) return Promise.reject(new Error('repo-tour has no typescript grammar loaded'));
+      return Promise.resolve(options.report ?? okReport());
+    },
+    extract: (root, records) => {
+      log.push({ fn: 'coreExtract', root, paths: records.map((r) => r.path) });
+      // An opaque handle, exactly as `./core.ts` types it: nothing in this extension reads
+      // inside one, it goes from `extract` straight back into `check`.
+      return Promise.resolve({ extracts: records.map((r) => ({ path: r.path })) });
+    },
+  };
+}
+
+/**
+ * `git`, faked — no repository, no commits, no `~/.gitconfig` to depend on.
+ *
+ * `test/unit/dial-commit.test.ts` runs the real binary against real temporary repositories,
+ * which is where "a missing identity is never invented" is actually proven. What this one
+ * proves is different and cannot be seen from there: WHICH steps the session decides to commit,
+ * how many times, and with what subject.
+ */
+function fakeGit(log: Call[], options: FakeOptions): GitRunner {
+  return (args, cwd) => {
+    log.push({ fn: 'git', args, cwd });
+    if (args[0] === 'config') {
+      // git's own way of saying "not set at any level" is a non-zero exit, which `GitRunner`
+      // surfaces as a rejection — not an empty string.
+      if (options.noGitIdentity) return Promise.reject(new Error(`error: key does not exist: ${args[1] ?? ''}`));
+      return Promise.resolve(args[1] === 'user.name' ? 'A Learner\n' : 'learner@example.com\n');
+    }
+    if (args[0] === 'commit' && options.gitFails !== undefined) {
+      return Promise.reject(new Error(options.gitFails));
+    }
+    return Promise.resolve('');
+  };
 }
 
 function fakeAdapters(options: FakeOptions = {}): Fake {
   const plan = options.plan ?? fixturePlan();
-  const missing = new Set((options.missing ?? []).map((rel) => path.join(TARGET, rel)));
+  const target = options.target ?? TARGET;
+  /** Whether this fake is pointed at a real folder — see `fileExists`. */
+  const onDisk = options.target !== undefined;
+  const missing = new Set((options.missing ?? []).map((rel) => path.join(target, rel)));
   const saved = new Map<string, Progress>();
-  if (options.progress) saved.set(TARGET, options.progress);
+  if (options.progress) saved.set(target, options.progress);
   const log: Call[] = [];
+  const core = fakeCore(log, options);
 
   const adapters: WalkAdapters = {
     setTree: (view) => { log.push({ fn: 'setTree', view }); },
@@ -126,26 +257,65 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
     reportError: (message) => { log.push({ fn: 'reportError', message }); },
     fileExists: (absPath) => {
       log.push({ fn: 'fileExists', absPath });
-      return !missing.has(absPath);
+      if (missing.has(absPath)) return false;
+      // A REAL target is answered from the real disk, exactly as `src/extension.ts` wires this
+      // (`fs.existsSync`), and the in-memory `TARGET` from the table above. The split is not a
+      // convenience: T-5's suites write files into a folder DURING a pass, and "does this file
+      // exist" changes its answer in the middle of one. A fake that said `true` throughout
+      // could not tell a step whose file the dial just created from one that was already there
+      // — which is precisely the difference the reveal turns on (code review finding 2).
+      return onDisk ? fs.existsSync(absPath) : true;
     },
-    loadPlan: (target) => {
-      log.push({ fn: 'loadPlan', target });
+    loadPlan: (loadTarget) => {
+      log.push({ fn: 'loadPlan', target: loadTarget });
       return plan;
     },
-    loadProgress: (target, forPlan) => {
-      log.push({ fn: 'loadProgress', target });
-      const found = saved.get(target);
+    loadProgress: (loadTarget, forPlan) => {
+      log.push({ fn: 'loadProgress', target: loadTarget });
+      const found = saved.get(loadTarget);
       // A COPY, exactly as `JSON.parse` hands one back from the real file: a reload drill that
       // only passes because two sessions happen to share one object cannot pass here.
       return found ? structuredClone(found) : emptyProgress(forPlan);
     },
-    saveProgress: (target, progress) => {
+    saveProgress: (saveTarget, progress) => {
       // Logged BEFORE it can throw, deliberately: the real writer fails at the rename, having
       // already been asked to write, and a test that could not see the attempt could not tell
       // "the write failed" apart from "the write was never made".
-      log.push({ fn: 'saveProgress', target, progress });
+      log.push({ fn: 'saveProgress', target: saveTarget, progress });
       if (options.saveFails) throw new Error('EACCES: permission denied, rename \'progress.json.tmp\'');
-      saved.set(target, structuredClone(progress));
+      saved.set(saveTarget, structuredClone(progress));
+    },
+
+    // ── T-5 ───────────────────────────────────────────────────────────────────────────────
+
+    loadRequest: (requestTarget) => {
+      log.push({ fn: 'loadRequest', target: requestTarget });
+      return options.request ?? null;
+    },
+    core: () => {
+      log.push({ fn: 'core' });
+      return Promise.resolve(options.coreMissing ? undefined : core);
+    },
+    // The one adapter wired EXACTLY as `src/extension.ts` will wire it, on purpose: it is the
+    // input to the overwrite decision, and a test that answered it from a table in memory
+    // while `writeTextAtomic` put real bytes on a real disk would be comparing the session
+    // against its own bookkeeping instead of against the learner's folder.
+    readText: (absPath) => {
+      log.push({ fn: 'readText', absPath });
+      try {
+        return fs.readFileSync(absPath, 'utf8');
+      } catch {
+        return undefined;
+      }
+    },
+    confirmOverwrite: (relPath) => {
+      log.push({ fn: 'confirmOverwrite', relPath });
+      return Promise.resolve(options.overwrite ?? true);
+    },
+    git: fakeGit(log, options),
+    commitPerStep: () => {
+      log.push({ fn: 'commitPerStep' });
+      return options.commitPerStep ?? true;
     },
   };
 
@@ -153,7 +323,7 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
     adapters,
     log,
     names: () => log.map((call) => call.fn),
-    stored: () => saved.get(TARGET),
+    stored: () => saved.get(target),
     clearLog: () => { log.length = 0; },
   };
 }
@@ -176,7 +346,7 @@ function pushedSteps(fake: Fake, fn: 'setTree' | 'setPanel'): (string | undefine
 function opened(options: FakeOptions = {}): { session: WalkSession; fake: Fake; plan: PlanLike } {
   const plan = options.plan ?? fixturePlan();
   const fake = fakeAdapters({ ...options, plan, progress: options.progress ?? fixtureProgress(plan) });
-  const session = WalkSession.open(TARGET, fake.adapters);
+  const session = WalkSession.open(options.target ?? TARGET, fake.adapters);
   fake.clearLog();
   return { session, fake, plan };
 }
@@ -209,7 +379,7 @@ suite('WalkSession.open — loaded through the adapters, pushed to every surface
     const session = WalkSession.open(TARGET, fake.adapters);
 
     assert.deepEqual(fake.names(), [
-      'loadPlan', 'loadProgress', 'fileExists', 'setTree', 'setPanel', 'setStatus', 'revealEditor',
+      'loadPlan', 'loadProgress', 'loadRequest', 'fileExists', 'setTree', 'setPanel', 'setStatus', 'revealEditor',
     ], 'opening the walk should land the learner IN the file they left off in, not merely name it');
     assert.equal(session.getView()?.step.id, 'st-2-file-parse', 'the step the stored progress was parked on');
   });
@@ -252,7 +422,7 @@ suite('WalkSession.open — loaded through the adapters, pushed to every surface
     const session = WalkSession.open(TARGET, fake.adapters);
 
     assert.deepEqual(fake.names(), [
-      'loadPlan', 'loadProgress', 'fileExists', 'setTree', 'setPanel', 'setStatus', 'clearEditor',
+      'loadPlan', 'loadProgress', 'loadRequest', 'fileExists', 'setTree', 'setPanel', 'setStatus', 'clearEditor',
     ]);
     assert.equal(session.getView()?.fileExists, false);
     assert.deepEqual(pushedSteps(fake, 'setPanel'), ['st-4-symbol-render'],
@@ -288,7 +458,7 @@ suite('a target.file that escapes the target folder (security review finding 2)'
     assert.deepEqual(pick(fake, 'revealEditor'), [],
       '`path.join` would have made that a real path to somebody\'s private key, and this reveal runs on activation with no gesture in between');
     assert.deepEqual(fake.names(), [
-      'loadPlan', 'loadProgress', 'setTree', 'setPanel', 'setStatus', 'clearEditor',
+      'loadPlan', 'loadProgress', 'loadRequest', 'setTree', 'setPanel', 'setStatus', 'clearEditor',
     ], 'exactly the shape of a step whose file is not there — the escape is a dead end, not a state of its own');
     assert.equal(session.getView()?.fileExists, false);
     assert.deepEqual(pushedSteps(fake, 'setPanel'), ['st-2-file-parse'],
@@ -697,7 +867,7 @@ suite('a plan with no steps at all — the honest empty case', () => {
     const session = WalkSession.open(TARGET, fake.adapters);
 
     assert.equal(session.getView(), undefined);
-    assert.deepEqual(fake.names(), ['loadPlan', 'loadProgress', 'setTree', 'setPanel', 'setStatus', 'clearEditor'],
+    assert.deepEqual(fake.names(), ['loadPlan', 'loadProgress', 'loadRequest', 'setTree', 'setPanel', 'setStatus', 'clearEditor'],
       'no file is even asked about, and the editor is cleared rather than revealed');
     assert.equal(pick(fake, 'setTree')[0]?.view, undefined);
     assert.equal(pick(fake, 'setPanel')[0]?.view, undefined);
@@ -722,5 +892,1118 @@ suite('a plan with no steps at all — the honest empty case', () => {
 
     assert.deepEqual(fake.log, []);
     assert.equal(fake.stored(), undefined, 'and nothing was written into a folder whose plan has nothing to walk');
+  });
+});
+
+// ══ T-5 — the dial, the check and the commit ═══════════════════════════════════════════════
+
+/**
+ * Everything below runs against a REAL reference tree and a REAL target folder, and that is a
+ * change of method worth stating rather than sliding past.
+ *
+ * The T-4 suites above never touch a disk, because the questions they ask are about which
+ * surface got pushed what. T-5's questions are not like that. "manual writes nothing" is a
+ * claim about a FOLDER, and its acceptance check is literally that the target tree is unchanged
+ * after opening the step — a recording fake asked whether a write adapter had been called would
+ * be checking the session's bookkeeping against itself, and would pass just as happily if
+ * `writeTextAtomic` put a file down behind its back. "automated writes the reference byte for
+ * byte" (AC4/AC6) is a `Buffer.equals` for the same reason, not a comparison of what the
+ * session intended; and the overwrite prompt's whole subject is a file the learner has edited
+ * on disk.
+ *
+ * So the destination is real, and both of the adapters that ASK about it — `readText` and
+ * `fileExists` — are wired here exactly as `src/extension.ts` wires them (`readFileSync`,
+ * `existsSync`). `fileExists` matters as much as `readText` and for the same reason: "is this
+ * file there" changes its answer in the MIDDLE of an entry pass, and a fake answering from a
+ * table cannot tell a file the dial just created from one that was there all along — which is
+ * the difference the reveal turns on (code review finding 2). What stays faked is repo-tour's
+ * core and `git` — see `fakeCore` and `fakeGit` for why each is a fake rather than a weaker
+ * version of the real thing, and which suite owns the real one instead.
+ */
+suite('the dial, the check and the commit (T-5)', () => {
+  /** Holds both trees, so a reference and a target are siblings the way they really are. */
+  let box: string;
+  /** The repository being copied FROM. `writeFixtureTarget` writes the same three source files
+   *  the plan talks about, so the reference and the plan agree about what exists. */
+  let refRoot: string;
+  /** A fresh EMPTY folder per test: every "was anything written" assertion below is about a
+   *  folder that started with nothing in it, which is the only way "nothing" means anything. */
+  let target: string;
+
+  suiteSetup(() => {
+    box = fs.mkdtempSync(path.join(os.tmpdir(), 'build-tutorials-walk-session-'));
+    refRoot = path.join(box, 'reference');
+    fs.mkdirSync(refRoot, { recursive: true });
+    writeFixtureTarget(refRoot);
+    // The generated / vendored files repo-tour never turns into steps — see the reproduce
+    // suite. Written once, beside the reference's real sources, because that is where a real
+    // `plan.reproduce` entry points.
+    fs.mkdirSync(path.join(refRoot, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(refRoot, 'package-lock.json'), '{ "lockfileVersion": 3 }\n');
+    // Deliberately not UTF-8: `reproduceFiles` is the one path that carries files which are not
+    // text at all, and a decode anywhere on it would turn these bytes into U+FFFD.
+    fs.writeFileSync(path.join(refRoot, 'dist/bundle.js'), Buffer.from([0x00, 0xff, 0xfe, 0x41, 0x0a]));
+  });
+
+  setup(() => {
+    target = fs.mkdtempSync(path.join(box, 'learner-'));
+  });
+
+  suiteTeardown(() => {
+    fs.rmSync(box, { recursive: true, force: true });
+  });
+
+  /** `request.json` as `loadRequest` hands it over: the RESOLVED reference root, and the
+   *  GLOBAL dial. `repo` is only what the learner typed — for a GitHub URL the two differ,
+   *  and reading `repo` as a path is what T-5's security review found silently refusing. */
+  function request(dial: Dial): ResolvedRequest {
+    return { idea: 'a tokenizer', recreate: true, repo: refRoot, referenceRoot: refRoot, target, dial };
+  }
+
+  /** A request pointing at a reference that is not there — for the in-memory suites, where the
+   *  question is which dial resolves and never what lands on a disk. */
+  function nowhereRequest(dial: Dial): ResolvedRequest {
+    return { idea: '', recreate: true, repo: '/fixture/reference', referenceRoot: '/fixture/reference', target: TARGET, dial };
+  }
+
+  /** Every file under `dir`, relative and sorted. The empty array is the assertion AC2 is
+   *  actually about, so it is produced by walking the real tree rather than by asking the
+   *  session what it believes it did. */
+  function tree(dir: string): string[] {
+    const found: string[] = [];
+    const walk = (rel: string): void => {
+      for (const entry of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const next = rel === '' ? entry.name : `${rel}/${entry.name}`;
+        if (entry.isDirectory()) walk(next);
+        else found.push(next);
+      }
+    };
+    walk('');
+    return found.sort();
+  }
+
+  function readTarget(rel: string): string | undefined {
+    try {
+      return fs.readFileSync(path.join(target, rel), 'utf8');
+    } catch {
+      return undefined;
+    }
+  }
+
+  function writeTarget(rel: string, source: string): void {
+    const abs = path.join(target, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, source);
+  }
+
+  /** The same bytes, compared as bytes — AC6 is a `diff -r`, not a string equality that would
+   *  forgive a re-encoding. */
+  function sameBytes(rel: string): boolean {
+    return fs.readFileSync(path.join(target, rel)).equals(fs.readFileSync(path.join(refRoot, rel)));
+  }
+
+  /**
+   * A session open on the real target with the real reference, parked on `at`, ALREADY SETTLED
+   * — the entry pass has run and whatever it writes has landed. Awaiting `settled()` here
+   * rather than in every test is the point: the session owns its async, so a test that asserted
+   * without waiting would be racing the very behaviour it is testing.
+   */
+  async function walking(options: FakeOptions & { dial?: Dial; at?: string } = {}): Promise<{
+    session: WalkSession; fake: Fake; plan: PlanLike;
+  }> {
+    const plan = options.plan ?? fixturePlan();
+    const fake = fakeAdapters({
+      ...options,
+      plan,
+      target,
+      request: options.request ?? request(options.dial ?? 'manual'),
+      progress: options.progress ?? setCurrent(emptyProgress(plan), options.at ?? 'st-2-file-parse'),
+    });
+    const session = WalkSession.open(target, fake.adapters);
+    await session.settled();
+    return { session, fake, plan };
+  }
+
+  /** The plan with the named steps' `kind` flipped to `file`. One id reaches
+   *  `src/api/routes.ts` — the only fixture file that has imports — through the file path,
+   *  since the fixture's own file step points at `src/parse.ts`, which has none. Several ids
+   *  give the plan a RUN of consecutive file steps, which is what a walk that writes on every
+   *  arrival needs in order to be walked at all. */
+  function asFileStep(...stepIds: string[]): PlanLike {
+    const flipped = new Set(stepIds);
+    const plan = fixturePlan();
+    return {
+      ...plan,
+      steps: plan.steps.map((step) => (flipped.has(step.id) ? { ...step, kind: 'file' as const } : step)),
+    };
+  }
+
+  /** The fixture plan plus the generated / vendored files repo-tour never turns into steps. */
+  function planWithReproduce(): PlanLike {
+    return { ...fixturePlan(), reproduce: ['package-lock.json', 'dist/bundle.js'] };
+  }
+
+  /** AC7's subject, spelled out rather than borrowed from `commitSubject`: this is text that
+   *  ends up in a learner's own `git log` forever, and a test that computed it the way the code
+   *  does would agree with a format change instead of catching one. */
+  const STEP_2_SUBJECT = '2: Why does the tokenizer get its own module? — What the author did';
+
+  // ── AC1: global, overridable per step, resolved in ONE place ───────────────────────────────
+
+  suite('the resolved dial (AC1)', () => {
+    test('a step with no override of its own resolves to the GLOBAL dial from request.json', () => {
+      const plan = fixturePlan();
+      const fake = fakeAdapters({
+        plan,
+        // A `symbol` step, so nothing is written and this test is about resolution alone.
+        progress: setCurrent(emptyProgress(plan), 'st-3-symbol-handle'),
+        request: nowhereRequest('automated'),
+      });
+      const session = WalkSession.open(TARGET, fake.adapters);
+
+      assert.equal(session.getView()?.dial, 'automated',
+        'T-4 read the per-step override alone and fell back to manual — telling a learner who had set automated that nothing was being written for them');
+      assert.equal(pick(fake, 'setStatus')[0]?.text, 'step 3 / 4 · automated',
+        'and the status bar reads that same resolution rather than running a second one of its own');
+    });
+
+    test('a per-step override beats the global', () => {
+      const plan = fixturePlan();
+      const parked = setCurrent(emptyProgress(plan), 'st-3-symbol-handle');
+      const fake = fakeAdapters({
+        plan,
+        progress: setDial(parked, 'st-3-symbol-handle', 'manual'),
+        request: nowhereRequest('automated'),
+      });
+
+      assert.equal(WalkSession.open(TARGET, fake.adapters).getView()?.dial, 'manual',
+        'the whole of "global, and overridable per step" is that the override wins');
+    });
+
+    test('no request.json at all falls back to manual — the one position that cannot overstate what happened', () => {
+      const plan = fixturePlan();
+      const fake = fakeAdapters({ plan, progress: setCurrent(emptyProgress(plan), 'st-3-symbol-handle') });
+
+      assert.equal(WalkSession.open(TARGET, fake.adapters).getView()?.dial, 'manual');
+      assert.equal(pick(fake, 'setStatus')[0]?.text, 'step 3 / 4 · manual');
+    });
+
+    test('the dial travels on the SAME snapshot the tree, the panel and the editor were handed', () => {
+      const plan = fixturePlan();
+      const fake = fakeAdapters({
+        plan,
+        progress: setCurrent(emptyProgress(plan), 'st-3-symbol-handle'),
+        request: nowhereRequest('scaffolded'),
+      });
+      const session = WalkSession.open(TARGET, fake.adapters);
+
+      assert.equal(pick(fake, 'setTree')[0]?.view, session.getView());
+      assert.equal(pick(fake, 'setPanel')[0]?.view?.dial, 'scaffolded');
+      assert.equal(pick(fake, 'revealEditor')[0]?.view.dial, 'scaffolded',
+        'four surfaces, one answer — a surface that re-derived the dial would be a second one');
+    });
+
+    test('request.json is read ONCE, at open, so a walk’s global dial cannot drift under it', () => {
+      const { fake } = opened({ request: nowhereRequest('automated') });
+      // `opened` forgets the opening calls, so anything appearing here is a SECOND read.
+      assert.deepEqual(pick(fake, 'loadRequest'), [],
+        'AC1: the global setting never drifts toward automated on its own, and a value read once cannot drift at all');
+    });
+  });
+
+  // ── AC2: manual writes nothing ─────────────────────────────────────────────────────────────
+
+  suite('manual — the extension writes nothing at all (AC2)', () => {
+    test('the target tree is UNCHANGED after opening a file step', async () => {
+      const { fake } = await walking({ dial: 'manual' });
+
+      assert.deepEqual(tree(target), [],
+        'not an empty file, not a directory: nothing. The learner creates the file, which is the entire point of the position');
+      assert.deepEqual(pick(fake, 'stubFile'), [], 'the core is not even asked to stub anything');
+      assert.deepEqual(pick(fake, 'confirmOverwrite'), [], 'and nobody is asked about a file that was never going to be written');
+      assert.deepEqual(pick(fake, 'saveProgress'), [], 'merely looking at a manual step writes no progress either');
+    });
+
+    test('the panel is handed the file’s SHAPE instead — the signature line, never the body', async () => {
+      const { session } = await walking({ dial: 'manual' });
+
+      assert.deepEqual(session.getView()?.shape, {
+        // Line 1 of the reference's `src/parse.ts`, where its load-bearing range starts.
+        signatures: ['export interface Token {'],
+        imports: [],
+      }, 'parse.ts imports nothing, so an empty list is the honest answer rather than a missing one');
+    });
+
+    test('a file that has imports shows them too', async () => {
+      const { session } = await walking({
+        dial: 'manual',
+        plan: asFileStep('st-3-symbol-handle'),
+        at: 'st-3-symbol-handle',
+      });
+
+      assert.deepEqual(session.getView()?.shape, {
+        signatures: ['export function handleRequest(body: string): string {'],
+        imports: ['import { tokenize } from \'../parse.js\';'],
+      });
+      assert.deepEqual(tree(target), [], 'and still nothing on disk');
+    });
+
+    test('a symbol step has no shape at all — it lives inside a file some earlier step wrote', async () => {
+      const { session } = await walking({ dial: 'manual', at: 'st-3-symbol-handle' });
+
+      assert.equal(session.getView()?.shape, undefined);
+      assert.equal('shape' in (session.getView() ?? {}), false,
+        'absent rather than undefined: the panel keys its repaints on which fields it is rendering');
+    });
+  });
+
+  // ── AC3 / AC4: the two positions that write ────────────────────────────────────────────────
+
+  suite('scaffolded — the core’s stubs, never the reference (AC3)', () => {
+    test('what lands on disk is what the CORE produced', async () => {
+      await walking({ dial: 'scaffolded' });
+
+      assert.equal(readTarget('src/parse.ts'), STUB_OUTPUT);
+      assert.notEqual(readTarget('src/parse.ts'), fs.readFileSync(path.join(refRoot, 'src/parse.ts'), 'utf8'),
+        'a scaffold that was the reference file would hand over the answer under the label of a hint');
+    });
+
+    test('the core is handed this step’s language, its ranges in PLAN order, and the questions its stubs name', async () => {
+      const { fake } = await walking({ dial: 'scaffolded' });
+
+      assert.deepEqual(pick(fake, 'stubFile'), [{
+        fn: 'stubFile',
+        language: 'typescript',
+        ranges: [{ startLine: 1, endLine: 12 }],
+        questions: [{ ordinal: 2, question: 'Why does the tokenizer get its own module?' }],
+      }]);
+    });
+
+    test('a scaffolded step is NOT marked done and is NOT committed — the learner still has to fill it in', async () => {
+      const { fake } = await walking({ dial: 'scaffolded' });
+
+      assert.notEqual(fake.stored()?.steps['st-2-file-parse']?.status, 'done');
+      assert.deepEqual(pick(fake, 'git'), [],
+        'AC7 commits a step that PASSED, or one that was automated; a scaffold is neither yet');
+    });
+
+    test('the panel is told, in a sentence, that a file appeared under the learner', async () => {
+      const { session } = await walking({ dial: 'scaffolded' });
+
+      assert.match(session.getView()?.writeNote ?? '', /src\/parse\.ts was written for you/);
+    });
+  });
+
+  suite('automated — the reference file, byte for byte (AC4, AC6, AC7)', () => {
+    test('the bytes are IDENTICAL to the reference — nothing on this path normalises anything', async () => {
+      const { fake } = await walking({ dial: 'automated' });
+
+      assert.ok(sameBytes('src/parse.ts'),
+        'AC6 is checked by diff -r against the reference repository, so a trailing newline added here is a failed acceptance run');
+      assert.deepEqual(pick(fake, 'stubFile'), [], 'automated never asks the core to stub anything');
+    });
+
+    test('the step is marked done and committed, naming the ordinal, the question and the option taken', async () => {
+      const { fake } = await walking({ dial: 'automated' });
+
+      assert.equal(fake.stored()?.steps['st-2-file-parse']?.status, 'done',
+        'an automated step has no check to pass — the file IS the reference, so arriving with it written is what completing it means');
+      assert.deepEqual(pick(fake, 'git').map((call) => call.args), [
+        ['rev-parse', '--is-inside-work-tree'],
+        ['init', '-q'],
+        ['config', 'user.name'],
+        ['config', 'user.email'],
+        ['add', '--', path.join(target, 'src/parse.ts')],
+        ['commit', '-q', '-m', STEP_2_SUBJECT, '--', path.join(target, 'src/parse.ts')],
+      ], 'the step\'s own file, and the commit NAMES it rather than taking whatever the index holds — what that pathspec actually commits is proven against real git in dial-commit.test.ts, since an argv assertion against a fake can only ever show what was asked for');
+    });
+
+    test('re-entering a step already written writes nothing, says nothing, and commits nothing more', async () => {
+      const { session, fake } = await walking({ dial: 'automated' });
+      const written = fs.readFileSync(path.join(target, 'src/parse.ts'));
+      fake.clearLog();
+
+      session.goTo('st-2-file-parse');
+      await session.settled();
+
+      assert.ok(fs.readFileSync(path.join(target, 'src/parse.ts')).equals(written));
+      assert.deepEqual(pick(fake, 'git'), [],
+        'git commit on an unchanged file fails with "nothing to commit", which would surface as a refusal that never happened');
+      assert.deepEqual(pick(fake, 'confirmOverwrite'), [], 'identical content is not a conflict');
+      assert.equal(session.getView()?.writeNote, undefined,
+        'and a re-entered step must not re-announce a write that happened ten clicks ago');
+    });
+  });
+
+  /**
+   * Code review finding 2. `refresh(true)` — the only path that reaches `revealEditor` — runs
+   * inside `goTo`/`open`, which is BEFORE the entry pass has written anything: `fileExists` is
+   * false at that moment, so the session calls `clearEditor()`, and every push after the write
+   * lands is `refresh(false)`. So in scaffolded and automated — the two positions this ticket
+   * exists for — the first arrival at every `file` step blanked the editor's decorations, wrote
+   * the file, told the learner it had been written for them, and showed them nothing. AC4 asks
+   * for reveal + decoration on the automated path.
+   */
+  suite('the reveal the write earns (AC4, code review finding 2)', () => {
+    test('the arrival that writes the file is the arrival that reveals it', async () => {
+      const { session, fake } = await walking({ dial: 'automated' });
+
+      assert.deepEqual(pick(fake, 'revealEditor').map((call) => call.view.step.id), ['st-2-file-parse'],
+        'nothing existed to reveal when the walk arrived, so the pass that made the file exist is the only thing that can show it');
+      assert.equal(pick(fake, 'revealEditor')[0]?.view.fileExists, true);
+      assert.deepEqual(fake.names().filter((fn) => fn === 'clearEditor' || fn === 'revealEditor'),
+        ['clearEditor', 'revealEditor'],
+        'the clear was honest — there really was nothing there yet — and it is not the end of the story');
+      assert.match(session.getView()?.writeNote ?? '', /written for you/,
+        'the sentence and the reveal describe the same moment: the panel saying so over an editor showing nothing is the whole of finding 2');
+    });
+
+    test('a step re-entered is revealed by the NAVIGATION, and not a second time by the pass', async () => {
+      const { session, fake } = await walking({ dial: 'automated' });
+      fake.clearLog();
+
+      session.goTo('st-2-file-parse');
+      await session.settled();
+
+      assert.equal(pick(fake, 'revealEditor').length, 1,
+        'the file is there, so goTo reveals it and the pass has nothing to add — re-centring the editor under a learner reading it is the jank setDial\'s no-reveal rule exists to avoid');
+    });
+
+    test('Keep mine reveals nothing of its own — what is on screen is still the learner\'s file', async () => {
+      writeTarget('src/parse.ts', 'export function tokenize() {\n  return [];  // my own attempt\n}\n');
+      const { fake } = await walking({ dial: 'automated', overwrite: false });
+
+      assert.equal(pick(fake, 'revealEditor').length, 1, 'the arrival\'s own: the file existed all along');
+      assert.deepEqual(pick(fake, 'clearEditor'), []);
+    });
+
+    test('a pass the walk has already moved PAST writes its file and reveals nothing', async () => {
+      const { session, fake } = await walking({
+        dial: 'automated',
+        plan: asFileStep('st-3-symbol-handle', 'st-4-symbol-render'),
+      });
+      fake.clearLog();
+
+      session.next();
+      session.next();
+      await session.settled();
+
+      assert.deepEqual(pick(fake, 'revealEditor').map((call) => call.view.step.id), ['st-4-symbol-render'],
+        'a deferred pass still writes its own step\'s file, but the reveal is about where the LEARNER is — dragging the editor onto a step they have walked past is not a fix for finding 2 but a second bug');
+      assert.deepEqual(fake.names().filter((fn) => fn === 'clearEditor' || fn === 'revealEditor'),
+        ['clearEditor', 'clearEditor', 'revealEditor'],
+        'one clear per arrival at a file not written yet, and then the one reveal — a pass that refreshed WITH a reveal from behind the walk would clear the decorations off the step the learner is actually on, since `refresh` reveals whatever is current');
+      assert.ok(sameBytes('src/api/routes.ts'), 'and the pass it belonged to still did its work');
+    });
+  });
+
+  // ── never overwrite a learner's edits silently ─────────────────────────────────────────────
+
+  suite('the Overwrite / Keep mine prompt', () => {
+    /** The learner's own version of the step's file: real, on disk, and different. */
+    const LEARNER_VERSION = 'export function tokenize() {\n  return [];  // my own attempt\n}\n';
+
+    test('a file that already holds exactly these bytes is not a conflict — no prompt, no rewrite', async () => {
+      writeTarget('src/parse.ts', fs.readFileSync(path.join(refRoot, 'src/parse.ts'), 'utf8'));
+      const { fake } = await walking({ dial: 'automated' });
+
+      assert.deepEqual(pick(fake, 'confirmOverwrite'), [],
+        'prompting here would train the learner to dismiss the one dialog that exists to protect their work');
+      assert.ok(sameBytes('src/parse.ts'));
+    });
+
+    test('a file that DIFFERS is asked about, exactly once', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      const { fake } = await walking({ dial: 'automated' });
+
+      assert.deepEqual(pick(fake, 'confirmOverwrite').map((call) => call.relPath), ['src/parse.ts'],
+        'the RELATIVE path, because it is shown to a person who thinks in the paths their editor shows them');
+    });
+
+    test('Keep mine leaves the learner’s file exactly as it was, and says so', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      const { session, fake } = await walking({ dial: 'automated', overwrite: false });
+
+      assert.equal(readTarget('src/parse.ts'), LEARNER_VERSION, 'not one byte of it was touched');
+      assert.match(session.getView()?.writeNote ?? '', /kept/);
+      assert.notEqual(fake.stored()?.steps['st-2-file-parse']?.status, 'done',
+        'a step whose file is the learner’s own is not an automated step that completed');
+      assert.deepEqual(pick(fake, 'git'), [], 'and nothing was committed on its behalf');
+    });
+
+    test('the prompt is raised ONCE per (step, file) however many times the tree fires goTo', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      const { session, fake } = await walking({ dial: 'automated', overwrite: false });
+
+      // Clicking the step you are already on is how a learner asks for their file back, so the
+      // tree really does re-fire `goTo` — this is the plan's named write-ahead risk, not a
+      // hypothetical one.
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      session.next();
+      await session.settled();
+      session.prev();
+      await session.settled();
+
+      assert.equal(pick(fake, 'confirmOverwrite').length, 1,
+        'an unremembered prompt reappears on every click until it gets the answer it wants');
+      assert.equal(readTarget('src/parse.ts'), LEARNER_VERSION,
+        'and Keep mine goes on meaning keep mine — a decision that expired on the next click would be the most expensive bug this file can have');
+    });
+
+    test('Overwrite really overwrites, and is not asked again either', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      const { session, fake } = await walking({ dial: 'automated', overwrite: true });
+
+      assert.ok(sameBytes('src/parse.ts'), 'the learner asked for this step’s version, so they get it byte for byte');
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      assert.equal(pick(fake, 'confirmOverwrite').length, 1,
+        'the file now matches, so the second pass has nothing to ask about in the first place');
+    });
+
+    /**
+     * Code review finding 5. The remembered answer was keyed by `${step.id} ${absPath}` and
+     * nothing else, so it also answered an explicit `dial:set` on that very step — and one
+     * *Keep mine* therefore killed the dial for that step for the rest of the session,
+     * contradicting the promise `setDial` makes in its own header ("drag it to automated and
+     * the file should be there"). A learner who dismissed the modal once had no way back short
+     * of reloading the window.
+     */
+    test('one Keep mine does not kill the dial: an explicit dial change on that step may ask again', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      const { session, fake } = await walking({ dial: 'automated', overwrite: false });
+      assert.equal(pick(fake, 'confirmOverwrite').length, 1, 'the arrival asked, and was told to keep');
+
+      // The tree re-firing `goTo` is still answered from memory — that is the rule, and it is
+      // the reason `prompted` exists at all.
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      assert.equal(pick(fake, 'confirmOverwrite').length, 1);
+
+      // Moving the control is not the tree re-firing. It is a person asking for something.
+      session.setDial('st-2-file-parse', 'scaffolded');
+      await session.settled();
+
+      assert.equal(pick(fake, 'confirmOverwrite').length, 2,
+        'the prompt-once rule is about the entry pass the tree re-fires, never about a new deliberate gesture');
+      assert.equal(readTarget('src/parse.ts'), LEARNER_VERSION, 'and Keep mine, said twice, still means keep mine');
+    });
+
+    test('and the second answer is obeyed — Overwrite after a Keep really writes', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      let answer = false;
+      const plan = fixturePlan();
+      const fake = fakeAdapters({
+        plan,
+        target,
+        request: request('automated'),
+        progress: setCurrent(emptyProgress(plan), 'st-2-file-parse'),
+      });
+      const session = WalkSession.open(target, { ...fake.adapters, confirmOverwrite: () => Promise.resolve(answer) });
+      await session.settled();
+      assert.equal(readTarget('src/parse.ts'), LEARNER_VERSION, 'kept, as they asked the first time');
+
+      answer = true;
+      session.setDial('st-2-file-parse', 'automated');
+      await session.settled();
+
+      assert.ok(sameBytes('src/parse.ts'),
+        'drag it to automated and the file should be there — an answer remembered past the gesture it was given for is a dial that does nothing');
+    });
+  });
+
+  // ── AC5: Check my work ─────────────────────────────────────────────────────────────────────
+
+  suite('runCheck — the verdict, and what a pass earns (AC5, AC7)', () => {
+    test('a pass stores the verdict, marks the step done, and does both in ONE write', async () => {
+      const { session, fake } = await walking({ dial: 'automated', commitPerStep: false });
+      fake.clearLog();
+
+      session.runCheck();
+      await session.settled();
+
+      const recorded = fake.stored()?.steps['st-2-file-parse'];
+      assert.equal(recorded?.check?.ok, true);
+      assert.match(recorded?.check?.at ?? '', /^\d{4}-\d{2}-\d{2}T/, 'an ISO instant, so a surface can say WHEN as well as whether');
+      assert.equal(recorded?.status, 'done');
+      assert.equal(pick(fake, 'saveProgress').length, 1,
+        '"this check passed" and "this step is done" are the same fact; writing them separately leaves a window claiming one without the other');
+    });
+
+    test('the full report reaches the view; only the durable half reaches progress', async () => {
+      const { session } = await walking({ dial: 'automated' });
+      session.runCheck();
+      await session.settled();
+
+      const view = session.getView();
+      assert.deepEqual(view?.check?.report, okReport(), 'the panel renders present / missing / extra per symbol');
+      assert.match(view?.check?.summary ?? '', /every part is there/, 'and one line above it that carries the finding on its own');
+      assert.deepEqual(Object.keys(view?.progress.steps['st-2-file-parse']?.check ?? {}).sort(), ['at', 'ok'],
+        'progress carries the verdict and the instant and no report — a reload honestly shows none rather than remembering one it never stored');
+    });
+
+    test('a failing check records the verdict, leaves the step PENDING, and commits nothing', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded', report: failingReport() });
+      fake.clearLog();
+
+      session.runCheck();
+      await session.settled();
+
+      const recorded = fake.stored()?.steps['st-2-file-parse'];
+      assert.equal(recorded?.check?.ok, false);
+      assert.notEqual(recorded?.status, 'done', 'a check that ran and failed is a step still being worked on');
+      assert.deepEqual(pick(fake, 'git'), []);
+      assert.match(session.getView()?.check?.summary ?? '', /missing export: tokenize/,
+        'AC5: a missing export is NAMED — "1 missing" is a riddle, "missing export: tokenize" is a next action');
+    });
+
+    test('the learner’s own source is what gets compared, read back off their disk', async () => {
+      const mine = 'export function tokenize(): string[] {\n  return [];\n}\n';
+      writeTarget('src/parse.ts', mine);
+      const { session, fake } = await walking({ dial: 'manual' });
+
+      session.runCheck();
+      await session.settled();
+
+      assert.equal(pick(fake, 'coreCheck')[0]?.learnerSource, mine);
+      assert.equal(pick(fake, 'coreCheck')[0]?.language, 'typescript');
+      assert.equal(pick(fake, 'coreExtract')[0]?.root, refRoot,
+        'compared against the REFERENCE, which is the only thing that knows what shape the file is supposed to have');
+    });
+
+    test('a null check is NOT a failure — nothing recorded, nothing marked, nothing reported', async () => {
+      // Manual mode with nothing written yet: the commonest state `runCheck` sees, and the one
+      // that must never mark a step wrong. `null` is not a verdict.
+      const { session, fake } = await walking({ dial: 'manual' });
+      assert.deepEqual(tree(target), [], 'the premise: the learner has not created the file yet');
+      fake.clearLog();
+
+      session.runCheck();
+      await session.settled();
+
+      assert.equal(fake.stored()?.steps['st-2-file-parse']?.check, undefined,
+        'no verdict at all — "checked and failed" and "not checked" are different things, and the tree draws them differently');
+      assert.notEqual(fake.stored()?.steps['st-2-file-parse']?.status, 'done');
+      assert.deepEqual(pick(fake, 'reportError'), [],
+        'and nothing is put in front of a learner who has simply not written the file yet');
+      assert.deepEqual(pick(fake, 'coreCheck'), [],
+        'the core is never even reached — a missing file costs a failed read, not a parse of the reference');
+      assert.match(session.getView()?.writeNote ?? '', /nothing to check here yet/,
+        'said, not swallowed: a pressed button that does nothing and explains nothing is what the walk’s conventions rule out');
+    });
+
+    test('a THROWING core is the opposite case, and it goes to the learner', async () => {
+      const { session, fake } = await walking({ dial: 'automated', coreThrows: true });
+      fake.clearLog();
+
+      session.runCheck();
+      await session.settled();
+
+      assert.equal(pick(fake, 'reportError').length, 1,
+        'an unloadable core or a missing grammar is real breakage — answering it with "nothing to check" leaves a learner pressing the button forever');
+      assert.match(pick(fake, 'reportError')[0]?.message ?? '', /grammar/);
+      assert.equal(fake.stored()?.steps['st-2-file-parse']?.check, undefined, 'and no verdict is invented out of a failure');
+    });
+
+    test('a core that will not load at all is reported ONCE, however many steps are walked', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded', coreMissing: true });
+
+      session.runCheck();
+      await session.settled();
+      session.goTo('st-3-symbol-handle');
+      await session.settled();
+      session.goTo('st-2-file-parse');
+      await session.settled();
+
+      assert.equal(pick(fake, 'reportError').length, 1,
+        'a standing condition the doctor explains is stated once and then endured quietly');
+      assert.deepEqual(tree(target), [],
+        'and nothing is written without it — a "scaffold" that skipped stubFile would BE the answer');
+    });
+
+    test('pressing Check twice on a step already passed does not commit twice', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded' });
+      session.runCheck();
+      await session.settled();
+      const first = pick(fake, 'git').length;
+      fake.clearLog();
+
+      session.runCheck();
+      await session.settled();
+
+      assert.ok(first > 0, 'the first pass really did commit');
+      assert.deepEqual(pick(fake, 'git'), [],
+        'ONE commit per step, not one per click — a second git commit on an unchanged file fails with "nothing to commit"');
+    });
+  });
+
+  suite('the commit per completed step (AC7)', () => {
+    test('buildTutorials.commitPerStep off means git is never invoked at all', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded', commitPerStep: false });
+      session.runCheck();
+      await session.settled();
+
+      assert.equal(fake.stored()?.steps['st-2-file-parse']?.status, 'done', 'the step still completed');
+      assert.deepEqual(pick(fake, 'git'), [], 'the setting turns the commit off, not the check');
+    });
+
+    test('no git identity: nothing is committed, the panel says why, and the learner is told once', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded', noGitIdentity: true });
+      session.runCheck();
+      await session.settled();
+
+      assert.deepEqual(pick(fake, 'git').map((call) => call.args[0]), ['rev-parse', 'init', 'config', 'config'],
+        'it never reaches commit — a tutorial inventing an author on a repository the learner will keep and push is graffiti with a signature');
+      assert.match(session.getView()?.writeNote ?? '', /was not committed/);
+      assert.equal(pick(fake, 'reportError').length, 1);
+      assert.match(pick(fake, 'reportError')[0]?.message ?? '', /git config user\.name/,
+        'and it says exactly what they would type to fix it');
+    });
+
+    test('any other git failure comes back the same way, never as a rejected promise', async () => {
+      const { session, fake } = await walking({
+        dial: 'scaffolded',
+        gitFails: 'fatal: Unable to create \'.git/index.lock\': File exists.',
+      });
+      session.runCheck();
+      await session.settled();
+
+      assert.equal(fake.stored()?.steps['st-2-file-parse']?.status, 'done', 'the step passed; only the bookkeeping failed');
+      assert.match(session.getView()?.writeNote ?? '', /index\.lock/);
+    });
+
+    test('a refusal that is not about an identity does not tell them to configure one (code review finding 8)', async () => {
+      const { session, fake } = await walking({
+        dial: 'scaffolded',
+        gitFails: 'fatal: Unable to create \'.git/index.lock\': File exists.',
+      });
+      session.runCheck();
+      await session.settled();
+
+      const message = pick(fake, 'reportError')[0]?.message ?? '';
+      assert.equal(pick(fake, 'reportError').length, 1);
+      assert.match(message, /index\.lock/, 'the reason is the half they can act on, so it is carried either way');
+      assert.doesNotMatch(message, /git config/,
+        '"set git config user.name" is an instruction that fixes nothing here, and it points them away from the sentence that says what actually happened');
+    });
+  });
+
+  // ── AC6: the files that are never taught ───────────────────────────────────────────────────
+
+  suite('reproduce — the never-taught files (AC6)', () => {
+    test('copies every entry byte for byte and records when it happened', async () => {
+      const { session, fake } = await walking({ dial: 'manual', plan: planWithReproduce() });
+      fake.clearLog();
+
+      session.reproduce();
+      await session.settled();
+
+      assert.deepEqual(tree(target), ['dist/bundle.js', 'package-lock.json']);
+      assert.ok(sameBytes('dist/bundle.js'),
+        'bytes, never a string: this is the one path that carries files which are not text at all');
+      assert.match(fake.stored()?.reproduced ?? '', /^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    test('the view offers the count until it has been taken, and then says it is done', async () => {
+      const { session } = await walking({ dial: 'manual', plan: planWithReproduce() });
+
+      assert.deepEqual(session.getView()?.reproduce, { count: 2, done: false });
+      session.reproduce();
+      await session.settled();
+      assert.deepEqual(session.getView()?.reproduce, { count: 2, done: true });
+    });
+
+    test('a plan that lists none offers nothing, rather than an offer of nothing', async () => {
+      const { session } = await walking({ dial: 'manual' });
+
+      assert.equal(session.getView()?.reproduce, undefined);
+      assert.equal('reproduce' in (session.getView() ?? {}), false);
+    });
+
+    test('automated runs it before the first file step, unasked, and only once', async () => {
+      const { session, fake } = await walking({ dial: 'automated', plan: planWithReproduce() });
+
+      assert.deepEqual(tree(target), ['dist/bundle.js', 'package-lock.json', 'src/parse.ts'],
+        'AC6’s diff -r can only come back clean because the file steps and this list TOGETHER cover every file the inventory saw');
+      const stampedAt = fake.stored()?.reproduced;
+      assert.notEqual(stampedAt, undefined);
+      fs.rmSync(path.join(target, 'package-lock.json'));
+
+      session.goTo('st-2-file-parse');
+      await session.settled();
+
+      assert.equal(fake.stored()?.reproduced, stampedAt, 'the same instant, not a fresh one');
+      assert.deepEqual(tree(target), ['dist/bundle.js', 'src/parse.ts'],
+        'progress.reproduced is what remembers it, so walking back through the step copies nothing again — even a file deleted since');
+    });
+
+    test('pressing it again once it is done says so rather than doing nothing', async () => {
+      const { session, fake } = await walking({ dial: 'manual', plan: planWithReproduce() });
+      session.reproduce();
+      await session.settled();
+      fake.clearLog();
+
+      session.reproduce();
+      await session.settled();
+
+      assert.deepEqual(pick(fake, 'saveProgress'), []);
+      assert.match(session.getView()?.writeNote ?? '', /already been copied/);
+    });
+
+    /**
+     * Security review finding 3 / code review finding 6. `reproduceFiles` overwrote whatever it
+     * found, with no comparison and no count — from `applyDial` (so: on open, and on every
+     * `goTo` in automated mode) and from a palette command that is always available. The case
+     * is not exotic: the learner runs `npm install` in the target to try the app — which the
+     * spec leaves to them on purpose — and the next reproduce silently replaces their
+     * `package-lock.json`. `reproduce`'s files are the learner's to have edited like any other.
+     */
+    suite('a generated file the learner has since changed (security review finding 3)', () => {
+      const MY_LOCKFILE = '{ "lockfileVersion": 3, "packages": { "": { "name": "mine" } } }\n';
+
+      test('the press that would replace one copies nothing, and says how many and which', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const { session, fake } = await walking({ dial: 'manual', plan: planWithReproduce() });
+        fake.clearLog();
+
+        session.reproduce();
+        await session.settled();
+
+        assert.equal(readTarget('package-lock.json'), MY_LOCKFILE, 'not one byte of theirs');
+        assert.deepEqual(tree(target), ['package-lock.json'],
+          'the list is copied as ONE act and recorded as one instant, so it is held as one too');
+        assert.match(session.getView()?.writeNote ?? '', /Nothing was copied/);
+        assert.match(session.getView()?.writeNote ?? '', /package-lock\.json/, 'named, not counted at them');
+        assert.equal(fake.stored()?.reproduced, undefined, 'nothing happened, so nothing is recorded as having');
+        assert.deepEqual(session.getView()?.reproduce, { count: 2, done: false },
+          'and the offer stays on the page, which is how they say yes');
+      });
+
+      test('the press after that is the gesture, and it replaces them', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const { session, fake } = await walking({ dial: 'manual', plan: planWithReproduce() });
+
+        session.reproduce();
+        await session.settled();
+        session.reproduce();
+        await session.settled();
+
+        assert.ok(sameBytes('package-lock.json'), 'asked with the count in front of them, and answered');
+        assert.deepEqual(tree(target), ['dist/bundle.js', 'package-lock.json'], 'and the rest of the list came with it');
+        assert.match(session.getView()?.writeNote ?? '', /was replaced/);
+        assert.notEqual(fake.stored()?.reproduced, undefined);
+      });
+
+      test('a file that already holds the reference\'s bytes is not a replacement and is never mentioned', async () => {
+        writeTarget('package-lock.json', fs.readFileSync(path.join(refRoot, 'package-lock.json'), 'utf8'));
+        const { session } = await walking({ dial: 'manual', plan: planWithReproduce() });
+
+        session.reproduce();
+        await session.settled();
+
+        assert.deepEqual(tree(target), ['dist/bundle.js', 'package-lock.json'],
+          'the identical-bytes short-circuit writeFile has always had, on this path too: one press, no warning about a file nobody is losing');
+        assert.equal(session.getView()?.writeNote, undefined);
+      });
+
+      test('two binaries that DECODE the same are not identical — a lossy read is no evidence at all', async () => {
+        // The premise, proven rather than assumed, exactly as the AC6 acceptance run proves its
+        // own byte comparison: 0xff and 0xfe are both invalid UTF-8 starts, so both decode to
+        // U+FFFD and a STRING comparison cannot tell these two files apart.
+        const reference = fs.readFileSync(path.join(refRoot, 'dist/bundle.js'));
+        const mine = Buffer.from(reference);
+        mine[1] = 0xfe; // was 0xff
+        assert.notDeepEqual(mine, reference, 'the bytes really do differ');
+        assert.equal(mine.toString('utf8'), reference.toString('utf8'), 'and a decode really cannot see it');
+        fs.mkdirSync(path.join(target, 'dist'), { recursive: true });
+        fs.writeFileSync(path.join(target, 'dist/bundle.js'), mine);
+
+        const { session } = await walking({ dial: 'manual', plan: planWithReproduce() });
+        session.reproduce();
+        await session.settled();
+
+        assert.ok(fs.readFileSync(path.join(target, 'dist/bundle.js')).equals(mine),
+          'a decode that lost something is not proof the bytes match — and reproduce is the one path that carries files which are not text at all');
+        assert.match(session.getView()?.writeNote ?? '', /dist\/bundle\.js/);
+      });
+
+      test('an arrival in automated mode is not a gesture: it copies nothing and says so alongside its own write', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const { session, fake } = await walking({ dial: 'automated', plan: planWithReproduce() });
+
+        assert.equal(readTarget('package-lock.json'), MY_LOCKFILE, 'this pass ran on activation, with no gesture anywhere near it');
+        assert.deepEqual(tree(target), ['package-lock.json', 'src/parse.ts'],
+          'the STEP\'s own file is still written — the dial is what the learner asked for; the never-taught list is not');
+        assert.equal(fake.stored()?.reproduced, undefined);
+        assert.match(session.getView()?.writeNote ?? '', /package-lock\.json/);
+        assert.match(session.getView()?.writeNote ?? '', /written for you/,
+          'one line, both sentences: the pass has something to say about the step\'s file AND about the files nobody asked about');
+      });
+
+      test('said once, not once per step — the offer carries the count for as long as it stands', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const plan: PlanLike = { ...asFileStep('st-3-symbol-handle'), reproduce: ['package-lock.json', 'dist/bundle.js'] };
+        const { session } = await walking({ dial: 'automated', plan });
+        assert.match(session.getView()?.writeNote ?? '', /Nothing was copied/, 'said on the first automated step');
+
+        session.next();
+        await session.settled();
+
+        assert.doesNotMatch(session.getView()?.writeNote ?? '', /Nothing was copied/,
+          'a standing condition with a button next to it is stated once, the same rule the core and the commit notices follow');
+        assert.match(session.getView()?.writeNote ?? '', /routes\.ts was written for you/);
+        assert.equal(readTarget('package-lock.json'), MY_LOCKFILE);
+      });
+    });
+  });
+
+  // ── the plumbing the asynchronous half adds ────────────────────────────────────────────────
+
+  suite('the asynchronous half is OWNED, never voided', () => {
+    test('a plan whose file leaves the target folder is refused in words — not written, not thrown', async () => {
+      const plan = fixturePlan();
+      const escaping: PlanLike = {
+        ...plan,
+        steps: plan.steps.map((step) => (
+          step.id === 'st-2-file-parse' ? { ...step, target: { ...step.target, file: '../../escaped.ts' } } : step
+        )),
+      };
+      const { session, fake } = await walking({ dial: 'automated', plan: escaping });
+
+      assert.deepEqual(tree(target), []);
+      assert.match(session.getView()?.writeNote ?? '', /points outside the folder you are building in/);
+      assert.deepEqual(pick(fake, 'reportError'), [],
+        'the learner did not write the plan, so a refusal is shown where they are already looking rather than raised at them');
+    });
+
+    test('a session disposed while work is queued does nothing when the queue drains', async () => {
+      const { session, fake } = await walking({ dial: 'automated' });
+      fake.clearLog();
+
+      session.runCheck();
+      session.dispose();
+      await session.settled();
+
+      assert.deepEqual(pick(fake, 'coreCheck'), [],
+        'a replaced session must not answer a stale click by driving surfaces the new one has already claimed');
+      assert.deepEqual(pick(fake, 'saveProgress'), []);
+    });
+
+    /**
+     * Code review finding 3. `enqueue` re-guards a job that has not STARTED; `applyDial`
+     * re-guards itself at three points after its awaits; `applyCheck` re-guarded NOWHERE,
+     * across `await core()` and a two-parse structural check. A disposed session then wrote
+     * `progress.json`, repainted all three surfaces — undoing the clear `dispose()` had just
+     * pushed, or painting over the replacement session's view — and ran git. `openWalkAt`
+     * disposes and re-opens on the same folder and `deactivate()` disposes, so this is an
+     * ordinary gesture rather than a race anyone has to construct.
+     */
+    suite('a check whose session goes away mid-flight (code review finding 3)', () => {
+      /** A session that disposes ITSELF at a chosen point inside the check — the one thing an
+       *  `await` cannot see for itself — with the opening pass already settled and forgotten,
+       *  so everything the assertions read describes the check alone. */
+      async function checkDisposedDuring(work: 'the core load' | 'the parse' | 'the commit'): Promise<Fake> {
+        const plan = fixturePlan();
+        const fake = fakeAdapters({
+          plan,
+          target,
+          // Scaffolded for the commit case: an automated step is marked done by its own entry
+          // pass, and `commitFor` runs once per step — so a check pressed on one has nothing
+          // left to commit and the window would never open.
+          request: request(work === 'the commit' ? 'scaffolded' : 'automated'),
+          progress: setCurrent(emptyProgress(plan), 'st-2-file-parse'),
+          // Only the commit case needs a failing git: a commit that SUCCEEDS has nothing left
+          // to say, so a session disposed under it would look identical either way.
+          ...(work === 'the commit' ? { gitFails: 'fatal: Unable to create \'.git/index.lock\': File exists.' } : {}),
+        });
+        const walk: { session?: WalkSession } = {};
+        let armed = false;
+        walk.session = WalkSession.open(target, {
+          ...fake.adapters,
+          git: (args, cwd) => {
+            if (armed && work === 'the commit' && args[0] === 'commit') walk.session?.dispose();
+            return fake.adapters.git(args, cwd);
+          },
+          core: async () => {
+            const core = await fake.adapters.core();
+            if (!armed || !core || work === 'the commit') return core;
+            if (work === 'the core load') {
+              walk.session?.dispose();
+              return core;
+            }
+            return {
+              ...core,
+              check: (learnerSource, extract, language, relPath) => {
+                walk.session?.dispose();
+                return core.check(learnerSource, extract, language, relPath);
+              },
+            };
+          },
+        });
+        await walk.session.settled();
+        armed = true;
+        fake.clearLog();
+        walk.session.runCheck();
+        await walk.session.settled();
+        return fake;
+      }
+
+      test('disposed while the core is loading: nothing persisted, nothing repainted, no git', async () => {
+        const fake = await checkDisposedDuring('the core load');
+
+        assert.deepEqual(pick(fake, 'saveProgress'), []);
+        assert.deepEqual(pick(fake, 'git'), []);
+        assert.deepEqual(pick(fake, 'coreCheck'), [],
+          'it does not go on parsing the learner\'s file either — the earlier the check, the less work a dead session does');
+        assert.deepEqual(pushedSteps(fake, 'setPanel'), [undefined],
+          'the only push after the log was cleared is dispose\'s own "show nothing" — a repaint here undoes it, or paints over the session that replaced this one');
+      });
+
+      test('disposed inside the structural check itself — the widest window on this path', async () => {
+        const fake = await checkDisposedDuring('the parse');
+
+        assert.equal(pick(fake, 'coreCheck').length, 1, 'the parse really ran: this is disposal DURING the work, not before it');
+        assert.deepEqual(pick(fake, 'saveProgress'), [],
+          'the one-liner the handoff proposed for this — a disposed check at the top of refresh — would not have reached it, because commit PERSISTS before it refreshes');
+        assert.deepEqual(pick(fake, 'git'), [], 'and commitFor runs after the refresh, so it would not have reached that either');
+        assert.deepEqual(pushedSteps(fake, 'setPanel'), [undefined]);
+      });
+
+      test('disposed inside the commit git runs — the window the handoff flagged and left open', async () => {
+        const fake = await checkDisposedDuring('the commit');
+
+        assert.notDeepEqual(pick(fake, 'git'), [], 'the check passed and the commit was really attempted');
+        assert.deepEqual(pick(fake, 'reportError'), [],
+          'a refusal has nobody left to tell: the panel it would be shown in belongs to whatever comes next');
+        assert.deepEqual(pushedSteps(fake, 'setPanel').slice(-1), [undefined],
+          'and the last thing the panel was handed is still dispose\'s "show nothing"');
+      });
+    });
+
+    test('moving the dial on the step in front of the learner applies it at once', async () => {
+      const { session } = await walking({ dial: 'manual' });
+      assert.deepEqual(tree(target), []);
+
+      session.setDial('st-2-file-parse', 'automated');
+      await session.settled();
+
+      assert.deepEqual(tree(target), ['src/parse.ts'],
+        'drag the control to automated and the file should be there — that is what the control appears to promise');
+    });
+
+    test('moving the dial on some OTHER step only records the choice', async () => {
+      const { session } = await walking({ dial: 'manual' });
+
+      session.setDial('st-4-symbol-render', 'automated');
+      await session.settled();
+
+      assert.deepEqual(tree(target), [],
+        'that step applies it when the learner arrives, which is the same rule open and goTo follow rather than a second one');
+    });
+
+    /**
+     * The acceptance suite found this one, and it is worth stating what it actually was.
+     *
+     * `applyDial` opened by returning unless its step was STILL the current one — a staleness
+     * check ahead of every `await`, so a pass that had merely been queued behind another was
+     * not deferred, it was dropped. Two `next()` calls in one tick (an ordinary double-click on
+     * the Next button; a held keybinding repeats the same way) put two passes on the chain
+     * before either could run, and the first one found the walk already on the second step and
+     * did nothing at all: no file, no `markDone`, no commit, and — the part that made it worth
+     * a suite of its own — no `reportError` and no `writeNote` either. A learner would find a
+     * file missing from a walk that reported nothing wrong, and `diff -r` would fail AC6 on a
+     * gesture nobody would think to mention in a bug report.
+     */
+    suite('a step the walk enters applies its dial, however fast the learner walks (AC6, AC7)', () => {
+      const STEP_3_SUBJECT = '3: Fill in handleRequest — how should this function do its job? — What the author did';
+      const STEP_4_SUBJECT = '4: Fill in render — how should a response be turned into markup? — What the author did';
+
+      test('two Next presses in ONE tick write BOTH files and commit BOTH steps', async () => {
+        // A RUN of consecutive file steps: the fixture's own single file step cannot be walked
+        // past, so it cannot show a pass being skipped.
+        const { session, fake } = await walking({
+          dial: 'automated',
+          plan: asFileStep('st-3-symbol-handle', 'st-4-symbol-render'),
+        });
+        assert.deepEqual(tree(target), ['src/parse.ts'], 'the step the walk opened on, already applied');
+        fake.clearLog();
+
+        // Both navigations land before a single queued job has had a chance to run — which is
+        // exactly what a double-click is, and what the old guard could not survive.
+        session.next();
+        session.next();
+        await session.settled();
+
+        assert.deepEqual(tree(target), ['src/api/render.ts', 'src/api/routes.ts', 'src/parse.ts'],
+          'AC6 is "walking every step in automated mode reproduces the reference", and clicking Next twice is walking');
+        assert.ok(sameBytes('src/api/routes.ts'),
+          'the step the walk moved off is still a step the walk ENTERED, and entering a step is what applies its dial');
+        assert.ok(sameBytes('src/api/render.ts'));
+        assert.deepEqual(
+          pick(fake, 'git').filter((call) => call.args[0] === 'commit').map((call) => call.args[3]),
+          [STEP_3_SUBJECT, STEP_4_SUBJECT],
+          'AC7 is a commit per completed step, and a step whose file was never written completes nothing to commit',
+        );
+        assert.deepEqual(
+          ['st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render'].map((id) => fake.stored()?.steps[id]?.status),
+          ['done', 'done', 'done'],
+          'and the tree marks every one of them, rather than leaving a hole nobody can account for',
+        );
+        assert.deepEqual(pick(fake, 'reportError'), [],
+          'nothing to report is only honest when nothing was skipped — the dropped pass said nothing either');
+        assert.match(session.getView()?.writeNote ?? '', /render\.ts/,
+          'the sentence still describes the step in front of the learner, never the one the queue caught up on');
+      });
+
+      test('the passes run in the order they were entered, and each writes its own step\'s file', async () => {
+        const { session, fake } = await walking({
+          dial: 'automated',
+          plan: asFileStep('st-3-symbol-handle', 'st-4-symbol-render'),
+        });
+        fake.clearLog();
+
+        session.next();
+        session.next();
+        await session.settled();
+
+        assert.deepEqual(pick(fake, 'readText').map((call) => call.absPath),
+          [path.join(target, 'src/api/routes.ts'), path.join(target, 'src/api/render.ts')],
+          'serialised, in entry order: two passes racing one destination is the one way an atomic write still loses');
+      });
+
+      test('a session disposed while the prompt is up writes nothing when the answer arrives', async () => {
+        // The one thing that DOES cancel a pass in flight, and the reason the rule is about the
+        // session being alive rather than about which step is current: a disposed session's
+        // target may already belong to a replacement session writing the same file.
+        writeTarget('src/parse.ts', 'export function tokenize() {\n  return [];  // my own attempt\n}\n');
+        const before = readTarget('src/parse.ts');
+        const plan = fixturePlan();
+        const fake = fakeAdapters({
+          plan,
+          target,
+          request: request('automated'),
+          progress: setCurrent(emptyProgress(plan), 'st-2-file-parse'),
+        });
+        const walk: { session?: WalkSession } = {};
+        walk.session = WalkSession.open(target, {
+          ...fake.adapters,
+          // The walk is torn down between the question and the answer — the folder was closed,
+          // or a rebuild replaced the session — which is the one thing an `await` inside a pass
+          // cannot see for itself.
+          confirmOverwrite: async (relPath) => {
+            walk.session?.dispose();
+            return fake.adapters.confirmOverwrite(relPath);
+          },
+        });
+        await walk.session.settled();
+
+        assert.equal(readTarget('src/parse.ts'), before, 'not one byte of the learner’s file was touched');
+        assert.deepEqual(pick(fake, 'saveProgress'), [],
+          'and nothing was persisted or pushed on behalf of a walk that is no longer running');
+      });
+    });
   });
 });

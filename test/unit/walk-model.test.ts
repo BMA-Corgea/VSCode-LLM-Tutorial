@@ -30,10 +30,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveCoreRoot } from '../../src/core.js';
-import {
-  currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCurrent, setDial, statusText, treeModel,
-  type PlanLike, type Progress, type StepLike,
-} from '../../src/walk/model.js';
+import { currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCheck, setCurrent, setDial, statusText, stepDial, treeModel, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const IDS = ['st-1-shape-src', 'st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render'];
@@ -226,10 +223,59 @@ suite('treeModel — the decision tree (AC1)', () => {
   });
 });
 
+suite('stepDial and setCheck — the dial that actually applies, and the check that ran (T-5 AC1, AC5)', () => {
+  test('a per-step override wins over the global', () => {
+    const plan = fixturePlan();
+    const progress = setDial(emptyProgress(plan), 'st-1-shape-src', 'automated');
+    assert.equal(stepDial(progress, 'st-1-shape-src', 'scaffolded'), 'automated');
+  });
+
+  test('with no override, the GLOBAL from the start screen applies — the half T-4 left undone', () => {
+    const plan = fixturePlan();
+    assert.equal(stepDial(emptyProgress(plan), 'st-1-shape-src', 'automated'), 'automated');
+  });
+
+  test('with neither, it is manual — the only fallback that cannot overstate what was written', () => {
+    const plan = fixturePlan();
+    assert.equal(stepDial(emptyProgress(plan), 'st-1-shape-src', undefined), 'manual');
+    assert.equal(stepDial(emptyProgress(plan), null, undefined), 'manual');
+  });
+
+  test('setCheck records a verdict without disturbing status or dial', () => {
+    const plan = fixturePlan();
+    const before = setDial(markDone(emptyProgress(plan), 'st-2-file-parse'), 'st-2-file-parse', 'scaffolded');
+    const after = setCheck(before, 'st-2-file-parse', false, '2026-09-05T00:00:00.000Z');
+    assert.deepEqual(after.steps['st-2-file-parse'], {
+      status: 'done', dial: 'scaffolded', check: { ok: false, at: '2026-09-05T00:00:00.000Z' },
+    });
+  });
+
+  test('the tree distinguishes not-checked from checked-and-failed', () => {
+    const plan = fixturePlan();
+    // The distinction matters: without it every step the learner has not reached yet would
+    // wear the same mark as one they actually got wrong.
+    const progress = setCheck(setCheck(emptyProgress(plan), 'st-2-file-parse', true, 'now'), 'st-3-symbol-handle', false, 'now');
+    const nodes = treeModel(plan, progress).flatMap((c) => c.steps);
+    assert.equal(nodes.find((n) => n.id === 'st-2-file-parse')?.check, 'pass');
+    assert.equal(nodes.find((n) => n.id === 'st-3-symbol-handle')?.check, 'fail');
+    assert.equal(nodes.find((n) => n.id === 'st-1-shape-src')?.check, undefined, 'never checked is not a failure');
+  });
+});
+
 suite('statusText — the status bar line (AC6)', () => {
   test('the exact "step N / M · dial" shape the AC asks for', () => {
     const plan = fixturePlan();
     assert.equal(statusText(plan, fixtureProgress(plan)), 'step 2 / 4 · scaffolded');
+  });
+
+  test('the GLOBAL dial reaches the status bar when a step has no override (AC1)', () => {
+    const plan = fixturePlan();
+    assert.equal(statusText(plan, emptyProgress(plan), 'automated'), 'step 1 / 4 · automated');
+  });
+
+  test('and a per-step override still wins there', () => {
+    const plan = fixturePlan();
+    assert.equal(statusText(plan, fixtureProgress(plan), 'automated'), 'step 2 / 4 · scaffolded');
   });
 
   test('falls back to "manual" when the current step has no dial override recorded', () => {

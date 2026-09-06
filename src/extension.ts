@@ -25,7 +25,8 @@ import { resolveInsideTarget } from './walk/paths.js';
 import { WalkSession, type WalkAdapters } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
-import { hasPlan, loadPlan, loadProgress, saveProgress } from './walk/store.js';
+import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
+import { dialCoreFor, type DialCore } from './dial/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
 
 let outputChannel: vscode.OutputChannel | undefined;
@@ -297,7 +298,7 @@ function isOpenableFile(target: string, absPath: string): boolean {
 
 /** Built per session so `target` is closed over: `WalkView` deliberately carries the plan and
  *  the step but not the folder they came from, which is the session's own business. */
-function walkAdaptersFor(target: string): WalkAdapters {
+function walkAdaptersFor(context: vscode.ExtensionContext, target: string): WalkAdapters {
   return {
     setTree: (view) => walkTree?.setView(view),
     setPanel: (view) => walkPanel?.setView(view),
@@ -311,7 +312,39 @@ function walkAdaptersFor(target: string): WalkAdapters {
     fileExists: (absPath) => isOpenableFile(target, absPath),
     loadPlan,
     loadProgress,
+    loadRequest,
     saveProgress,
+
+    // ── T-5: what the dial needs from the outside world ──────────────────────────────────
+    core: () => ensureDialCore(context),
+    // A plain read. Note what is NOT here: there is no `writeText` adapter, on purpose. The
+    // session calls `src/dial/writer.ts`'s own atomic write directly, so the random temp
+    // suffix and the refusal to follow a symlink at the destination have exactly ONE
+    // implementation and cannot be quietly lost to a simpler-looking wiring here.
+    readText: (absPath) => {
+      try {
+        return fs.readFileSync(absPath, 'utf8');
+      } catch {
+        return undefined;
+      }
+    },
+    /**
+     * Overwrite / Keep mine. A modal question, because the alternative is destroying work the
+     * learner did by hand — and it is asked only when the file on disk genuinely DIFFERS from
+     * what the dial would write (identical content is not a conflict), and only once per
+     * step per session. A dismissed dialog is `false`: silence means keep what they have.
+     */
+    confirmOverwrite: async (relPath) => {
+      const choice = await vscode.window.showWarningMessage(
+        `${relPath} already has your own changes. Overwrite it with this step's version?`,
+        { modal: true },
+        'Overwrite',
+        'Keep mine',
+      );
+      return choice === 'Overwrite';
+    },
+    git: realGit,
+    commitPerStep: () => vscode.workspace.getConfiguration('buildTutorials').get<boolean>('commitPerStep', true),
     // The walk's channel for a failure the LEARNER has to know about — today, a
     // `progress.json` that cannot be written (a read-only checkout, a full disk), which costs
     // them their place in the tutorial next time they open the folder without costing them
@@ -375,11 +408,11 @@ function folderWithPlan(): string | undefined {
  * handing the step panel a session whose every method is a no-op — a walk that answers clicks
  * with silence, which is precisely the symptom this whole fix exists to remove.
  */
-function openWalkAt(target: string): void {
+function openWalkAt(context: vscode.ExtensionContext, target: string): void {
   walkSession?.dispose();
   walkSession = undefined;
   try {
-    walkSession = WalkSession.open(target, walkAdaptersFor(target));
+    walkSession = WalkSession.open(target, walkAdaptersFor(context, target));
     walkPanel?.setNotice(undefined);
   } catch (error) {
     const reason = error instanceof Error && error.message.length > 0 ? error.message : String(error);
@@ -396,6 +429,26 @@ async function ensureWalkSkins(context: vscode.ExtensionContext): Promise<void> 
   if (walkSkins) return;
   const core = await loadCore(configuredRepoTourRoot(context));
   if (core.found) walkSkins = core.loaded['skins'] as StartPanelDeps['skins'];
+}
+
+/**
+ * The dial's slice of repo-tour, loaded once and memoised — a PROMISE, deliberately, and not
+ * the synchronous getter `skins` uses.
+ *
+ * `activate()` is synchronous and opens the walk before `loadCore` has resolved. A getter
+ * would therefore answer `undefined` for exactly the moment a RESUMED walk applies its first
+ * dial: reopen a folder mid-tutorial in automated mode and the current step's file would
+ * silently not be written, which is the worst shape a bug can take here — nothing fails, the
+ * learner simply finds a file missing and no reason for it. Awaiting a settled promise costs
+ * nothing after the first call.
+ */
+let walkDialCore: Promise<DialCore | undefined> | undefined;
+
+function ensureDialCore(context: vscode.ExtensionContext): Promise<DialCore | undefined> {
+  walkDialCore ??= loadCore(configuredRepoTourRoot(context)).then((core) =>
+    core.found ? dialCoreFor(core.loaded) : undefined,
+  );
+  return walkDialCore;
 }
 
 function registerWalk(context: vscode.ExtensionContext): void {
@@ -432,7 +485,7 @@ async function openWalkOnActivate(context: vscode.ExtensionContext): Promise<voi
   const target = folderWithPlan();
   if (!target) return;
   await ensureWalkSkins(context);
-  openWalkAt(target);
+  openWalkAt(context, target);
 }
 
 /**
@@ -445,7 +498,7 @@ async function openOrOfferWalk(context: vscode.ExtensionContext, target: string)
   const folders = vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
   if (folders.includes(target)) {
     await ensureWalkSkins(context);
-    openWalkAt(target);
+    openWalkAt(context, target);
     await vscode.commands.executeCommand('buildTutorials.step.focus');
     return;
   }
@@ -462,7 +515,7 @@ async function runOpenWalkCommand(context: vscode.ExtensionContext): Promise<voi
     return;
   }
   await ensureWalkSkins(context);
-  if (walkSession?.target !== target) openWalkAt(target);
+  if (walkSession?.target !== target) openWalkAt(context, target);
   await vscode.commands.executeCommand('buildTutorials.step.focus');
 }
 
@@ -508,6 +561,18 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     vscode.commands.registerCommand('buildTutorials.goToStep', (stepId: unknown) => {
       if (typeof stepId === 'string') walkSession?.goTo(stepId);
     }),
+    // Deliberately NOT gated behind a `when` clause. The context key it would need does not
+    // exist, and a `when` on an undefined key hides a command forever — so it is always
+    // offered and says honestly that there is no walk, which is what `openWalk` already does.
+    vscode.commands.registerCommand('buildTutorials.reproduceFiles', () => {
+      if (!walkSession) {
+        void vscode.window.showInformationMessage(
+          'Build Tutorials: no tutorial is open in this folder — run "Build Tutorials: Start" to build one.',
+        );
+        return;
+      }
+      walkSession.reproduce();
+    }),
   );
   void resumeOnActivate(context);
   void openWalkOnActivate(context);
@@ -520,7 +585,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
       decorator: () => walkDecorator,
       openAt: async (target: string) => {
         await ensureWalkSkins(context);
-        openWalkAt(target);
+        openWalkAt(context, target);
       },
     },
   };

@@ -58,8 +58,9 @@
  * drops to the document, so a second Down does nothing) and the panel scrolls back to the
  * top; a mouse user gets a flash and the same scroll reset on every click. `src/start/panel.ts`
  * never re-renders inside a message round trip at all; this is the first surface in the
- * extension that can, so it is the first that has to decide when NOT to. See `keyFor`, which
- * is the whole of that decision and enumerates exactly what the page displays.
+ * extension that can, so it is the first that has to decide when NOT to. `keyFor` below is
+ * the whole of that decision; the enumeration of exactly what the page displays lives with
+ * the page, in `./step-view.js`'s `stepRenderKey` (T-5 moved it there — see `keyFor`).
  *
  * **The host is the only truth** (spec §5.1). This provider never reads
  * `WebviewViewResolveContext.state` — the blob a previous incarnation of the view saved with
@@ -78,7 +79,7 @@ import type { WalkView } from './session.js';
 import {
   handleStepMessage, parseStepMessage, type OutboundMessage, type StepEffects, type StepViewState,
 } from './step-protocol.js';
-import { renderNoticeHtml, renderStepHtml } from './step-view.js';
+import { renderNoticeHtml, renderStepHtml, stepRenderKey } from './step-view.js';
 
 /** The two "nothing to render" pages, hoisted so `page()` is the ONLY place that chooses
  *  between them and `keyFor` can key on the chosen text rather than re-deriving the choice. */
@@ -119,17 +120,26 @@ function describe(raw: unknown): string {
 /**
  * What the panel needs from the walk, and nothing more. A structural subset of `WalkSession`,
  * so the real session satisfies it with no adapter and no cast, while `test/walk.test.ts` can
- * hand this provider a three-method fake and assert what the buttons actually drive without
- * standing up a whole session.
+ * hand this provider a small fake and assert what the buttons actually drive without standing
+ * up a whole session.
  *
- * Only the three methods the panel's own controls reach for are here. `next()`/`prev()` are
- * absent on purpose: `handleStepMessage` resolves `step:next`/`step:prev` to a concrete id via
+ * Only the methods the panel's own controls reach for are here. `next()`/`prev()` are absent
+ * on purpose: `handleStepMessage` resolves `step:next`/`step:prev` to a concrete id via
  * `nextStepId`/`prevStepId` and calls `goTo`, so there is one navigation path through this
  * panel rather than two that could drift.
+ *
+ * `runCheck` and `reproduce` are T-5's two: *Check my work* (AC5) and the offer to copy
+ * `plan.reproduce`'s never-taught files (AC6). Both return `void` rather than a promise, and
+ * that is deliberate rather than lazy — they are called from a webview message listener,
+ * where a rejected promise has nobody listening for it, so the SESSION owns the await and
+ * routes any failure to its own `reportError` channel. Their answers come back the same way
+ * every other change does: as a fresh `WalkView` through `setView`.
  */
 export interface WalkSessionLike {
   goTo(stepId: string): void;
   openFile(): void;
+  runCheck(): void;
+  reproduce(): void;
   setDial(stepId: string, dial: Dial): void;
 }
 
@@ -230,6 +240,8 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.effects = {
       goTo: (stepId: string) => { this.deps.session()?.goTo(stepId); },
       openFile: () => { this.deps.session()?.openFile(); },
+      runCheck: () => { this.deps.session()?.runCheck(); },
+      reproduce: () => { this.deps.session()?.reproduce(); },
       persistDial: (stepId: string, dial: Dial) => { this.deps.session()?.setDial(stepId, dial); },
       persistSkin: (name: string) => {
         // Updated here, not merely taken from `handleStepMessage`'s returned state: `setView`
@@ -401,69 +413,28 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   }
 
   /**
-   * Everything `renderStepHtml` (`./step-view.ts`) actually PUTS ON THE PAGE, as one
-   * comparable string. Two pushes with the same key produce the same page, so repainting for
-   * the second would cost the learner their focus and their scroll position and buy nothing.
+   * Whether a repaint would change anything on screen, as one comparable string.
    *
-   * **Adding a field to what `./step-view.ts` renders means adding it here, in the same
-   * commit.** Forgetting leaves a field that changes on the host and never appears on screen
-   * until something else happens to force a repaint — a stale panel, intermittently, which is
-   * far harder to find than the repaint storm this replaces. The list below is in the order
-   * `bodyHtml` reads them, so the two can be diffed side by side:
+   * The step page's half of the answer is `stepRenderKey` in `./step-view.ts`, deliberately:
+   * it enumerates what that file's markup draws, so it belongs beside that markup rather than
+   * here, one file away — and one file away is exactly the distance a drift needs, silently
+   * (a field rendered there and missing from the key is stored on the host and never appears
+   * on screen). Keeping it there also puts it inside the pure, `vscode`-free half of this
+   * design, where `test/unit/walk-step-view.test.ts` can prove by mutation that changing a
+   * rendered field really does change the key. **A new field on the page is a new entry
+   * there, in the same commit** — that function's own doc comment carries the full list, and
+   * the four fields deliberately left out of it with the reason for each.
    *
-   *   - `step.id`                        → `<main data-step-id>` (also the client script's key)
-   *   - `step.decision.question`         → the `<h1>`
-   *   - `step.decision.options[]`        → `id`, `label`, `consequence`, `taken` — the list,
-   *                                        its `.option-taken` marking, its two badges, and
-   *                                        (through the array's LENGTH) the "n not shown"
-   *                                        note `MAX_OPTIONS_RENDERED` produces
-   *   - `step.decision.authorChoice`     → the same marking, when no option carries `taken`
-   *   - `step.decision.why`              → the why paragraph
-   *   - `step.decision.whySource`        → its "from the model / the author / not inferable" line
-   *   - `step.witness.{sha,subject,date}`→ the witness sentence, or `NO_HISTORY_MESSAGE`
-   *   - `state.fileExists`               → *Open the file*'s `disabled`, and its hint text
-   *   - `skins.SKINS`                    → the skin picker's `<option>`s
-   *
-   * **Three displayed fields are deliberately NOT here, and this is the only place that says
-   * why.** Each is one the PAGE ITSELF keeps current between repaints, so a repaint would
-   * install a value the learner is already looking at:
-   *
-   *   - **the current step's dial** (`progress.steps[step.id].dial` → which radio is
-   *     `checked`). The learner moved that radio; the browser checked it before the message
-   *     was even posted. This is the exact push finding 1 is about — `WalkSession.setDial`
-   *     refreshes only so the STATUS BAR can show `· scaffolded` (AC6) — and repainting for
-   *     it is what destroys the radio that has keyboard focus mid-arrow-key.
-   *   - **`state.skin`** (`<html data-theme>` and the picker's `selected`). `./step-view.ts`'s
-   *     client script sets `data-theme` itself, instantly, for zero flash; the host's only job
-   *     is to remember the choice for the next real render.
-   *   - **`state.note`** (`#step-note`). It arrives as a `step:note` message the page writes
-   *     into the node and saves, precisely so it survives a hidden view being torn down.
-   *
-   * If any of those three ever starts changing from a source OTHER than the page's own
-   * controls, the fix is a targeted `postMessage` to update that one node — the way `note`
-   * already works — not a full repaint, and not moving it into this key.
-   *
-   * The raw values go in, never the rendered ones: `./step-view.ts` truncates long strings
-   * and caps the option list, so hashing what it actually emits would make two genuinely
-   * different plans compare EQUAL past the cap — stale, silently. Comparing the inputs can
-   * only err the other way, in an occasional repaint that changed nothing visible, which
-   * costs a nonce.
+   * What is left here is the only part `./step-view.ts` cannot know: which of this view's
+   * FOUR pages is on screen. `render` (what to paint) and this (whether painting would change
+   * anything) must never disagree about that — if they did, the panel would either skip a
+   * repaint it needed or believe it had painted something it had not — so both take the
+   * already-decided `page()` rather than re-deriving the choice. The `notice:`/`step:` prefix
+   * keeps the two namespaces from colliding on a plan whose text happens to spell a notice.
    */
   private keyFor(page: StepPage): string {
     if (page.kind === 'notice') return `notice:${page.notice}`;
-    const { state, skins } = page;
-    const { decision, id, witness } = state.step;
-    return JSON.stringify([
-      id,
-      decision.question,
-      decision.options.map((option) => [option.id, option.label, option.consequence, option.taken]),
-      decision.authorChoice,
-      decision.why,
-      decision.whySource,
-      [witness.sha, witness.subject, witness.date],
-      state.fileExists,
-      skins.SKINS.map((row) => [row.name, row.label, row.note]),
-    ]);
+    return `step:${stepRenderKey(page.state, page.skins)}`;
   }
 
   /**

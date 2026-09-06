@@ -28,9 +28,28 @@ export const DEFAULT_DIAL: Dial = 'manual';
 export interface BuildRequest {
   idea: string;
   recreate: boolean;
+  /** What the learner TYPED — a local path, or a GitHub URL. Kept verbatim so the record says
+   *  what was asked for; it is NOT a path anything can read from. See `referenceRoot`. */
   repo: string;
   target: string;
   dial: Dial;
+  /**
+   * Where the reference actually LIVES on this machine, resolved at build time.
+   *
+   * For a local path these are the same string. For a GitHub URL they are not: the clone
+   * lands in `<globalStorage>/refs/<owner>-<name>` and, until T-5's security review, that
+   * location was computed and then thrown away — `request.json` recorded only the URL. Every
+   * consumer that tried to read the reference from it (the dial's writer, the structural
+   * check, the reproduce copy) resolved a URL as a relative path, got ENOENT, and refused
+   * SILENTLY. Scaffolded and automated wrote nothing, *Check my work* answered "nothing to
+   * check", and the ACs about reproducing the reference did not hold on the flow the README
+   * documents first.
+   *
+   * Optional only for `request.json` files written before this field existed; `loadRequest`
+   * falls back to `repo` for those, which is correct precisely because a build old enough to
+   * lack it could only have been a local path.
+   */
+  referenceRoot?: string;
 }
 
 export function emptyRequest(): BuildRequest {
