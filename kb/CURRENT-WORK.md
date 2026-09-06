@@ -8,25 +8,37 @@ here and found via the reference table below.
 ## Live edge
 
 <!-- What is in motion right now: one line per active ticket/effort —
-     what, why, where it stands, what is next. Never pruned while live. -->
+     what, why, where it stands, what is next. Never pruned while live.
+     NOTE: the tracker regenerates the terse `- **T-N** (type) — title — stage`
+     lines below on every stage change. Do NOT hand-write prose onto those lines;
+     it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-5 (feature) — The dial. IN PLAN, branch `feature/T-5-dial`, worktree
-  `../VSCode-LLM-Tutorial-T-5`.** Where the learner's hands meet the load-bearing line:
-  manual / scaffolded / automated, the structural check behind *Check my work*, and a commit
-  per completed step. Its locate and refinement notes were drafted against T-4's PLAN, so the
-  plan now opens with a **reconciliation table against T-4's merged code** — twelve names
-  moved, and one of them (the step panel's new repaint key) would store a check result and
-  never draw it rather than failing loudly. Plan: `.autodev/plans/T-5.md`.
-  T-5 also owns the half of AC1 that T-4 deliberately left: the GLOBAL dial in `request.json`
-  is still read by nothing, so `statusText` falls back to `manual` per step.
+- **T-5** (feature) — The dial — manual, scaffolded, automated — with the structural check and a comm… — build
+- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — plan
+- **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
+- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
+- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
+- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
 
-- **T-6 → T-8** — parked at `plan`, `spec_ready` cleared on GA-1. T-6 is sequenced AFTER T-5
-  (both edit the step panel, protocol and session; a three-way edit is not worth the merge).
+### Where that stands
 
-- **T-9, T-10** (direction) — Mode A (idea-first) and Divergence. Untouched, at `dir-goals`.
+**T-5 — the dial.** Branch `feature/T-5-dial`, worktree `../VSCode-LLM-Tutorial-T-5`, cut from
+`main` at `ee9465a`. Where the learner's hands meet the load-bearing line: manual / scaffolded
+/ automated, the structural check behind *Check my work*, and a commit per completed step.
+Its locate and refinement notes were drafted against T-4's *plan*, so the plan now opens with a
+**reconciliation table against T-4's merged code** — twelve names moved. The one worth reading
+twice: the step panel keys repaints on what the page displays, so a check report added without
+also adding it to that key is stored and never drawn, failing no test. Plan:
+`.autodev/plans/T-5.md` §0.
 
-- **T-1 (direction) — Build tutorials v1.** Complete; routed into T-2…T-10 here plus
-  repo-tour T-11…T-13.
+T-5 also owns the half of AC1 that T-4 deliberately left undone: the GLOBAL dial sits in
+`request.json` and nothing reads it, so `statusText` falls back to `manual` for any step
+without a per-step override.
+
+**T-6 is sequenced AFTER T-5**, not parallel — both edit the step panel, protocol and session,
+and a three-way edit of those is not worth the merge.
+
+**T-1** is complete and routed into T-2…T-10 here plus repo-tour T-11…T-13.
 
 ## Waiting on
 
