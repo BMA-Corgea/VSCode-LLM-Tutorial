@@ -8,10 +8,11 @@ suite — the two share one core.
 
 ## What's here right now
 
-This is **T-2 + T-3 + T-4**: the extension skeleton and its doctor (T-2), the start screen,
-the shared skin contract and building the plan with resume (T-3), and now the walk itself —
-the decision tree, the step panel, editor driving, and progress that survives a reload (T-4).
-There is still no file writing, no tutor and no detour; those arrive in T-5 through T-8.
+This is **T-2 through T-5**: the extension skeleton and its doctor (T-2), the start screen,
+the shared skin contract and building the plan with resume (T-3), the walk itself — decision
+tree, step panel, editor driving, progress that survives a reload (T-4) — and now the dial,
+which is where your hands actually meet the code (T-5). There is still no tutor and no
+detour; those arrive in T-6 and T-7.
 
 T-2 proved this extension can load repo-tour's core — an ESM package that finds its own
 assets (skins, tree-sitter grammars) via `import.meta.url` — from inside the VS Code
@@ -91,6 +92,51 @@ written atomically, beside the plan rather than inside this extension — reload
 close the folder, come back tomorrow, and the walk is where you left it. The status bar
 carries `step 7 / 40 · scaffolded` while it runs.
 
+## The dial — how much do you want to type?
+
+Set on the start screen, and overridable on any single step from the panel. Three positions,
+and what each does depends on what kind of step you are on.
+
+| | a **file** step | a **symbol** step | a **shape** step |
+| --- | --- | --- | --- |
+| **manual** | nothing is written. The panel shows the file's *shape* — the signature line of each load-bearing range, and the imports — so you know what to write without being told how | you fill it in and press *Check my work* | informational |
+| **scaffolded** | the file is written with the boilerplate exactly as the author had it and the load-bearing ranges replaced by stubs, each carrying a `TODO` naming the step it belongs to | as manual | informational |
+| **automated** | the file is written exactly as the author had it, and the step is marked done | the panel narrates the range with it revealed and highlighted | informational |
+
+**Your edits are never overwritten silently.** If a file already exists and differs from what
+the dial would write, you are asked — once per step — and *Keep mine* leaves it exactly as it
+is and says so in the panel. Identical content is not a conflict and does not interrupt you.
+
+**Walking a whole tutorial in automated mode reproduces the reference repository
+byte-for-byte.** That is a test, not a claim: the suite builds a plan, walks every step, and
+diffs the result against the original. Files that are never *taught* — generated output,
+vendored code, lockfiles, data, anything binary — are copied rather than stepped through, and
+the panel offers that once, with the count, rather than doing it behind your back.
+
+## Check my work
+
+Pressing it runs repo-tour's own structural check against the reference and answers in the
+panel: which exports are present, missing or extra, which imports matched, and whether the
+file parses at all. The tree marks the step ✓ or ✗ — and a step you have *not* checked keeps
+looking unchecked, because a tree where everything you have not reached yet wears the same
+mark as the thing you got wrong is a tree that tells you nothing.
+
+**The check is structural, deliberately.** It compares shape, never bodies: rename a local
+variable and it passes, because how you wrote the inside is yours. A missing export is named,
+not counted. If the file does not parse, it says so and shows no missing-symbol list at all —
+nothing can be found in a tree that could not be built, and a list claiming every export is
+missing when one bracket is would be worse than saying nothing.
+
+## A commit per step
+
+Each completed step is committed in the tutorial folder — `<ordinal>: <the question> — <the
+option the author chose>` — so the history you end up with reads as the sequence of decisions
+you actually made. The folder is `git init`ed if it needs to be.
+
+**The commits are yours, not the extension's.** They use that folder's own git identity, and
+if none is configured no commit is made and the panel says so — this will never invent an
+author or borrow one. Turn the whole thing off with `buildTutorials.commitPerStep`.
+
 ## Skins — one file, both front ends
 
 Every webview in this extension inlines repo-tour's own `baseCss()` + `alternateCss()`
@@ -127,6 +173,7 @@ A missing or misconfigured core is a report, never a crash.
 | `buildTutorials.repoTourPath` | `../repo-tour` | Where to find a repo-tour checkout — relative to this extension, or absolute. |
 | `buildTutorials.llmProvider` | `claude` | Which LLM provider repo-tour's interpret stage asks for each step's why and its roads-not-taken. The default runs the local `claude` CLI — a subscription tool, not an API key. |
 | `buildTutorials.llmModel` | *(empty)* | Model name passed to the provider. Empty uses repo-tour's own recommended default at run time, so this setting never hardcodes a copy that can drift out of sync with repo-tour. |
+| `buildTutorials.commitPerStep` | `true` | Commit each completed step in the tutorial folder. The commits use that folder's own git identity; with none configured, nothing is committed and the panel says so rather than inventing an author. |
 
 The chosen **skin** is not a setting — it lives in VS Code's `globalState`, the same
 per-person, per-machine scope repo-tour's own web pages keep it in via `localStorage`.
