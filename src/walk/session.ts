@@ -39,7 +39,10 @@
  *     refresh the tree, the panel and the status bar but skip the reveal. Re-centring the
  *     editor every time the learner clicks a dial radio on the step they are already looking
  *     at is not incorrect, just needless jank — and jank in the one window they are trying to
- *     read code in.
+ *     read code in. T-5 adds the one other reveal, and it exists because of the ORDER those
+ *     two run in: the entry pass writes the step's file after `goTo` has already refreshed and
+ *     found nothing there, so the pass reveals the file it made appear — and only that file
+ *     (code review finding 2; `applyDial`'s `appeared` is the whole condition).
  *   - **`fileExists` gates the reveal itself, not merely the panel's button.** In manual mode
  *     with nothing written yet (T-5's job, not this ticket's) `<target>/<step.target.file>`
  *     genuinely does not exist, and `vscode.workspace.openTextDocument` on a missing path
@@ -94,11 +97,22 @@
  *     back), so an overwrite prompt raised from inside the entry pass would come back every
  *     single time until they answered it the way it wanted. `prompted` remembers the pair,
  *     and a pair already asked about is answered by the learner's FIRST answer — *Keep mine*
- *     keeps meaning keep mine, for the rest of the session, without asking again.
+ *     keeps meaning keep mine, for the rest of the session, without asking again. The one
+ *     exception is an explicit `dial:set` on the step in front of the learner: that is a new
+ *     deliberate gesture rather than the tree re-firing, and `setDial` forgets that step's
+ *     answers so the new position may ask again (code review finding 5). Without it, one
+ *     *Keep mine* killed the dial for that step — the control's own documented promise, "drag
+ *     it to automated and the file should be there", answered by a remembered refusal.
  *   - **Identical content is not a conflict.** A file that already holds exactly the bytes
  *     the dial would write is left alone with nothing said: no prompt, no rewrite, no note. It
  *     is the ordinary state of a step re-entered after it was written, and prompting there
  *     would teach the learner to dismiss the one dialog that is supposed to protect their work.
+ *   - **The never-taught files are the learner's too.** `plan.reproduce`'s generated, vendored
+ *     and lockfile paths are copied by an ARRIVAL in automated mode as well as by a press, so
+ *     the same rule governs them: an arrival copies what is absent or already identical and
+ *     holds back anything it would overwrite until the count has been said (security review
+ *     finding 3). A learner who ran `npm install` in the target — which the spec leaves to
+ *     them on purpose — has a `package-lock.json` that is theirs, not the reference's.
  *   - **`writeNote` describes an ACTION, not a step.** It is keyed to the step it was produced
  *     for and disappears the moment the walk moves, because "your version was kept" is true
  *     of something that just happened and false of a step you have merely arrived at. The same
@@ -280,10 +294,14 @@ export interface WalkAdapters {
   core(): Promise<DialCore | undefined>;
   /**
    * The text `absPath` currently holds, or `undefined` when there is nothing there (or it
-   * cannot be read). This is the one input to the overwrite decision, so it is a question
-   * about the learner's disk — which is what an adapter is for — rather than an `fs` import
-   * this file has never needed (`./paths.ts` states that constraint out loud). Wire it as a
+   * cannot be read). This is what both overwrite decisions read — the step's own file in
+   * `writeFile`, and a `plan.reproduce` entry in `wouldReplace` — so it is a question about the
+   * learner's disk, which is what an adapter is for, rather than an `fs` import this file has
+   * never needed (`./paths.ts` states that constraint out loud). Wire it as a
    * `readFileSync(absPath, 'utf8')` inside a `try`.
+   *
+   * It is asked about the REFERENCE tree as well as the target (`wouldReplace` compares the
+   * two), so nothing here may assume the path sits under `target`.
    */
   readText(absPath: string): string | undefined;
   /**
@@ -311,14 +329,16 @@ export interface WalkAdapters {
  * push and what to commit — the alternative (a helper that refreshes and persists on its own)
  * is exactly the "second path that writes without pushing" this file's header rules out.
  *
- * `landed` and `wrote` are deliberately different questions. `landed` is "the file now holds
- * this step's bytes", which is true of a file that was ALREADY identical and is what decides
- * whether an automated step is complete; `wrote` is "bytes were actually put there", which is
- * true of nothing when a learner keeps their own version.
+ * `landed` is "the file now holds this step's bytes", which is true of a file that was ALREADY
+ * identical and is what decides whether an automated step is complete. It used to carry a
+ * companion `wrote` — "bytes were actually put there" — with a paragraph here arguing the
+ * distinction; it was set on all five returns below and read by nobody (code review finding
+ * 10). The question the caller actually has is a third one, and one this method cannot answer
+ * anyway: **did the file APPEAR**, which is `landed` against a `fileExists` taken before the
+ * write, and which is what decides the reveal (finding 2 — see `applyDial`).
  */
 interface WriteAttempt {
   landed: boolean;
-  wrote: boolean;
   /** The transient sentence for the panel, absent when nothing worth saying happened. */
   note?: string;
 }
@@ -340,14 +360,23 @@ export class WalkSession {
   private coreReported = false;
   private writeReported = false;
   private commitReported = false;
+  /** The same rule once more, for the sentence naming what a copy of `plan.reproduce` would
+   *  have written over. That condition holds on every arrival at every automated step until
+   *  the learner does something about it, and the offer stays on the page the whole time, so
+   *  re-saying it per step would be noise around a decision already in their hands. See
+   *  `reproduceInto`. */
+  private reproduceAnnounced = false;
   /** ONE serialised chain for every asynchronous job this session owns — applying a dial,
    *  running a check, reproducing the never-taught files. See the file header: serialising
    *  them is what stops two `goTo`s from racing two writes at the same file, and owning them
    *  is what keeps a failure out of an unwatched `void`ed promise. */
   private work: Promise<void> = Promise.resolve();
-  /** `${stepId} ${absPath}` for every pair this session has already raised the
-   *  Overwrite/Keep prompt for — the plan's named write-ahead risk (see the file header). */
-  private readonly prompted = new Set<string>();
+  /** Every absolute path this session has already raised the Overwrite/Keep prompt about,
+   *  keyed by the step it was raised FOR — the plan's named write-ahead risk (see the file
+   *  header). A map of sets rather than one flat `${stepId} ${absPath}` set because an explicit
+   *  `dial:set` on the current step has to be able to forget that step's answers in one move
+   *  and no other step's (code review finding 5); see `setDial`. */
+  private readonly prompted = new Map<string, Set<string>>();
   /** The full report of the last check per step, this session only; the durable half lives in
    *  `progress.steps[id].check`. Keyed by step so a learner can check two steps and see both. */
   private readonly checks = new Map<string, CheckOutcome>();
@@ -461,12 +490,23 @@ export class WalkSession {
    * the file should be there. Moving it on some other step in the tree only records the
    * choice; that step will apply it when the learner arrives, which is the same rule `open`
    * and `goTo` follow and not a second one.
+   *
+   * Which is also why this is the one place that forgets an Overwrite/Keep answer (code review
+   * finding 5). `prompted` exists to stop the entry pass the TREE re-fires from asking the same
+   * question on every click; a learner who moves the dial here is making a new gesture, and
+   * answering it with the refusal they gave the previous position leaves them no way back to a
+   * file the control just promised them, short of reloading the window.
    */
   setDial(stepId: string, dial: Dial): void {
     if (this.disposed || !this.hasStep(stepId)) return;
     this.progress = setDialIn(this.progress, stepId, dial);
     const current = stepId === this.progress.current;
-    if (current) this.clearStepNotes();
+    if (current) {
+      this.clearStepNotes();
+      // For this step only, and only from here: `goTo`, `next` and `prev` all still find the
+      // remembered answer, which is the whole of the once-per-session rule.
+      this.prompted.delete(stepId);
+    }
     this.commit(false);
     if (current) this.enterCurrentStep();
   }
@@ -529,13 +569,26 @@ export class WalkSession {
    * come back clean at all: the `file` steps and this list TOGETHER cover every file the
    * inventory saw. Recorded in `progress.reproduced` so the panel's offer can stop being made
    * once it has been taken, and so a reload does not offer it again.
+   *
+   * The press IS the gesture the copy needs — but only once it has been told what the copy is
+   * about to replace (security review finding 3). `reproduceAnnounced` is what makes the count
+   * a warning rather than a receipt: pressed onto files the learner has since changed, the
+   * first press says how many and copies nothing, and the second one goes ahead. When there is
+   * nothing of theirs to lose — a target that simply does not have these files yet, which is
+   * every fresh build — there is nothing to warn about and it stays one press.
    */
   reproduce(): void {
     if (this.disposed) return;
     this.enqueue(() => {
       const step = currentStep(this.plan, this.progress);
-      if (this.reproduceInto()) {
+      const outcome = this.reproduceInto(this.reproduceAnnounced);
+      if (step) this.setNote(step.id, outcome.note);
+      if (outcome.copied) {
         this.commit(false);
+        return;
+      }
+      if (outcome.note !== undefined) {
+        this.refresh(false);
         return;
       }
       // Pressed against a page whose offer is already spent — the panel hides it once
@@ -735,14 +788,18 @@ export class WalkSession {
     // AC6: the never-taught files land BEFORE the first file the learner is shown, so an
     // automated walk's target is complete rather than complete-except-the-lockfile. Once only
     // — `progress.reproduced` is what remembers it, across reloads as well as across steps.
-    if (dial === 'automated') this.reproduceInto();
+    // Nothing is REPLACED from here, though: arriving at a step is not a gesture, and this pass
+    // runs on activation (security review finding 3). What it would have written over comes
+    // back as a sentence instead, and rides out with this pass's own.
+    const reproduceNote = dial === 'automated' ? this.reproduceInto(false).note : undefined;
 
     const planned = planWrite(step, dial, refRoot, this.target, this.plan, core);
     if (planned === null) {
       // Nothing to write, and that is correct. A `shape` or `symbol` step owns no file of its
       // own; only the position's own meaning could have got us this far with a `file` step, and
       // `manual` already returned above.
-      this.concludePass(before);
+      this.setNote(stepId, reproduceNote);
+      this.concludePass(before, false);
       return;
     }
     if (isRefusal(planned)) {
@@ -750,16 +807,22 @@ export class WalkSession {
       // pointed outside the folder, or at a file that is not text, or at a language repo-tour
       // cannot stub — none of which the learner caused, and all of which they are entitled to
       // know about rather than watch a dial do nothing at all.
-      this.note = { stepId, text: planned.refused };
-      this.concludePass(before);
+      this.setNote(stepId, reproduceNote, planned.refused);
+      this.concludePass(before, false);
       return;
     }
+
+    // Asked BEFORE the write, because the whole question code review finding 2 turns on is
+    // whether the write is what made the file appear. By now `goTo`'s `refresh(true)` has
+    // already run and found nothing there — that is the trace in the finding — so a file that
+    // exists only after `writeFile` has been shown to nobody at all.
+    const existedBefore = this.adapters.fileExists(planned.path);
 
     const attempt = await this.writeFile(step, planned.path, planned.content);
     // The second re-check, and the one that matters most: `writeFile` can wait on a human, and
     // everything below it persists progress, pushes it to four surfaces and commits.
     if (this.disposed) return;
-    if (attempt.note !== undefined) this.note = { stepId, text: attempt.note };
+    this.setNote(stepId, reproduceNote, attempt.note);
 
     // AC7's other half: an automated step has no check to pass — the file IS the reference —
     // so arriving at it with the file in place is what completing it means. A scaffolded step is
@@ -770,7 +833,18 @@ export class WalkSession {
     const complete = dial === 'automated' && attempt.landed && !wasDone;
     if (complete) this.progress = markDoneIn(this.progress, stepId);
 
-    this.concludePass(before);
+    // The reveal this pass owes the learner (AC4; code review finding 2), and every part of
+    // the condition is load-bearing. The file APPEARED — `landed` measured against the existence taken
+    // above — so an overwrite, a *Keep mine* and a re-entered step all stay silent: `goTo`
+    // revealed those already, and re-centring the editor under someone reading it is exactly
+    // the jank `setDial`'s no-reveal rule exists to avoid. And the step is still the CURRENT
+    // one: a pass the walk has moved past still writes its file (see this method's header),
+    // but `refresh` reveals whatever is current, so revealing from a deferred pass would drag
+    // the editor onto another step's file — or, if that one is not written yet, strip the
+    // decorations off the file the learner is actually looking at.
+    const appeared = attempt.landed && !existedBefore && stepId === this.progress.current;
+
+    this.concludePass(before, appeared);
     if (complete) await this.commitFor(step);
   }
 
@@ -778,10 +852,15 @@ export class WalkSession {
    * One push at the end of an entry pass, and a `saveProgress` only if there is something new
    * to save. Splitting the two matters because the pass runs on EVERY arrival at a step,
    * including the arrivals a learner makes by clicking the step they are already on.
+   *
+   * `revealEditor` is the pass's OWN reveal, and the only one that is not a navigation (code
+   * review finding 2): the file this pass just wrote could not be revealed when the learner
+   * arrived, because it did not exist yet. `applyDial` decides it; every other caller passes
+   * `false`, and a pass that reveals also refreshes even when it has nothing else to say.
    */
-  private concludePass(before: Progress): void {
-    if (this.progress !== before) this.commit(false);
-    else if (this.note !== undefined) this.refresh(false);
+  private concludePass(before: Progress, revealEditor: boolean): void {
+    if (this.progress !== before) this.commit(revealEditor);
+    else if (revealEditor || this.note !== undefined) this.refresh(revealEditor);
   }
 
   /**
@@ -807,45 +886,51 @@ export class WalkSession {
     // Identical, so there is nothing to do and nothing to SAY. The absent note is what stops a
     // re-entered step from re-announcing a write that happened ten clicks ago, and `landed` is
     // still true: the file holds exactly this step's bytes, however it came to.
-    if (existing === content) return { landed: true, wrote: false };
+    if (existing === content) return { landed: true };
 
     let overwriting = false;
     if (existing !== undefined) {
-      const key = `${step.id} ${absPath}`;
-      if (this.prompted.has(key)) {
+      const asked = this.prompted.get(step.id) ?? new Set<string>();
+      if (asked.has(absPath)) {
         return {
           landed: false,
-          wrote: false,
           note: `Your own ${step.target.file} was kept — you chose that earlier in this session, and you are not asked again.`,
         };
       }
-      this.prompted.add(key);
+      asked.add(absPath);
+      this.prompted.set(step.id, asked);
       const overwrite = await this.adapters.confirmOverwrite(step.target.file);
       // The learner's answer is honoured wherever the WALK has moved to while the dialog was
       // up (`applyDial`'s header argues why, and why the modal makes that a narrow case). A
       // SESSION torn down under it is the exception: its target may already belong to the
       // session that replaced it, and no note is left either, since there is nobody to read one.
-      if (this.disposed) return { landed: false, wrote: false };
+      if (this.disposed) return { landed: false };
       if (!overwrite) {
-        return { landed: false, wrote: false, note: `Your own ${step.target.file} was kept. Nothing was written over it.` };
+        return { landed: false, note: `Your own ${step.target.file} was kept. Nothing was written over it.` };
       }
       overwriting = true;
     }
 
     try {
-      writeTextAtomic(absPath, content);
+      // The third argument is the target ROOT, and it is what makes the containment check a
+      // real one rather than a lexical one (security review finding 1, closed in `writer.ts`):
+      // `planWrite` proved this path stays inside the folder by `path` alone, and `renameSync`
+      // protects the final component, but a directory component that becomes a symlink between
+      // those two answers — a concurrent local process, while the overwrite prompt is up — is
+      // re-checked at the last instant only when the root is handed over. Every write path in
+      // this extension passes it; none of them is the one that skips the gate.
+      writeTextAtomic(absPath, content, this.target);
     } catch (err) {
       // A folder that will not take a write is a standing condition — it fails on this step and
       // on every step after it — so it is stated in the panel each time (free, and where the eye
       // already is) and put in front of the learner exactly once.
       const reason = messageOf(err);
       this.reportWriteFailure(reason);
-      return { landed: false, wrote: false, note: `${step.target.file} could not be written — ${reason}` };
+      return { landed: false, note: `${step.target.file} could not be written — ${reason}` };
     }
 
     return {
       landed: true,
-      wrote: true,
       note: overwriting
         ? `${step.target.file} was replaced with this step's version, as you asked.`
         : `${step.target.file} was written for you.`,
@@ -872,6 +957,15 @@ export class WalkSession {
     }
 
     const core = await this.adapters.core();
+    // The same LIVENESS re-checks `applyDial` makes, for the same reason and now for the same
+    // reach (code review finding 3): `enqueue` guards a job that has not STARTED, and only the
+    // job itself can guard it once it has. Everything past here writes `progress.json` and
+    // repaints all three surfaces — undoing the clear `dispose()` has just pushed, or painting
+    // over the session that replaced this one on the same folder — and then runs git.
+    // The one-liner the handoff proposed for this, a `disposed` check at the top of `refresh`,
+    // would not have covered it: `commit` PERSISTS before it refreshes, and `commitFor` runs
+    // afterwards, so `saveProgress` and the commit would both still have happened.
+    if (this.disposed) return;
     if (!core) {
       this.reportCoreMissing();
       return;
@@ -880,6 +974,9 @@ export class WalkSession {
     // NOT `void`ed and NOT swallowed: a throw here is an unloadable core or a missing grammar,
     // and `enqueue` routes it to `reportError`. See `src/dial/check.ts`'s header.
     const outcome = await runStructuralCheck(core, refRoot, this.target, step);
+    // The second one, and the wide one: this await is two tree-sitter parses, which is a
+    // comfortably long time for a folder to be closed or a walk to be re-opened in.
+    if (this.disposed) return;
     if (outcome === null) {
       this.noteFor(stepId, `There is nothing to check here yet — ${step.target.file} has not been created, so there is no shape to compare.`);
       return;
@@ -914,10 +1011,20 @@ export class WalkSession {
    * of them exactly ONCE for the session: an unconfigured identity does not fail once, it
    * fails on every step of a 61-step plan, and the learner fixes it with one `git config`
    * whenever they like — after which the very next step commits normally.
+   *
+   * The ADVICE in that notice is gated on the refusal actually having been a missing identity
+   * (code review finding 8). It used to be given for every reason there is — "nothing to
+   * commit", a stale `index.lock`, a `pre-commit` hook that said no — where telling a learner
+   * to run `git config user.name` is an instruction that fixes nothing and points them away
+   * from the sentence that says what really happened. Both wordings carry the reason itself,
+   * because that is the part they can act on.
    */
   private async commitFor(step: StepLike): Promise<void> {
     if (!this.adapters.commitPerStep()) return;
     const result = await commitStep(this.target, step, [step.target.file], this.adapters.git);
+    // The third liveness re-check (code review finding 3). A git run is the widest await on
+    // either path that reaches here, and everything below it pushes a view.
+    if (this.disposed) return;
     if (result.committed) return;
 
     const reason = result.reason ?? 'git did not say why';
@@ -925,17 +1032,35 @@ export class WalkSession {
     if (this.commitReported) return;
     this.commitReported = true;
     this.adapters.reportError(
-      `Your step was not committed in ${this.target} — ${reason}. The tutorial carries on either `
-      + 'way; set `git config user.name` and `git config user.email` in that folder and the next '
-      + 'completed step will commit normally. (Build Tutorials never commits under a name you '
-      + 'did not choose, and the `buildTutorials.commitPerStep` setting turns this off.)',
+      forWantOfIdentity(reason)
+        ? `Your step was not committed in ${this.target} — ${reason}. The tutorial carries on either `
+          + 'way; set `git config user.name` and `git config user.email` in that folder and the next '
+          + 'completed step will commit normally. (Build Tutorials never commits under a name you '
+          + 'did not choose, and the `buildTutorials.commitPerStep` setting turns this off.)'
+        : `Your step was not committed in ${this.target} — ${reason}. The tutorial carries on either `
+          + 'way and nothing of yours was changed — your file is on disk exactly as this step left '
+          + 'it, and only the bookkeeping commit did not happen. (The `buildTutorials.commitPerStep` '
+          + 'setting turns the per-step commit off if you would rather it did not try.)',
     );
   }
 
 
   /**
-   * Copies `plan.reproduce` into the target and records that it happened. Returns whether
-   * anything was actually attempted, so a caller can skip a pointless persist.
+   * Copies `plan.reproduce` into the target and records that it happened — or copies nothing
+   * and says what it would have written over (AC6; security review finding 3, code review
+   * finding 6). Returns what the caller has to act on: whether anything was copied, so a
+   * pointless persist can be skipped, and the sentence to show, when there is one.
+   *
+   * **`mayReplace` is about the gesture, not about the position of the dial.** This runs from
+   * two places with completely different standing. `applyDial` calls it on arrival in
+   * automated mode — on activation, before the learner has pressed anything — and `reproduce()`
+   * calls it because somebody pressed the offer. The rule this ticket names by name is that a
+   * learner's edits are never overwritten silently, and these files are theirs to have edited
+   * like any other: running `npm install` in the target (which the spec leaves to them on
+   * purpose) rewrites `package-lock.json`, and this used to replace it without a word. So an
+   * arrival copies only what is absent or already identical, names the count of what it did
+   * not touch, and leaves the offer standing; the press that follows is the gesture, made with
+   * the number already in front of them.
    *
    * `reproduced` is recorded even when some entries failed, and that is the honest answer
    * rather than a lax one: the pass RAN, every entry that could be copied was, and the ones
@@ -943,10 +1068,30 @@ export class WalkSession {
    * nothing would leave the panel offering a copy that has already been made, and re-running
    * it would not fix a reference file that is missing.
    */
-  private reproduceInto(): boolean {
-    if (this.progress.reproduced !== undefined) return false;
+  private reproduceInto(mayReplace: boolean): { copied: boolean; note?: string } {
+    if (this.progress.reproduced !== undefined) return { copied: false };
     const refRoot = this.request?.referenceRoot;
-    if (refRoot === undefined || reproduceEntries(this.plan).length === 0) return false;
+    const entries = reproduceEntries(this.plan);
+    if (refRoot === undefined || entries.length === 0) return { copied: false };
+
+    const replacing = entries.filter((entry) => this.wouldReplace(refRoot, entry));
+    if (replacing.length > 0 && !mayReplace) {
+      // Once per session. Nothing was recorded, so `reproduce.done` is still false and the
+      // panel's offer — with its own count of the whole list — is still on the page; saying
+      // this again on the next automated step would be noise around a decision the learner is
+      // already holding. The same standing-condition rule `reportCoreMissing` follows.
+      if (this.reproduceAnnounced) return { copied: false };
+      this.reproduceAnnounced = true;
+      return {
+        copied: false,
+        // The list is copied as ONE act and recorded as one instant, so it is held as one too:
+        // "nothing was copied" is the first thing the sentence says, because a press that
+        // half-happened would leave `progress.reproduced` describing a copy that did not.
+        note: replacing.length === 1
+          ? `Nothing was copied: ${namesOf(replacing)} is already here and differs from this project's own, and nothing of yours is written over without asking. Copy them in again to replace it.`
+          : `Nothing was copied: ${replacing.length} of these files are already here and differ from this project's own (${namesOf(replacing)}), and nothing of yours is written over without asking. Copy them in again to replace them.`,
+      };
+    }
 
     const problems = reproduceFiles(this.plan, refRoot, this.target);
     this.progress = { ...this.progress, reproduced: new Date().toISOString() };
@@ -955,7 +1100,43 @@ export class WalkSession {
         `Some of this project's generated files could not be copied into ${this.target}: ${problems.join('; ')}`,
       );
     }
-    return true;
+    return {
+      copied: true,
+      // Said afterwards as well as before, because "3 files were replaced" is what makes the
+      // warning a warning rather than a form to click through.
+      ...(replacing.length > 0
+        ? {
+          note: replacing.length === 1
+            ? `${namesOf(replacing)} was replaced with this project's own version, as you asked.`
+            : `${replacing.length} files that were already here were replaced with this project's own versions, as you asked.`,
+        }
+        : {}),
+    };
+  }
+
+  /**
+   * Would copying `entry` write over something of the learner's? Asked of every entry before
+   * any of them is copied, and it is what lets the ordinary case stay quiet: a target that
+   * does not have the file yet, or already holds exactly the reference's bytes, loses nothing
+   * — the identical-bytes short-circuit `writeFile` has had all along, now on this path too
+   * (code review finding 6).
+   *
+   * "Exactly" is the hard half, because `readText` DECODES and `reproduce` is the one path
+   * that carries files which are not text at all: two different binaries can decode to the
+   * same lossy string, and answering "identical" for those would silently overwrite the very
+   * file this check exists to notice. A decode that lost anything leaves U+FFFD behind, so a
+   * string carrying one is not evidence of anything and counts as a replacement. The direction
+   * is deliberate — over-counting costs one sentence, under-counting costs a learner's file.
+   */
+  private wouldReplace(refRoot: string, entry: string): boolean {
+    const to = resolveInsideTarget(this.target, entry);
+    // A refused path is not a replacement: nothing will be written for it at all, and
+    // `reproduceFiles` names it among the problems it hands back.
+    if (to === null || !this.adapters.fileExists(to)) return false;
+    const from = resolveInsideTarget(refRoot, entry);
+    if (from === null) return false;
+    const mine = this.adapters.readText(to);
+    return !(mine !== undefined && mine === this.adapters.readText(from) && !mine.includes('\uFFFD'));
   }
 
   /**
@@ -978,8 +1159,23 @@ export class WalkSession {
   /** A transient sentence about what just happened, tagged with the step it is about, then
    *  pushed — see `WalkView.writeNote` for why the tag matters. */
   private noteFor(stepId: string, text: string): void {
-    this.note = { stepId, text };
+    this.setNote(stepId, text);
     this.refresh(false);
+  }
+
+  /**
+   * The same sentence, recorded WITHOUT a push, and joined when there is more than one — the
+   * form an entry pass needs, since `concludePass` owns that pass's single push.
+   *
+   * More than one is ordinary rather than exceptional: the first arrival that finds a
+   * `plan.reproduce` file the learner has changed has something to say about that as well as
+   * about the step's own file, and the panel has one line to say both in. Absent sentences are
+   * dropped rather than joined into stray spaces, and a call with nothing to say leaves the
+   * previous note alone — a pass that says nothing must not silently blank a sentence.
+   */
+  private setNote(stepId: string, ...sentences: (string | undefined)[]): void {
+    const text = sentences.filter((sentence): sentence is string => sentence !== undefined).join(' ');
+    if (text.length > 0) this.note = { stepId, text };
   }
 
   /** ONCE per session, for the same reason `reportPersistFailure` is: a repo-tour that will
@@ -1048,7 +1244,7 @@ export class WalkSession {
       this.adapters.saveProgress(this.target, this.progress);
       return undefined;
     } catch (err) {
-      return err instanceof Error && err.message.length > 0 ? err.message : String(err);
+      return messageOf(err);
     }
   }
 
@@ -1163,7 +1359,36 @@ export class WalkSession {
 
 /** Whatever was thrown, as something a person can read. An `Error` with an empty message says
  *  nothing at all, so it falls through to `String(err)` the same way a thrown string does —
- *  the identical rule `persist` already applies to a failed `saveProgress`. */
+ *  the identical rule a failed `saveProgress` gets, which is why `persist` calls this rather
+ *  than spelling it out a third time (code review finding 10). */
 function messageOf(err: unknown): string {
   return err instanceof Error && err.message.length > 0 ? err.message : String(err);
+}
+
+/**
+ * Whether a refused commit was refused for want of a git identity — the one reason `commitFor`
+ * can actually tell the learner how to fix, and therefore the only one its notice offers the
+ * `git config` advice for (code review finding 8).
+ *
+ * Read off `commitStep`'s own wording rather than a field on `CommitResult`, because a field
+ * would exist in `src/dial/commit.ts` for the sole benefit of this sentence — and the pairing
+ * is not left to trust: the identity notice's test drives the REAL `commitStep` (a `git config`
+ * that refuses is the only thing faked in it), so a reword there fails a test here rather than
+ * quietly dropping the advice.
+ */
+function forWantOfIdentity(reason: string): boolean {
+  return /no git identity/i.test(reason);
+}
+
+/**
+ * Up to three `plan.reproduce` entries by name, the rest as a count. A real reproduce list runs
+ * to hundreds of entries — lockfiles, a `dist/` tree, vendored bundles — and a sentence naming
+ * every one of them is not more informative, it is unreadable. Each name is capped for the same
+ * reason `src/walk/step-view.ts` caps plan text: these strings come out of `plan.json` like
+ * everything else, and nothing has promised they are short.
+ */
+function namesOf(entries: string[]): string {
+  const shown = entries.slice(0, 3).map((entry) => (entry.length <= 80 ? entry : `${entry.slice(0, 79)}…`));
+  const rest = entries.length - shown.length;
+  return rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
 }

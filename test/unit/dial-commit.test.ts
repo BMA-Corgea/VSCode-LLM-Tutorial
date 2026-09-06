@@ -17,14 +17,23 @@
  * in this folder" has to mean, since the same global identity can still commit fine anywhere
  * else on that machine.
  *
- * Two things this suite exists to prove above everything else, because they are the two ways
+ * Three things this suite exists to prove above everything else, because they are the ways
  * this module could quietly do the wrong thing to a learner's own repository:
  *   - **A configured identity commits; an absent one refuses, with a reason, and leaves no
  *     commit behind.** `commit.ts`'s own header explains why a missing identity is a refusal
  *     rather than an invented default — this is that promise, checked against real git.
- *   - **Only the files `commitStep` is handed are ever staged.** A second, real, untouched
- *     file sitting in the same folder must never ride along, and a path `resolveInsideTarget`
- *     refuses must never reach `git add` at all.
+ *   - **Only the files `commitStep` is handed are ever COMMITTED.** Not a real but untouched
+ *     file sitting in the same folder, and — the case that actually costs the learner
+ *     something — not a file THEY have already staged, because `git add <paths>` does not
+ *     scope a commit and a bare `git commit` takes the whole index. So the assertions below
+ *     ask git what the commit CONTAINS (`diff-tree`/`show` against the object git wrote) and
+ *     what is left staged afterwards. Asserting the argv handed to a fake would prove the
+ *     staging and never the commit: a fake that records arguments can only ever tell you what
+ *     was asked for, not what happened.
+ *   - **A folder is git-inited only when it needs to be, and every git failure comes back as
+ *     a `CommitResult`.** A target inside a repository the learner already keeps must not get
+ *     a nested one, and a `git init` that cannot run must not reject out of `commitStep` —
+ *     the caller reports rejections outside its once-per-session guard.
  */
 
 import * as assert from 'node:assert/strict';
@@ -97,11 +106,39 @@ async function clearLocalIdentity(target: string): Promise<void> {
   await realGit(['config', 'user.email', ''], target);
 }
 
+/** The ordinary starting point for a commit test: a temp folder that is already a repository
+ *  and has a LOCAL identity, so the commit itself is the only thing under test. */
+async function committableTarget(): Promise<string> {
+  const target = tmpDir();
+  await ensureRepo(target, realGit);
+  await setLocalIdentity(target, 'Test Learner', 'learner@example.test');
+  return target;
+}
+
+/**
+ * The paths a commit actually CONTAINS, read back off the object git wrote rather than off
+ * the argv this module handed it. `--root` is not optional here: without it `diff-tree`
+ * prints nothing at all for a repository's FIRST commit, which is precisely the commit this
+ * module usually makes, having just `git init`ed the folder itself.
+ */
+async function committedPaths(target: string, rev = 'HEAD'): Promise<string[]> {
+  const out = await realGit(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', rev], target);
+  return out.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
+/** What is left STAGED afterwards — the learner's own work, which a step's commit must leave
+ *  exactly where they put it. Answers on an unborn branch too, where there is no HEAD yet. */
+async function stagedPaths(target: string): Promise<string[]> {
+  const out = await realGit(['diff', '--cached', '--name-only'], target);
+  return out.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
 /**
  * Wraps the REAL `realGit` so a test can additionally assert which commands were actually
- * run, without ever substituting a fake in git's place. `ensureRepo`'s "a no-op on an existing
- * repo" claim is precisely a claim about how many times `git` gets invoked — only counting a
- * real invocation honestly, rather than asking a stub whether it was called, can prove it.
+ * run, without ever substituting a fake in git's place. `ensureRepo`'s "it does not re-init an
+ * existing repo" claim is precisely a claim about which git commands get invoked — only
+ * counting real invocations honestly, rather than asking a stub whether it was called, can
+ * prove it.
  */
 function countingGit(): { git: GitRunner; calls: string[][] } {
   const calls: string[][] = [];
@@ -146,7 +183,7 @@ suite('commitSubject — the one string the panel, the commit, and this suite al
   });
 });
 
-suite('ensureRepo — git-inits a bare folder, and leaves an existing one alone', () => {
+suite('ensureRepo — git-inits a folder that is not in a work tree, and only then', () => {
   test('a folder with no .git becomes a repository', async () => {
     const target = tmpDir();
     assert.equal(fs.existsSync(path.join(target, '.git')), false);
@@ -156,22 +193,60 @@ suite('ensureRepo — git-inits a bare folder, and leaves an existing one alone'
     assert.equal(fs.existsSync(path.join(target, '.git')), true);
   });
 
-  test('is a no-op on a folder that is already a repository — git is not invoked again', async () => {
+  test('a folder that is already a repository is asked, never re-inited', async () => {
     const target = tmpDir();
     await ensureRepo(target, realGit);
 
     const { git, calls } = countingGit();
     await ensureRepo(target, git);
 
-    assert.deepEqual(calls, [], 'git init must not even be attempted a second time');
+    assert.deepEqual(
+      calls,
+      [['rev-parse', '--is-inside-work-tree']],
+      'the work-tree question, and nothing else — git init must not be attempted a second time',
+    );
+  });
+
+  test('a target INSIDE an existing repository gets no nested repository of its own', async () => {
+    const outer = tmpDir();
+    await ensureRepo(outer, realGit);
+    const target = path.join(outer, 'learner', 'tutorial');
+    fs.mkdirSync(target, { recursive: true });
+    assert.equal(fs.existsSync(path.join(target, '.git')), false, 'nothing here yet, and there must not be');
+
+    await ensureRepo(target, realGit);
+
+    assert.equal(
+      fs.existsSync(path.join(target, '.git')),
+      false,
+      'a repository nested here would hide every step commit from the learner\'s own git log',
+    );
+  });
+
+  test('a linked worktree — where .git is a FILE, not a directory — is left exactly as it is', async () => {
+    const source = await committableTarget();
+    writeFile(source, 'seed.ts');
+    await realGit(['add', '--', 'seed.ts'], source);
+    await realGit(['commit', '-q', '-m', 'seed'], source);
+    const target = path.join(tmpDir(), 'linked');
+    await realGit(['worktree', 'add', '-q', target, '-b', 'linked'], source);
+    assert.equal(fs.statSync(path.join(target, '.git')).isFile(), true, 'a gitfile pointing at the real gitdir');
+
+    const { git, calls } = countingGit();
+    await ensureRepo(target, git);
+
+    assert.deepEqual(
+      calls.filter((args) => args[0] === 'init'),
+      [],
+      'this IS a work tree — whatever question gets asked, the answer must not be an init',
+    );
+    assert.equal(fs.statSync(path.join(target, '.git')).isFile(), true, 'and its gitdir pointer is untouched');
   });
 });
 
 suite('identityConfigured — both halves, resolved the way a real commit would resolve them', () => {
   test('true once both user.name and user.email are set locally', async () => {
-    const target = tmpDir();
-    await ensureRepo(target, realGit);
-    await setLocalIdentity(target, 'Test Learner', 'learner@example.test');
+    const target = await committableTarget();
 
     assert.equal(await identityConfigured(target, realGit), true);
   });
@@ -196,9 +271,7 @@ suite('identityConfigured — both halves, resolved the way a real commit would 
 
 suite('commitStep — the learner\'s commit, or an honest reason there is not one', () => {
   test('a target with identity configured gets the commit', async () => {
-    const target = tmpDir();
-    await ensureRepo(target, realGit);
-    await setLocalIdentity(target, 'Test Learner', 'learner@example.test');
+    const target = await committableTarget();
     const step = fixtureStep();
     writeFile(target, step.target.file);
 
@@ -222,10 +295,8 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
     await assert.rejects(realGit(['rev-parse', 'HEAD'], target), 'the repository genuinely has no commit yet');
   });
 
-  test('only the named files are staged — an untouched sibling stays out of the commit', async () => {
-    const target = tmpDir();
-    await ensureRepo(target, realGit);
-    await setLocalIdentity(target, 'Test Learner', 'learner@example.test');
+  test('an untracked sibling the learner never staged stays out of the commit', async () => {
+    const target = await committableTarget();
     const step = fixtureStep();
     writeFile(target, step.target.file);
     writeFile(target, 'src/untouched.ts');
@@ -239,10 +310,107 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
     assert.match(status, /\?\? src\/untouched\.ts/, 'the second file is untracked, never committed');
   });
 
+  test('a file the learner STAGED themselves stays out of the commit, and stays staged', async () => {
+    // The repository this extension `git init`ed for them, with no commit in it yet, and a
+    // learner who has pressed VS Code's *Stage All Changes* — one click in the SCM view —
+    // over a folder holding their own `.env` and scratch notes as well as the step's file.
+    // A bare `git commit` here writes all three into a commit titled for the step.
+    const target = await committableTarget();
+    const step = fixtureStep();
+    writeFile(target, step.target.file);
+    writeFile(target, '.env', 'OPENAI_API_KEY=sk-not-a-real-key\n');
+    writeFile(target, 'notes.md', '# what I still do not get\n');
+    await realGit(['add', '-A'], target);
+
+    const result = await commitStep(target, step, [step.target.file], realGit);
+
+    assert.deepEqual(result, { committed: true });
+    assert.deepEqual(
+      await committedPaths(target),
+      [step.target.file],
+      'the commit holds the step\'s file and nothing else',
+    );
+    assert.equal((await realGit(['log', '-1', '--format=%s'], target)).trim(), commitSubject(step));
+    assert.deepEqual(
+      await stagedPaths(target),
+      ['.env', 'notes.md'],
+      'their own staged work survives the step\'s commit, still staged, still theirs to commit',
+    );
+  });
+
+  test('the same holds on a repository that already has a history of its own', async () => {
+    const target = await committableTarget();
+    writeFile(target, 'README.md', '# my tutorial\n');
+    await realGit(['add', '--', 'README.md'], target);
+    await realGit(['commit', '-q', '-m', 'my own first commit'], target);
+    const step = fixtureStep();
+    writeFile(target, step.target.file);
+    writeFile(target, '.env', 'TOKEN=hunter2\n');
+    await realGit(['add', '-A'], target);
+
+    const result = await commitStep(target, step, [step.target.file], realGit);
+
+    assert.deepEqual(result, { committed: true });
+    const stat = await realGit(['show', '--stat', '--format=', 'HEAD'], target);
+    assert.match(stat, /src\/parse\.ts \|/, 'the step\'s file is in the commit');
+    assert.doesNotMatch(stat, /\.env/, 'and the learner\'s key is not');
+    assert.match(stat, /1 file changed/, 'one file, not three');
+    assert.deepEqual(await stagedPaths(target), ['.env']);
+  });
+
+  test('a file stranded by a FAILED commit does not ride into the NEXT step\'s commit', async () => {
+    // The self-inflicted half of the same bug: `add` succeeds, `commit` does not (a stale
+    // index.lock, someone's pre-commit hook), and the step's file is left in the index. With
+    // no pathspec, the next step sweeps it up under the next step's subject.
+    const target = await committableTarget();
+    const stranded = fixtureStep();
+    writeFile(target, stranded.target.file);
+
+    const failed = await commitStep(
+      target,
+      stranded,
+      [stranded.target.file],
+      failingOn('commit', 'git commit failed: Unable to create .git/index.lock: File exists.'),
+    );
+
+    assert.equal(failed.committed, false);
+    assert.deepEqual(await stagedPaths(target), [stranded.target.file], 'the add did succeed, so it is staged');
+
+    const next = fixtureStep({ id: 'st-3-file-route', ordinal: 3, target: { file: 'src/route.ts' } });
+    writeFile(target, next.target.file);
+
+    const result = await commitStep(target, next, [next.target.file], realGit);
+
+    assert.deepEqual(result, { committed: true });
+    assert.deepEqual(
+      await committedPaths(target),
+      [next.target.file],
+      'step 3\'s commit holds step 3\'s file — the stranded one is not in it under step 3\'s subject',
+    );
+    assert.deepEqual(await stagedPaths(target), [stranded.target.file], 'still staged, still uncommitted');
+  });
+
+  test('a target inside an existing repository commits into THAT repository', async () => {
+    const outer = await committableTarget();
+    const target = path.join(outer, 'learner', 'tutorial');
+    fs.mkdirSync(target, { recursive: true });
+    const step = fixtureStep();
+    writeFile(target, step.target.file);
+
+    const result = await commitStep(target, step, [step.target.file], realGit);
+
+    assert.deepEqual(result, { committed: true });
+    assert.equal(fs.existsSync(path.join(target, '.git')), false, 'no repository of its own was created');
+    assert.equal(
+      (await realGit(['log', '-1', '--format=%s'], outer)).trim(),
+      commitSubject(step),
+      'the learner\'s own git log, where they already run it, shows the step',
+    );
+    assert.deepEqual(await committedPaths(outer), ['learner/tutorial/src/parse.ts']);
+  });
+
   test('an escaping path is refused rather than staged', async () => {
-    const target = tmpDir();
-    await ensureRepo(target, realGit);
-    await setLocalIdentity(target, 'Test Learner', 'learner@example.test');
+    const target = await committableTarget();
     const step = fixtureStep();
 
     const result = await commitStep(target, step, ['../../../etc/passwd'], realGit);
@@ -252,9 +420,7 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
   });
 
   test('an empty file list is refused the same way — nothing to stage is not a throw', async () => {
-    const target = tmpDir();
-    await ensureRepo(target, realGit);
-    await setLocalIdentity(target, 'Test Learner', 'learner@example.test');
+    const target = await committableTarget();
 
     const result = await commitStep(target, fixtureStep(), [], realGit);
 
@@ -262,9 +428,7 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
   });
 
   test('a git failure at the commit step becomes a CommitResult, never a rejection', async () => {
-    const target = tmpDir();
-    await ensureRepo(target, realGit);
-    await setLocalIdentity(target, 'Test Learner', 'learner@example.test');
+    const target = await committableTarget();
     const step = fixtureStep();
     writeFile(target, step.target.file);
 
@@ -272,6 +436,22 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
 
     assert.equal(result.committed, false);
     assert.match(result.reason ?? '', /simulated failure/);
+  });
+
+  test('a git failure at the INIT step becomes one too — the throttle only sees values', async () => {
+    // No `git` on the learner's PATH is the ordinary cause, and `init` is then the first call
+    // to fail. A rejection out of `commitStep` reaches the caller's error reporting OUTSIDE
+    // its once-per-session guard: one raw `spawn git ENOENT` toast per step, on a plan sixty
+    // steps long. So this has to come back as a value, exactly like a failing `commit` does.
+    const target = tmpDir();
+    const step = fixtureStep();
+    writeFile(target, step.target.file);
+
+    const result = await commitStep(target, step, [step.target.file], failingOn('init', 'git init -q failed: spawn git ENOENT'));
+
+    assert.equal(result.committed, false);
+    assert.match(result.reason ?? '', /spawn git ENOENT/);
+    assert.equal(fs.existsSync(path.join(target, '.git')), false, 'and nothing was half-created');
   });
 
   test('commitStep git-inits an ungoverned folder itself, not only through a prior ensureRepo call', async () => {

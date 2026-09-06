@@ -564,6 +564,214 @@ suite('containment — a destination that leaves the target is refused, never cl
   });
 });
 
+// ── containment, the half that needs a real filesystem ──────────────────────────────────────
+
+/**
+ * A symlinked DIRECTORY inside the target (T-5 security review, finding 1 — HIGH).
+ *
+ * The suite above is arithmetic: `..`, an absolute path, a sibling that shares a name prefix.
+ * All of it is real and all of it was already working, and none of it is containment on its
+ * own, because a path can stay under the target as a STRING and land somewhere else on a DISK.
+ * What ships that gap is a repository committing one line:
+ *
+ *     src -> ../outside
+ *
+ * git recreates a symlink on clone, so it costs an attacker nothing; `resolveInsideTarget`
+ * says `src/util.ts` is contained, which it is, lexically; and `mkdirSync(…, { recursive:
+ * true })` follows the link without a murmur. The learner clicks a step and a file outside the
+ * folder they named is overwritten. Nor does this need an attacker at all — pnpm makes every
+ * `node_modules/<pkg>` a directory symlink into a global store, and repo-tour classifies
+ * `node_modules` as vendored, which puts it straight into `plan.reproduce`.
+ *
+ * So every test here builds a REAL symlink on a REAL disk and then asserts about the file
+ * outside, not about what the writer believed it was doing. A test that only checked the
+ * refusal message would pass just as happily if the refusal came after the write.
+ *
+ * Both directions again: the ordinary nested path and the legitimately symlinked TARGET are
+ * asserted just as carefully, because a check that refused everything would pass every hostile
+ * case here and break every real build — including, specifically, every build on macOS, where
+ * `os.tmpdir()` sits under a symlink.
+ */
+suite('containment — a symlinked DIRECTORY, where the lexical check ends and the disk begins', () => {
+  /**
+   * The planted repository, built for real: a canary file outside the target, and a `src`
+   * inside the target that is a link to the folder holding it. The reference tree really does
+   * have `src/util.ts`, so nothing but the symlink distinguishes this from an ordinary build.
+   */
+  function planted(): { refRoot: string; target: string; outside: string; canary: string } {
+    const refRoot = referenceTree();
+    const sandbox = tmpDir('dial-writer-sandbox-');
+    const outside = path.join(sandbox, 'outside');
+    fs.mkdirSync(outside);
+    const canary = path.join(outside, 'util.ts');
+    fs.writeFileSync(canary, 'someone else’s file\n');
+    const target = path.join(sandbox, 'project');
+    fs.mkdirSync(target);
+    fs.symlinkSync(path.join('..', 'outside'), path.join(target, 'src'));
+    return { refRoot, target, outside, canary };
+  }
+
+  test('planWrite refuses it in words, in every position that writes — and the file outside is untouched', () => {
+    const plan = referencePlan();
+    for (const dial of ['scaffolded', 'automated'] as const) {
+      const { refRoot, target, canary } = planted();
+      const result = planWrite(stepOf(plan, 'st-2-file-util'), dial, refRoot, target, plan, core);
+
+      // A refusal, not a null: "refused" and "nothing to write" are different answers, and the
+      // session shows the first and stays silent about the second.
+      assert.ok(isRefusal(result), `${dial} planned a write through a symlinked directory`);
+      assert.match(refusalOf(result), /through a symlink/);
+      assert.equal(fs.readFileSync(canary, 'utf8'), 'someone else’s file\n',
+        `${dial} wrote through the planted link and overwrote a file outside the learner's folder`);
+    }
+  });
+
+  test('a directory DEEPER than the link is refused too, and nothing is created outside', () => {
+    // `<target>/src/deep` is not itself a symlink — it does not exist yet, and mkdir -p would
+    // create it inside `outside/`. A check that only lstat'd the last component would pass
+    // this, and a check that created before it looked would leave an empty folder out there.
+    const { refRoot, target, outside } = planted();
+    const plan = referencePlan();
+    // The reference really does have this file, so the refusal below can only be about the
+    // DESTINATION — `readReference` refuses a missing source first, and would have masked it.
+    fs.mkdirSync(path.join(refRoot, 'src', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(refRoot, 'src', 'deep', 'util.ts'), 'export const F = 6;\n');
+    const deeper = step({
+      id: 'st-x-deep',
+      ordinal: 9,
+      kind: 'file',
+      target: { file: 'src/deep/util.ts' },
+    });
+
+    assert.match(refusalOf(planWrite(deeper, 'automated', refRoot, target, plan, core)), /through a symlink/);
+    assert.deepEqual(fs.readdirSync(outside), ['util.ts'], 'a refused plan created a directory outside the target');
+  });
+
+  test('the write primitive refuses the same destination when it is told the root', () => {
+    // `planWrite` is where a refusal becomes a sentence the learner reads; this is the last
+    // line, for the window between a plan and the write it authorised.
+    const { target, canary } = planted();
+    const dest = path.join(target, 'src', 'util.ts');
+
+    assert.throws(() => writeTextAtomic(dest, 'pwned\n', target), /through a symlink/);
+    assert.equal(fs.readFileSync(canary, 'utf8'), 'someone else’s file\n');
+  });
+
+  test('reproduce refuses the planted entry, reports it, and still copies the entries beside it', () => {
+    const { refRoot, target, outside } = planted();
+    fs.writeFileSync(path.join(outside, 'bundle.min.js'), 'do not touch\n');
+    fs.symlinkSync(path.join('..', 'outside'), path.join(target, 'vendor'));
+    const plan = referencePlan();
+    plan['reproduce'] = ['vendor/bundle.min.js', 'package-lock.json'];
+
+    const problems = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
+    assert.match(problems[0] ?? '', /refused — it reaches outside the folder you are building in through a symlink/);
+    assert.equal(fs.readFileSync(path.join(outside, 'bundle.min.js'), 'utf8'), 'do not touch\n');
+    // Not vacuous, and not all-or-nothing: one planted entry must not cost the learner the
+    // lockfile they are owed, or AC6's `diff -r` can never come back clean.
+    assert.ok(fs.existsSync(path.join(target, 'package-lock.json')));
+  });
+
+  test('the READ side too: a reference file behind a symlink is refused before it is read', () => {
+    // The mirror image, and the reason the check runs on both roots. `vendor -> ~` in a
+    // reference repository copies a file the learner can read into a project they are about to
+    // commit and push — and `fileShape` would have shown it to them on the way.
+    const sandbox = tmpDir('dial-writer-sandbox-');
+    const secrets = path.join(sandbox, 'secrets');
+    fs.mkdirSync(secrets);
+    fs.writeFileSync(path.join(secrets, 'util.ts'), 'BEGIN OPENSSH PRIVATE KEY\n');
+    const refRoot = path.join(sandbox, 'reference');
+    fs.mkdirSync(refRoot);
+    fs.symlinkSync(path.join('..', 'secrets'), path.join(refRoot, 'src'));
+    const target = tmpDir('dial-writer-target-');
+    const plan = referencePlan();
+    const util = stepOf(plan, 'st-2-file-util');
+
+    assert.match(refusalOf(planWrite(util, 'automated', refRoot, target, plan, core)), /reference repository/);
+    assert.deepEqual(fileShape(refRoot, util), { signatures: [], imports: [] },
+      'the panel is a place to read the answer out of, so a refused read must not reach it either');
+    assert.deepEqual(fs.readdirSync(target), [], 'nothing was written for a file we would not read');
+  });
+
+  test('reproduce refuses an entry that leaves the REFERENCE through a symlink', () => {
+    const sandbox = tmpDir('dial-writer-sandbox-');
+    const secrets = path.join(sandbox, 'secrets');
+    fs.mkdirSync(secrets);
+    fs.writeFileSync(path.join(secrets, 'id_rsa'), 'BEGIN OPENSSH PRIVATE KEY\n');
+    const refRoot = path.join(sandbox, 'reference');
+    fs.mkdirSync(refRoot);
+    fs.writeFileSync(path.join(refRoot, 'package-lock.json'), '{}\n');
+    fs.symlinkSync(path.join('..', 'secrets'), path.join(refRoot, 'vendor'));
+    const target = tmpDir('dial-writer-target-');
+    const plan = referencePlan();
+    plan['reproduce'] = ['vendor/id_rsa', 'package-lock.json'];
+
+    const problems = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
+    assert.match(problems[0] ?? '', /refused — it leaves the reference repository through a symlink/);
+    assert.equal(fs.existsSync(path.join(target, 'vendor', 'id_rsa')), false, 'a key was copied into the learner’s project');
+    assert.ok(fs.existsSync(path.join(target, 'package-lock.json')));
+  });
+
+  // ── and now the other direction, which is what stops the fix being "refuse everything" ────
+
+  test('an ordinary nested path under an ordinary target still writes — with the root named and without', () => {
+    const refRoot = referenceTree();
+    const target = tmpDir('dial-writer-target-');
+    const plan = referencePlan();
+
+    const write = plannedWrite(planWrite(stepOf(plan, 'st-2-file-util'), 'automated', refRoot, target, plan, core));
+    assert.equal(write.path, path.join(target, 'src', 'util.ts'), 'the path handed back is the plan’s, not a resolved rewrite of it');
+    writeTextAtomic(write.path, write.content, target);
+    assert.equal(fs.readFileSync(write.path, 'utf8'), write.content);
+
+    const second = path.join(target, 'a', 'b', 'c', 'deep.ts');
+    writeTextAtomic(second, 'export const D = 4;\n');
+    assert.equal(fs.readFileSync(second, 'utf8'), 'export const D = 4;\n');
+  });
+
+  test('a symlinked TARGET is not the attack — a build in a folder that is itself a link still works', () => {
+    // `/tmp` is a symlink on macOS and `os.tmpdir()` sits under one, so this is the ORDINARY
+    // case on a whole platform, not an exotic one. Refusing it would be the fix breaking every
+    // real build — which is the shape most containment regressions actually take.
+    const refRoot = referenceTree();
+    const sandbox = tmpDir('dial-writer-sandbox-');
+    const real = path.join(sandbox, 'real-project');
+    fs.mkdirSync(real);
+    const target = path.join(sandbox, 'project');
+    fs.symlinkSync(real, target);
+    const plan = referencePlan();
+
+    const write = plannedWrite(planWrite(stepOf(plan, 'st-2-file-util'), 'automated', refRoot, target, plan, core));
+    writeTextAtomic(write.path, write.content, target);
+
+    assert.equal(fs.readFileSync(path.join(real, 'src', 'util.ts'), 'utf8'), write.content,
+      'the target being a symlink is not an escape from the target');
+  });
+
+  test('a symlink AT the destination is still replaced rather than refused, root or no root', () => {
+    // The directory check must not swallow the final-component rule, which is rename(2)'s and
+    // covers a different case: a planted `src/parse.ts -> ~/.bashrc` is REPLACED, its pointee
+    // untouched. Refusing here instead would be a regression dressed as extra safety.
+    const sandbox = tmpDir('dial-writer-sandbox-');
+    const outside = path.join(sandbox, 'bashrc');
+    fs.writeFileSync(outside, 'export PATH=$PATH\n');
+    const target = path.join(sandbox, 'project');
+    fs.mkdirSync(target);
+    const dest = path.join(target, 'parse.ts');
+    fs.symlinkSync(outside, dest);
+
+    writeTextAtomic(dest, 'export const E = 5;\n', target);
+
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'export PATH=$PATH\n');
+    assert.equal(fs.lstatSync(dest).isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(dest, 'utf8'), 'export const E = 5;\n');
+  });
+});
+
 // ── manual mode's panel content (AC2) ───────────────────────────────────────────────────────
 
 suite('fileShape — enough to know what to write, never the answer (AC2)', () => {
@@ -619,6 +827,92 @@ suite('fileShape — enough to know what to write, never the answer (AC2)', () =
     const refRoot = referenceTree();
     const missing = step({ id: 'st-x-missing', ordinal: 9, kind: 'file', target: { file: 'src/nowhere.ts' } });
     assert.deepEqual(fileShape(refRoot, missing), { signatures: [], imports: [] });
+  });
+});
+
+/**
+ * The shape is BOUNDED at the source, and says where it cut (T-5 security review, finding 6).
+ *
+ * Both lists are lifted verbatim off a file in a repository nobody here has read, and neither
+ * has a natural bound: a minified bundle is one line and megabytes long, and `plan.json`
+ * decides how many load-bearing ranges there are. `src/walk/step-view.ts` renders both lists at
+ * the PROSE cap of 20,000 characters across up to 200 rows, so an unbounded shape is up to
+ * eight megabytes of HTML to build, escape and push through a webview, for one manual step.
+ *
+ * Announced rather than silent, which is the same rule the option list and the check report
+ * already follow. Silence would read as "that is the whole import list", and a learner
+ * comparing the panel against the reference would go looking for their mistake in the wrong
+ * place — the cap would have turned a security fix into a teaching bug.
+ */
+suite('fileShape — bounded at the source, and honest about where it cut (security finding 6)', () => {
+  /** A reference holding one file, written to order. */
+  function referenceWith(rel: string, source: string): string {
+    const root = tmpDir('dial-writer-reference-');
+    const abs = path.join(root, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, source);
+    return root;
+  }
+
+  test('a minified file’s single line is shortened, and says so', () => {
+    // What repo-tour classifies as vendored and a plan can still name as a `file` step. The
+    // signature line here is the whole bundle.
+    const source = `export function f(){${'a'.repeat(200_000)}}\n`;
+    const length = source.trimEnd().length;
+    const refRoot = referenceWith('src/min.js', source);
+    const minified = step({
+      id: 'st-x-min',
+      ordinal: 9,
+      kind: 'file',
+      target: { file: 'src/min.js' },
+      scaffold: { loadBearing: [{ startLine: 1, endLine: 1 }], boilerplate: [] },
+    });
+
+    const shape = fileShape(refRoot, minified);
+
+    assert.equal(shape.signatures.length, 1);
+    const line = shape.signatures[0] ?? '';
+    assert.ok(line.length < 500, `the panel was handed a ${line.length}-character "signature"`);
+    assert.match(line, /shortened here/, 'a silent cut reads as the whole line');
+    assert.ok(line.includes(`${length} characters`), 'the learner is told how much of it they are not seeing');
+  });
+
+  test('more ranges and more imports than the cap: capped, counted, and the count is right', () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 250; i++) lines.push(`import a${i} from './a${i}.js';`);
+    const refRoot = referenceWith('src/many.ts', `${lines.join('\n')}\n`);
+    const many = step({
+      id: 'st-x-many',
+      ordinal: 9,
+      kind: 'file',
+      target: { file: 'src/many.ts' },
+      scaffold: {
+        loadBearing: lines.map((_, i) => ({ startLine: i + 1, endLine: i + 1 })),
+        boilerplate: [],
+      },
+    });
+
+    const shape = fileShape(refRoot, many);
+
+    for (const [name, list] of [['signatures', shape.signatures], ['imports', shape.imports]] as const) {
+      assert.equal(list.length, 101, `${name} was not capped`);
+      assert.match(list[100] ?? '', /… and 150 more, not shown/, `${name} cut silently`);
+    }
+    // Under `step-view.ts`'s own 200-row cap, so the announcement is not the row the panel
+    // drops — a cap whose own notice gets truncated away is a silent cap with extra steps.
+    assert.ok(shape.signatures.length < 200);
+  });
+
+  test('an ordinary file is not touched by either cap — the bound must not become a lie about small files', () => {
+    const refRoot = referenceTree();
+    const shape = fileShape(refRoot, stepOf(referencePlan(), 'st-2-file-util'));
+    for (const line of [...shape.signatures, ...shape.imports]) {
+      assert.ok(!line.includes('not shown') && !line.includes('shortened here'), `an ordinary line was announced as cut: ${line}`);
+    }
+    assert.deepEqual(shape.signatures, [
+      'export function tokenize(line: string): Token[] {',
+      'export function render(tokens: Token[]): string {',
+    ]);
   });
 });
 

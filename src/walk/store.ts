@@ -79,6 +79,43 @@ function isProgressShape(value: unknown): value is Progress {
   return isRecord(value['steps']);
 }
 
+/**
+ * Drops any `check` that is not exactly `{ ok: boolean; at: string }` (T-5 code review,
+ * finding 9).
+ *
+ * The shape guard above is about surviving the read; this one is about not drawing a lie
+ * afterwards. `TreeStepNode.check` is three-valued on purpose — undefined, pass, fail — so
+ * that a step nobody has reached looks different from the one they got wrong. But `treeModel`
+ * asks `recorded.ok ? 'pass' : 'fail'`, and a malformed `check` (a hand edit, another tool, a
+ * future version writing a richer object) has an `ok` of `undefined`, which is falsy. The tree
+ * then draws ✗ on a step nobody ever checked — the precise failure the three-valued
+ * distinction exists to prevent, arriving through the file this codebase already treats as
+ * untrusted.
+ *
+ * Dropping the field, rather than refusing the whole file, is the proportionate answer: the
+ * learner's POSITION and their done/pending statuses are still perfectly good, and throwing
+ * those away over an unreadable verdict would cost them far more than the verdict was worth.
+ */
+function withCheckedVerdicts(progress: Progress): Progress {
+  let changed = false;
+  const steps: Progress['steps'] = {};
+  for (const [id, step] of Object.entries(progress.steps)) {
+    if (!isRecord(step)) { changed = true; continue; }
+    const check: unknown = step.check;
+    if (check === undefined) { steps[id] = step; continue; }
+    if (isRecord(check) && typeof check['ok'] === 'boolean' && typeof check['at'] === 'string') {
+      steps[id] = step;
+      continue;
+    }
+    // Rebuilt without `check` rather than destructured-and-spread: the lint rule against
+    // unused bindings is right, and naming a variable only to discard it is a worse way to
+    // say "drop this field" than simply not copying it.
+    steps[id] = { status: step.status, ...(step.dial ? { dial: step.dial } : {}), ...(step.transcript ? { transcript: step.transcript } : {}) };
+    changed = true;
+  }
+  return changed ? { ...progress, steps } : progress;
+}
+
 /** Missing, unreadable, or not actually shaped like progress at all — none of those are an
  *  error; each is what a build that has never been usefully walked looks like, so each comes
  *  back as `emptyProgress(plan)`, never a throw. */
@@ -89,7 +126,7 @@ export function loadProgress(target: string, plan: PlanLike): Progress {
   } catch {
     return emptyProgress(plan);
   }
-  return isProgressShape(parsed) ? parsed : emptyProgress(plan);
+  return isProgressShape(parsed) ? withCheckedVerdicts(parsed) : emptyProgress(plan);
 }
 
 function requestPath(target: string): string {

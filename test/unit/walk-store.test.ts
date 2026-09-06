@@ -34,7 +34,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { currentStep, emptyProgress, markDone, setCurrent, type Progress } from '../../src/walk/model.js';
+import { currentStep, emptyProgress, markDone, setCurrent, treeModel, type Progress } from '../../src/walk/model.js';
 import { buildDir, hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from '../../src/walk/store.js';
 import { DEFAULT_DIAL } from '../../src/start/request.js';
 import { fixturePlan, fixtureProgress, writeFixtureTarget } from './walk-fixtures.js';
@@ -281,6 +281,46 @@ suite('loadRequest — the reference root and the GLOBAL dial (T-5 AC1)', () => 
     // "manual" is the only fallback that cannot overstate what has happened to the
     // learner's files, so a hand-edited or future value must not survive as itself.
     assert.equal(loadRequest(target)?.dial, DEFAULT_DIAL);
+  });
+});
+
+suite('a malformed check verdict is dropped, not drawn as a failure (T-5 code review, finding 9)', () => {
+  // `TreeStepNode.check` is three-valued so that a step nobody has reached looks different
+  // from the one they got wrong. `treeModel` asks `recorded.ok ? 'pass' : 'fail'`, so a
+  // malformed `check` — `ok` of `undefined`, which is falsy — would draw ✗ on a step nobody
+  // ever checked. That is the exact distinction the field was added to protect, arriving
+  // through the file this codebase already treats as untrusted.
+  for (const [label, check] of [
+    ['a bare string', '"passed"'],
+    ['a boolean', 'true'],
+    ['missing `ok`', '{"at":"2026-01-01"}'],
+    ['an `ok` of the wrong type', '{"ok":"yes","at":"2026-01-01"}'],
+    ['missing `at`', '{"ok":true}'],
+    ['null', 'null'],
+  ] as const) {
+    test(`${label} is dropped`, () => {
+      const target = fixtureTarget();
+      const plan = loadPlan(target);
+      fs.writeFileSync(progressPath(target), `{"schemaVersion":1,"current":"st-2-file-parse","steps":{"st-2-file-parse":{"status":"done","check":${check}}}}`);
+
+      const progress = loadProgress(target, plan);
+      assert.equal(progress.steps['st-2-file-parse']?.check, undefined, 'an unreadable verdict is no verdict');
+      // And the proof it is dropped rather than the whole file refused: the position and the
+      // status survive, which are worth far more to the learner than the verdict was.
+      assert.equal(progress.current, 'st-2-file-parse');
+      assert.equal(progress.steps['st-2-file-parse']?.status, 'done');
+      assert.equal(treeModel(plan, progress).flatMap((c) => c.steps).find((n) => n.id === 'st-2-file-parse')?.check, undefined);
+    });
+  }
+
+  test('a well-formed verdict survives untouched (discriminates against dropping everything)', () => {
+    const target = fixtureTarget();
+    const plan = loadPlan(target);
+    fs.writeFileSync(progressPath(target), '{"schemaVersion":1,"current":"st-2-file-parse","steps":{"st-2-file-parse":{"status":"done","dial":"automated","check":{"ok":false,"at":"2026-01-01"}}}}');
+
+    const progress = loadProgress(target, plan);
+    assert.deepEqual(progress.steps['st-2-file-parse'], { status: 'done', dial: 'automated', check: { ok: false, at: '2026-01-01' } });
+    assert.equal(treeModel(plan, progress).flatMap((c) => c.steps).find((n) => n.id === 'st-2-file-parse')?.check, 'fail');
   });
 });
 

@@ -12,9 +12,17 @@
  * Both directions are pinned. A check that rejects everything would "pass" a suite that only
  * tested escapes, and would break every ordinary step in every real plan — so the ordinary
  * cases are asserted just as carefully as the hostile ones.
+ *
+ * The THIRD direction is pinned too, at the bottom: what this deliberately does not do. T-5's
+ * security review found a HIGH in the gap between the lexical check and the filesystem, and
+ * the reason it survived a review was a comment that read as though the job were finished. A
+ * test is a harder thing to misread than a comment, so the boundary is asserted rather than
+ * described.
  */
 
 import * as assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { resolveInsideTarget } from '../../src/walk/paths.js';
 
@@ -68,5 +76,48 @@ suite('resolveInsideTarget — anything that leaves the folder is null', () => {
     for (const bad of [undefined, null, 42, {}, [], '']) {
       assert.equal(resolveInsideTarget(TARGET, bad), null, `${JSON.stringify(bad)} should not resolve`);
     }
+  });
+});
+
+// ── the boundary: what this check is NOT ────────────────────────────────────────────────────
+
+/**
+ * `resolveInsideTarget` is the LEXICAL half of containment, and the whole of what this module
+ * can be: `src/walk/session.ts` has to stay loadable without `fs`, so the check the session
+ * needs has to be arithmetic on strings. Arithmetic on strings cannot see a symlink.
+ *
+ * The test below therefore asserts that a symlinked directory PASSES — which looks, out of
+ * context, like a test asserting a vulnerability. It is the opposite. T-5's security review
+ * found that gap being treated as if it did not exist (finding 1: the write landed outside the
+ * learner's folder), and what let that ship was a header claiming the hole was closed. So the
+ * division of labour is pinned here on purpose, in both halves:
+ *
+ *   - if someone gives this module `fs` and makes it refuse symlinks, this test fails and
+ *     tells them the contract moved and `src/walk/session.ts` can no longer load it;
+ *   - and the same symlink is refused for real in `dial-writer.test.ts`, where the filesystem
+ *     half lives (`prepareDirectory`). Neither suite is complete without the other, which is
+ *     the honest shape of a check that comes in two pieces.
+ */
+suite('resolveInsideTarget — the lexical half, and exactly where it ends', () => {
+  test('a REAL symlinked directory inside the target passes — by design, and not by accident', () => {
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-paths-'));
+    const outside = path.join(sandbox, 'outside');
+    fs.mkdirSync(outside);
+    const target = path.join(sandbox, 'project');
+    fs.mkdirSync(target);
+    // Exactly what a repository can commit; git recreates it on clone, so it is free.
+    fs.symlinkSync(path.join('..', 'outside'), path.join(target, 'up'));
+
+    // Contained, as a string. Every check in `paths.ts` agrees, and every one of them is right
+    // about the question it was asked.
+    assert.equal(resolveInsideTarget(target, 'up/victim.txt'), path.join(target, 'up', 'victim.txt'));
+
+    // And here is the other question, the one only a filesystem can answer: that path's real
+    // directory is not in the target at all. `src/dial/writer.ts` is what asks it before any
+    // write, and `dial-writer.test.ts` is what proves the answer is acted on.
+    assert.equal(fs.realpathSync(path.join(target, 'up')), fs.realpathSync(outside));
+    assert.equal(resolveInsideTarget(fs.realpathSync(target), fs.realpathSync(path.join(target, 'up'))), null);
+
+    fs.rmSync(sandbox, { recursive: true, force: true });
   });
 });

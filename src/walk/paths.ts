@@ -16,9 +16,31 @@
  * identical unvalidated value into a write target one ticket from here.
  *
  * Deliberately pure `path`, no `fs`: `src/walk/session.ts` cannot import `fs` (it must stay
- * loadable under the plain-mocha unit bundle), and this is the check it needs. The symlink
- * half — a contained path whose real location is elsewhere — needs `realpath` and therefore
- * lives with the `fs` gate in `src/extension.ts`.
+ * loadable under the plain-mocha unit bundle), and this is the check it needs.
+ *
+ * ## This is the LEXICAL half, and ONLY the lexical half
+ *
+ * Worth stating in the negative, because the gap between the two halves is where T-5's
+ * security review found a HIGH. A path that stays under `target` as a *string* can still land
+ * outside it on a *disk*. A repository can commit a directory symlink — `up -> ../outside` —
+ * and git recreates it on clone, so it costs an attacker nothing:
+ *
+ *     resolveInsideTarget(target, 'up/victim.txt')  ->  <target>/up/victim.txt   (contained!)
+ *     write there                                   ->  <outside>/victim.txt     (overwritten)
+ *
+ * Every check in this file passes that, correctly, because every check in this file is
+ * arithmetic on strings. `mkdirSync(…, { recursive: true })` then follows the link without
+ * complaint. Nor is this only about hostile repositories: pnpm makes every
+ * `node_modules/<pkg>` a directory symlink into a global store, and repo-tour classifies
+ * `node_modules` as vendored, which puts it straight into `plan.reproduce`.
+ *
+ * Answering that needs `realpath`, which needs `fs`, which this file cannot have. So the
+ * filesystem half lives with the callers that CAN hold `fs`, and a caller that writes must use
+ * both: `prepareDirectory` in `src/dial/writer.ts` guards every write and copy destination and
+ * `insideRealRoot` beside it guards the reference reads, while `isOpenableFile` in
+ * `src/extension.ts` guards the reveal/open path. Treating what is below as containment on its
+ * own IS the bug — that is exactly how the write hole got shipped, and the reason it survived
+ * review was a comment that sounded finished.
  */
 
 import path from 'node:path';

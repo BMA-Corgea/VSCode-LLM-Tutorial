@@ -150,7 +150,7 @@
 import type { CheckOutcome } from '../dial/check.js';
 import { type SkinsModule } from '../start/view.js';
 import { DIALS, type Dial } from '../start/request.js';
-import { bridgeCss, pickerHtml } from '../skins.js';
+import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
 import { renderPage } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import { FALLBACK_DIAL, type OptionLike, type StepLike, type WhySource } from './model.js';
@@ -1011,34 +1011,79 @@ export function renderNoticeHtml(notice: string): string {
  * fix is a targeted `postMessage` to update that one node — the way `note` already works —
  * not a full repaint, and not moving it into this key.
  *
- * The RAW values go in, never the rendered ones: this file truncates long strings and caps
- * every list, so hashing what it emits would make two genuinely different plans compare EQUAL
- * past the cap — stale, silently. Comparing the inputs can only err the other way, in an
- * occasional repaint that changed nothing visible, which costs a nonce.
+ * **Capped value PLUS uncapped length**, for each string and each list — which keeps the
+ * property the raw version was protecting while bounding what this builds (T-5 security
+ * review, finding 5).
+ *
+ * The original went in raw, reasoning that hashing what the page EMITS would make two
+ * genuinely different plans compare equal past the cap — stale, silently. That reasoning is
+ * right, and it is why the fix is not "key on the rendered output". But raw meant
+ * `JSON.stringify` over every option label, every consequence, the whole `why` and the entire
+ * check report, on EVERY push rather than once per load — the same unbounded work T-4's own
+ * security review flagged, reintroduced in the decision about whether to paint.
+ *
+ * Carrying the length beside the capped value restores the distinction exactly: two plans
+ * that differ only past the cap render identically — that is what the cap means — but their
+ * lengths differ, so the key still moves, and the "…N more" line that reports the difference
+ * is itself driven by those counts. `String.prototype.length` is O(1), so the bound costs
+ * nothing to compute. Erring is still one-directional: an occasional repaint that changed
+ * nothing visible, which costs a nonce.
  *
  * Every array is guarded before it is walked, for the reason `planText` exists (T-4 security
  * review, finding 5): `options` is only TYPED as an array, and a `.map` on a plan that made it
  * an object throws — here, from inside the decision about whether to paint, which would take
  * down a push rather than merely a render.
  */
+/** A value's capped form and its true size — enough to tell any two renderable states apart,
+ *  and bounded however large the plan is. Non-strings pass through as themselves, since only
+ *  a string can be unboundedly long here. */
+function keyOf(value: unknown, max = MAX_CHECK_TEXT): unknown {
+  return typeof value === 'string' ? [value.length <= max ? value : value.slice(0, max), value.length] : value;
+}
+
+/** The same, for a list: its capped head and its true count. The count is not decoration —
+ *  it is what the "…and N more" lines are computed from, so two lists that share a head and
+ *  differ in length really do render differently. */
+function keyOfList<T>(value: unknown, max: number, project: (entry: T) => unknown): unknown {
+  if (!Array.isArray(value)) return null;
+  return [value.slice(0, max).map((entry) => project(entry as T)), value.length];
+}
+
 export function stepRenderKey(state: StepViewState, skins: SkinsModule): string {
   const { decision, id, witness } = state.step;
-  const options = Array.isArray(decision.options) ? decision.options : [];
-  const skinRows = Array.isArray(skins.SKINS) ? skins.SKINS : [];
+  const report = state.check?.report;
   return JSON.stringify([
-    id,
-    decision.question,
-    options.map((option) => [option?.id, option?.label, option?.consequence, option?.taken]),
-    decision.authorChoice,
-    decision.why,
+    keyOf(id),
+    keyOf(decision.question),
+    keyOfList<OptionLike | undefined>(decision.options, MAX_OPTIONS_RENDERED, (option) => [
+      keyOf(option?.id), keyOf(option?.label), keyOf(option?.consequence), option?.taken,
+    ]),
+    keyOf(decision.authorChoice),
+    keyOf(decision.why, MAX_PLAN_TEXT),
     decision.whySource,
-    [witness?.sha, witness?.subject, witness?.date],
-    state.shape ?? null,
+    [keyOf(witness?.sha), keyOf(witness?.subject), keyOf(witness?.date)],
+    state.shape
+      ? [
+          keyOfList<string>(state.shape.signatures, MAX_LIST_ROWS, (line) => keyOf(line)),
+          keyOfList<string>(state.shape.imports, MAX_LIST_ROWS, (line) => keyOf(line)),
+        ]
+      : null,
     state.fileExists,
-    state.writeNote ?? null,
-    state.check ?? null,
-    state.reproduce ?? null,
-    skinRows.map((row) => [row?.name, row?.label, row?.note]),
+    keyOf(state.writeNote ?? null),
+    state.check
+      ? [
+          keyOf(state.check.summary, MAX_PLAN_TEXT),
+          report?.ok,
+          report?.parseErrors,
+          keyOf(report?.reason ?? null, MAX_PLAN_TEXT),
+          keyOfList<{ name?: unknown; kind?: unknown; status?: unknown }>(report?.symbols, MAX_LIST_ROWS, (row) => [
+            keyOf(row?.name), keyOf(row?.kind), row?.status,
+          ]),
+          keyOfList<{ raw?: unknown; status?: unknown }>(report?.imports, MAX_LIST_ROWS, (row) => [keyOf(row?.raw), row?.status]),
+        ]
+      : null,
+    state.reproduce ? [state.reproduce.count, state.reproduce.done] : null,
+    keyOfList<SkinRow | undefined>(skins.SKINS, MAX_LIST_ROWS, (row) => [keyOf(row?.name), keyOf(row?.label), keyOf(row?.note)]),
   ]);
 }
 

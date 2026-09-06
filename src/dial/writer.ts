@@ -65,10 +65,41 @@
  * since a `../../..` entry in `reproduce` would otherwise copy any file the learner can read
  * into their project.
  *
- * The lexical half is all this can do — a contained path whose real location is elsewhere via
- * a symlink needs `realpath`, and T-4 put that gate in `src/extension.ts` beside its other
- * `fs` concerns. What this file *can* close, and does, is the write end of that hole: see the
- * note on rename below.
+ * That is the LEXICAL half, and on its own it is NOT containment. `resolveInsideTarget` is
+ * pure `path` arithmetic — it has to be, since `src/walk/session.ts` cannot import `fs` — so
+ * it answers "does this string stay under that string", and a string can lie about where it
+ * lands. A repository that commits a directory symlink, which git recreates on clone for free:
+ *
+ *     up -> ../outside
+ *     resolveInsideTarget(target, 'up/victim.txt')  ->  <target>/up/victim.txt   (contained!)
+ *     write there                                   ->  <outside>/victim.txt     (overwritten)
+ *
+ * gets past every lexical check intact, and `mkdirSync(…, { recursive: true })` then accepts
+ * the symlinked directory without complaint. That is T-5's security review finding 1, and it
+ * is not only a question of hostile repositories: pnpm makes every `node_modules/<pkg>` a
+ * directory symlink into a global store, and repo-tour classifies `node_modules` as vendored,
+ * which puts it straight into `plan.reproduce`. An ordinary learner with an ordinary lockfile
+ * can walk into this.
+ *
+ * So there is a second, FILESYSTEM half here, and it is the one that actually contains.
+ * `prepareDirectory` creates the destination's own directory and then asks the filesystem
+ * where that directory really is, requiring `realpath(dir)` to sit inside `realpath(target)`;
+ * `insideRealRoot` is its read-only twin for the reference side, which must not create
+ * anything. Creating the directory FIRST is the whole point rather than an implementation
+ * detail: a path that does not exist yet can only be guessed at, and the only directory worth
+ * an answer is the one the write is about to use.
+ *
+ * The two halves are kept apart rather than merged because they fail differently and are
+ * needed in different places. The lexical one is cheap, total, and available to code that
+ * cannot touch a disk — the session, the model, the panel — and it is what rejects `..` and an
+ * absolute path before anything is created at all. The filesystem one costs syscalls, can only
+ * answer about paths that exist, and belongs exactly here. Neither is redundant: a lexical
+ * pass with no `realpath` is the hole above, and a `realpath` pass with no lexical pass would
+ * cheerfully `mkdir -p` its way out of the target before it ever thought to look.
+ *
+ * A symlinked TARGET stays legitimate, and deliberately so — `/tmp` is a symlink on macOS and
+ * `os.tmpdir()` sits under one, so a learner building in a temp folder is the ordinary case,
+ * not the attack. The target is realpath'd too, and only links BELOW it are refused.
  *
  * ## A refusal is a VALUE, never a throw
  *
@@ -100,10 +131,20 @@
  *     recreates the symlink on clone so it costs the attacker nothing. A name that cannot be
  *     predicted cannot be pre-planted.
  *
- * `renameSync` also closes the same hole at the *destination*: rename replaces a symlink
- * rather than following it, so a planted `src/parse.ts -> ~/.bashrc` ends up overwritten with
- * a normal file instead of writing through to the target. Both properties are pinned by
- * tests, because both are invisible when they work.
+ * `renameSync` closes the same hole at the *destination*, and precisely that much: rename(2)
+ * replaces a symlink rather than following it, so a planted `src/parse.ts -> ~/.bashrc` ends
+ * up overwritten with an ordinary file instead of writing through to the target.
+ *
+ * That is the FINAL component, and nothing else. It says nothing about a symlinked DIRECTORY
+ * on the way there, because `mkdirSync(…, { recursive: true })` accepts one happily and
+ * rename(2) is then asked to replace a name that is already outside the folder — where it
+ * does its job perfectly and the file still lands in the wrong place. This header claimed the
+ * rename "closes the same hole" full stop until T-5's security review found otherwise, and
+ * the wrong sentence was the more expensive half of the bug: half a defence that documents
+ * itself as whole is worse than none, because it stops the next reader looking. The directory
+ * components are `prepareDirectory`'s job, above; the final component is rename's; neither
+ * covers the other, and all three properties are pinned by tests, because all three are
+ * invisible when they work.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -143,6 +184,141 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// ── containment, the half that needs a filesystem ───────────────────────────────────────────
+
+/**
+ * Where `p` really is, or `null` when the filesystem will not say — a broken link, a loop, a
+ * path that is not there, a directory nobody may traverse.
+ *
+ * `null` is deliberately not distinguished from any other failure here. Every caller below
+ * treats "cannot resolve" as a reason to stop rather than as an error to classify, because
+ * there is exactly one safe answer to "I could not find out where this write would land" and
+ * it is the same for all of them.
+ */
+function realOrNull(p: string): string | null {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * CREATES the directory `absPath` will be written into and proves it is really inside `root`.
+ * `null` means it is; anything else is a predicate phrase saying what is wrong, ready to be
+ * dropped into a caller's own sentence.
+ *
+ * This is the half `resolveInsideTarget` cannot do, and the failure it prevents is precise: a
+ * repository commits `up -> ../outside`, the plan names `up/victim.txt`, every lexical check
+ * agrees the path is contained, and the write lands in `outside/victim.txt` — overwriting
+ * whatever was there. `realpath` is the only thing that can tell those two apart, because the
+ * difference between them is not in the path, it is on the disk.
+ *
+ * **The order is the design**, and it is three steps rather than two:
+ *
+ *   1. the deepest ancestor that ALREADY exists is resolved and checked FIRST, before anything
+ *      is created. Skipping this would still refuse the write, but only after `mkdirSync(…,
+ *      { recursive: true })` had followed the planted link and made `<outside>/deep/` on its
+ *      way down. No bytes, but a hostile plan should not get to create so much as an empty
+ *      directory outside the folder the learner named, and a check that has already had a side
+ *      effect by the time it says no is not much of a check;
+ *   2. the directory is then created, because `realpath` can only answer about a path that
+ *      exists, and the question is not "where would a directory of that name be" but "where is
+ *      the directory I am about to write into";
+ *   3. and it is resolved AGAIN and used immediately, because anything resolved earlier is a
+ *      different question with the same shape. A check against a path the caller worked out
+ *      before it went off to ask the learner something is a check against the past. Step 3 is
+ *      the authoritative one; step 1 exists to keep step 2 from doing damage.
+ *
+ * Creating a directory is not writing the learner's file, and that distinction is what keeps
+ * this compatible with AC2: manual mode never reaches here at all (`planWrite` returns before
+ * it), and every caller that does reach it is one instruction away from writing. A refused
+ * destination therefore leaves at most an empty directory inside the learner's own folder —
+ * never anything at all outside it, which is the property that matters.
+ *
+ * Every filesystem failure is a refusal, not a shrug. `mkdirSync` throwing means the write was
+ * never going to work anyway; `realpath` throwing means we do not know where the write would
+ * go, and "somewhere I cannot name" is not a place to put a file.
+ */
+function prepareDirectory(root: string, absPath: string): string | null {
+  const dir = path.dirname(absPath);
+  const realRoot = realOrNull(root);
+  if (realRoot === null) {
+    return 'is meant for a folder the filesystem could not resolve, so where it would land is unknown';
+  }
+
+  // Step 1 — look before creating. Both sides are realpath'd, which is also what keeps a
+  // symlinked TARGET legitimate: `/tmp` is a symlink on macOS and `os.tmpdir()` sits under
+  // one, so comparing a resolved directory against an UNRESOLVED root would refuse every
+  // ordinary build in a temp folder and teach the next reader to delete the check.
+  const anchor = deepestExisting(dir);
+  const realAnchor = realOrNull(anchor);
+  if (realAnchor === null || resolveInsideTarget(realRoot, realAnchor) === null) {
+    return 'reaches outside the folder you are building in through a symlink';
+  }
+
+  // Step 2.
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    return `needs a folder that could not be created — ${messageOf(err)}`;
+  }
+
+  // Step 3 — the one that counts, on the directory that now exists.
+  const realDir = realOrNull(dir);
+  if (realDir === null) {
+    return 'has a destination the filesystem could not resolve, so where it would land is unknown';
+  }
+  if (resolveInsideTarget(realRoot, realDir) === null) {
+    return 'reaches outside the folder you are building in through a symlink';
+  }
+  return null;
+}
+
+/**
+ * The deepest ancestor of `dir` (including `dir`) that is there right now.
+ *
+ * `existsSync` rather than `lstatSync` on purpose: this is asked in order to be `realpath`'d,
+ * and a dangling symlink — which exists as a link but resolves to nothing — is a path
+ * `realpath` cannot answer about either. Walking past it lands on the last real directory
+ * above, which is checked instead, and `mkdirSync` then fails on the link with EEXIST and is
+ * reported. The loop terminates because `path.dirname` is its own fixed point at the root.
+ */
+function deepestExisting(dir: string): string {
+  let at = dir;
+  for (;;) {
+    if (fs.existsSync(at)) return at;
+    const up = path.dirname(at);
+    if (up === at) return at;
+    at = up;
+  }
+}
+
+/**
+ * Whether `absPath` really lives inside `root` — the READ-side twin of `prepareDirectory`,
+ * which must not create anything, since the reference repository is the learner's clone of
+ * somebody else's project and we have no business adding directories to it.
+ *
+ * The failure this prevents is the mirror image of the write one: a `reproduce` entry or a
+ * `target.file` of `vendor -> /home/you/.ssh` reads a file the learner can read and copies it
+ * into a project they are about to commit and push. Lexical containment cannot see it, for
+ * the same reason it cannot see the write.
+ *
+ * A path that will not resolve is answered `true`, and that is not a hole: `realpath` fails
+ * where `open` fails, so the caller's own read is about to fail too and will say so in words
+ * that are more use to a learner than this function's would be ("that file is not in the
+ * reference" beats "that file could not be resolved"). The one case that IS refused here is a
+ * root that will not resolve while the file does, because then there is nothing to compare
+ * against and a comparison against nothing must not come back "contained".
+ */
+function insideRealRoot(root: string, absPath: string): boolean {
+  const realPath = realOrNull(absPath);
+  if (realPath === null) return true;
+  const realRoot = realOrNull(root);
+  if (realRoot === null) return false;
+  return resolveInsideTarget(realRoot, realPath) !== null;
+}
+
 // ── reading the reference ───────────────────────────────────────────────────────────────────
 
 type ReferenceRead = { text: string } | WriteRefusal;
@@ -156,6 +332,13 @@ function readReference(refRoot: string, file: string): ReferenceRead {
   const abs = resolveInsideTarget(refRoot, file);
   if (abs === null) {
     return { refused: `${label(file)} points outside the reference repository, so there is nothing to copy from` };
+  }
+  // The lexical check above and this one are two different questions, and only the pair of
+  // them is containment: `vendor/keys` may sit under `refRoot` as a string while `vendor` is a
+  // symlink to somewhere in the learner's home directory, and the answer would then be shown
+  // in the panel and written into a folder that is about to be committed.
+  if (!insideRealRoot(refRoot, abs)) {
+    return { refused: `${label(file)} leaves the reference repository through a symlink, so there is nothing to copy from` };
   }
   let bytes: Buffer;
   try {
@@ -213,8 +396,17 @@ function symbolStepsOf(plan: PlanLike): StepLike[] {
  * unreadable or is not text, the plan's ranges are not ranges, or repo-tour has no grammar
  * for this file and a "scaffold" of it would hand over the answer rather than hide it.
  *
- * Nothing here consults the filesystem at the destination. Whether the file already exists,
- * and whether the learner has edited it, is the session's question (spec §5.4: never
+ * The ONE thing this consults the filesystem for at the destination is containment: the last
+ * act before handing back a write is `prepareDirectory`, which creates the destination's
+ * directory and proves that directory is really inside the target (see the header — the
+ * lexical check above cannot see a symlink, and a symlinked directory is how a repository
+ * turns a contained path into a write outside the folder). It is the last act rather than the
+ * first so that a plan refused for any OTHER reason — an unreadable reference, ranges that are
+ * not ranges, a language repo-tour cannot stub — leaves the learner's folder exactly as it
+ * found it.
+ *
+ * Nothing else here consults the filesystem at the destination. Whether the file already
+ * exists, and whether the learner has edited it, is the session's question (spec §5.4: never
  * overwrite a learner's edits silently) and it needs a prompt, which needs `vscode`.
  */
 export function planWrite(
@@ -237,7 +429,18 @@ export function planWrite(
   const read = readReference(refRoot, file);
   if ('refused' in read) return read;
 
-  if (dial === 'automated') return { path: dest, content: read.text };
+  // Every `return` below that carries bytes goes through here and none may go around it: this
+  // is the filesystem half of containment, and the reason it is a closure rather than three
+  // copies of two lines is that three copies is how the fourth return gets added without one.
+  const settled = (content: string): WritePlan => {
+    const wrong = prepareDirectory(target, dest);
+    if (wrong !== null) {
+      return { refused: `${label(String(file))} ${wrong} — nothing was written` };
+    }
+    return { path: dest, content };
+  };
+
+  if (dial === 'automated') return settled(read.text);
 
   const loadBearing = loadBearingOf(step);
   if (loadBearing === null) {
@@ -246,7 +449,7 @@ export function planWrite(
   // Nothing load-bearing means the plan says the whole file is boilerplate, and boilerplate is
   // copied verbatim in every position that writes at all. Short-circuiting also keeps a file
   // whose language has no grammar working in the one case where the grammar is irrelevant.
-  if (loadBearing.length === 0) return { path: dest, content: read.text };
+  if (loadBearing.length === 0) return settled(read.text);
 
   const language = languageOf(file);
   if (language === undefined) {
@@ -256,7 +459,7 @@ export function planWrite(
   }
 
   const questions = stubQuestionsFor(step, symbolStepsOf(plan));
-  return { path: dest, content: core.stubFile(read.text, loadBearing, language, questions) };
+  return settled(core.stubFile(read.text, loadBearing, language, questions));
 }
 
 // ── the shape of a file the learner is about to write themselves (AC2) ──────────────────────
@@ -319,6 +522,49 @@ function importLines(lines: string[], language: string | undefined): string[] {
 }
 
 /**
+ * How long one line of a shape may be, and how many lines a list may hold (T-5 security
+ * review, finding 6).
+ *
+ * Both lists are lifted VERBATIM off a file in a repository nobody here has read, and neither
+ * has a natural bound. "The first line of a load-bearing range" is a whole minified bundle
+ * when the file is minified — one line, megabytes long — and `plan.json` decides how many
+ * ranges there are. The panel renders both lists at the PROSE cap of 20,000 characters across
+ * up to 200 rows, so an uncapped shape hands `src/walk/step-view.ts` up to eight megabytes of
+ * HTML to build, escape and push through a webview message, for one manual step.
+ *
+ * Capping it at the SOURCE is the fix rather than capping it at the panel, because the panel
+ * is not the only consumer — the step protocol carries a `shape`, `stepRenderKey` hashes one,
+ * and every future reader of a `FileShape` would need to remember the same cap. A value that
+ * cannot be enormous is easier to hold than a rule that it must not be rendered enormous.
+ *
+ * 400 characters is `step-view.ts`'s `MAX_CHECK_TEXT`, the cap it already uses for a line of
+ * code rather than a paragraph of prose, and a signature that does not fit in 400 characters
+ * was not going to teach anybody anything anyway. 100 lines is comfortably more than any real
+ * file's imports or load-bearing ranges and comfortably under the panel's own 200-row cap, so
+ * the announcement below survives the panel's slice instead of being the row it drops.
+ *
+ * Both caps are ANNOUNCED, never silent, which is the same rule `MAX_OPTIONS_RENDERED` and
+ * `MAX_NAMES_LISTED` follow: a learner comparing the panel against the reference must be able
+ * to see that they are looking at part of it. Silence here would read as "that is the whole
+ * import list", and they would go looking for their mistake in the wrong place.
+ */
+const MAX_SHAPE_LINE = 400;
+const MAX_SHAPE_LINES = 100;
+
+/** One list of shape lines, bounded in both directions, saying so where it had to cut. */
+function boundShape(lines: string[]): string[] {
+  const shown = lines.slice(0, MAX_SHAPE_LINES).map((line) => (
+    line.length <= MAX_SHAPE_LINE
+      ? line
+      : `${line.slice(0, MAX_SHAPE_LINE)}… (${line.length} characters in the reference, shortened here)`
+  ));
+  if (lines.length > MAX_SHAPE_LINES) {
+    shown.push(`… and ${lines.length - MAX_SHAPE_LINES} more, not shown`);
+  }
+  return shown;
+}
+
+/**
  * What manual mode shows instead of a file (AC2): the signature line of each load-bearing
  * range, and the imports the reference file opens with.
  *
@@ -343,7 +589,10 @@ export function fileShape(refRoot: string, step: StepLike): FileShape {
     .map((startLine) => (lines[startLine - 1] ?? '').trim())
     .filter((line) => line.length > 0);
 
-  return { signatures, imports: importLines(lines, languageOf(file)) };
+  return {
+    signatures: boundShape(signatures),
+    imports: boundShape(importLines(lines, languageOf(file))),
+  };
 }
 
 // ── the files that are never taught (AC6) ───────────────────────────────────────────────────
@@ -390,6 +639,14 @@ export function reproduceFiles(plan: PlanLike, refRoot: string, target: string):
       problems.push(`${label(entry)}: refused — it points outside the folder you are building in`);
       continue;
     }
+    // The read end, on the filesystem this time. This list is where the non-adversarial case
+    // actually bites: pnpm makes `node_modules/<pkg>` a directory symlink into a global store
+    // and repo-tour classifies `node_modules` as vendored, so `reproduce` is the entry point a
+    // perfectly ordinary project walks in through.
+    if (!insideRealRoot(refRoot, from)) {
+      problems.push(`${label(entry)}: refused — it leaves the reference repository through a symlink`);
+      continue;
+    }
     let bytes: Buffer;
     try {
       bytes = fs.readFileSync(from);
@@ -397,8 +654,19 @@ export function reproduceFiles(plan: PlanLike, refRoot: string, target: string):
       problems.push(`${label(entry)}: could not be read from the reference — ${messageOf(err)}`);
       continue;
     }
+    // And the write end. Refusing ONE entry rather than abandoning the list is the whole shape
+    // of this function: a single vendored symlink in a lockfile's neighbourhood must not cost
+    // the learner every other file they are owed.
+    const wrong = prepareDirectory(target, to);
+    if (wrong !== null) {
+      problems.push(`${label(entry)}: refused — it ${wrong}`);
+      continue;
+    }
     try {
-      writeBytesAtomic(to, bytes);
+      // `target` again, on purpose. `prepareDirectory` has just answered the question, and
+      // `writeBytesAtomic` asks it a second time immediately before the bytes move — see its
+      // own note on why the second ask is the one that counts.
+      writeBytesAtomic(to, bytes, target);
     } catch (err) {
       problems.push(`${label(entry)}: could not be written — ${messageOf(err)}`);
     }
@@ -411,20 +679,46 @@ export function reproduceFiles(plan: PlanLike, refRoot: string, target: string):
 
 /**
  * Writes `content` to `absPath` durably: a temp file beside it, then a rename over the real
- * name. See this file's header for both halves of why (atomicity, and the two symlink holes
- * the random suffix and the rename close between them).
+ * name. See this file's header for every half of why — atomicity, the random suffix, and
+ * exactly how much of the symlink problem the rename does and does not solve.
  *
- * Throws on a real filesystem failure — a full disk, a read-only folder — rather than
- * reporting, because unlike a refused path there is nothing to explain to the learner about
- * their plan and nothing they did wrong. The session catches it and says so through
- * `reportError`, which is what that adapter is for.
+ * `root` is the folder `absPath` must really be inside, and passing it is what makes this the
+ * LAST word on containment rather than a repetition of an earlier one. `prepareDirectory` runs
+ * again here, after the directory exists and immediately before the bytes move, because a
+ * containment answer has a shelf life: `planWrite` proves the destination and then the session
+ * may go and ask the learner whether to overwrite their own file, and a human takes as long as
+ * a human takes. Re-asking at the last instant costs two syscalls and closes that window.
+ *
+ * It is optional only because a caller may honestly not have a root to name — a test writing
+ * into its own temp folder, say — and a parameter that could be filled in with a lie would be
+ * worse than one that can be left out. Every caller that HAS a root passes it: `reproduceFiles`
+ * does, directly below. `src/walk/session.ts` calls this with the destination `planWrite`
+ * already proved and no root, so its writes are covered by that proof plus rename(2)'s
+ * protection of the final component — everything a committed symlink can do — and are open
+ * only to a concurrent local process swapping a directory inside the target during the prompt.
+ * Handing `this.target` in as the third argument closes that too, and should.
+ *
+ * Throws on a real filesystem failure — a full disk, a read-only folder — and on a refused
+ * destination, rather than reporting, because this is the primitive and not the decision: the
+ * session catches it, shows the learner the sentence and reports through `reportError`, which
+ * is what that adapter is for. The decision that a learner is *entitled to a refusal in words*
+ * is made where the destination is chosen, in `planWrite` and `reproduceFiles`, both of which
+ * hand back a value rather than throwing into a `void`ed promise.
  */
-export function writeTextAtomic(absPath: string, content: string): void {
-  writeBytesAtomic(absPath, Buffer.from(content, 'utf8'));
+export function writeTextAtomic(absPath: string, content: string, root?: string): void {
+  writeBytesAtomic(absPath, Buffer.from(content, 'utf8'), root);
 }
 
-function writeBytesAtomic(absPath: string, bytes: Buffer): void {
-  fs.mkdirSync(path.dirname(absPath), { recursive: true });
+function writeBytesAtomic(absPath: string, bytes: Buffer, root?: string): void {
+  if (root === undefined) {
+    fs.mkdirSync(path.dirname(absPath), { recursive: true });
+  } else {
+    const wrong = prepareDirectory(root, absPath);
+    // Deliberately not silent, and deliberately not clamped into the target either. A write
+    // that lands somewhere else is the failure; a write that lands somewhere else *than the
+    // caller was told* is the same failure with the evidence removed.
+    if (wrong !== null) throw new Error(`${path.basename(absPath)} ${wrong} — nothing was written`);
+  }
   const tmp = `${absPath}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     fs.writeFileSync(tmp, bytes);

@@ -239,6 +239,8 @@ function fakeGit(log: Call[], options: FakeOptions): GitRunner {
 function fakeAdapters(options: FakeOptions = {}): Fake {
   const plan = options.plan ?? fixturePlan();
   const target = options.target ?? TARGET;
+  /** Whether this fake is pointed at a real folder — see `fileExists`. */
+  const onDisk = options.target !== undefined;
   const missing = new Set((options.missing ?? []).map((rel) => path.join(target, rel)));
   const saved = new Map<string, Progress>();
   if (options.progress) saved.set(target, options.progress);
@@ -255,7 +257,14 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
     reportError: (message) => { log.push({ fn: 'reportError', message }); },
     fileExists: (absPath) => {
       log.push({ fn: 'fileExists', absPath });
-      return !missing.has(absPath);
+      if (missing.has(absPath)) return false;
+      // A REAL target is answered from the real disk, exactly as `src/extension.ts` wires this
+      // (`fs.existsSync`), and the in-memory `TARGET` from the table above. The split is not a
+      // convenience: T-5's suites write files into a folder DURING a pass, and "does this file
+      // exist" changes its answer in the middle of one. A fake that said `true` throughout
+      // could not tell a step whose file the dial just created from one that was already there
+      // — which is precisely the difference the reveal turns on (code review finding 2).
+      return onDisk ? fs.existsSync(absPath) : true;
     },
     loadPlan: (loadTarget) => {
       log.push({ fn: 'loadPlan', target: loadTarget });
@@ -902,10 +911,14 @@ suite('a plan with no steps at all — the honest empty case', () => {
  * session intended; and the overwrite prompt's whole subject is a file the learner has edited
  * on disk.
  *
- * So the destination is real, and `readText` is wired here EXACTLY as `src/extension.ts` wires
- * it. What stays faked is repo-tour's core and `git` — see `fakeCore` and `fakeGit` for why
- * each is a fake rather than a weaker version of the real thing, and which suite owns the real
- * one instead.
+ * So the destination is real, and both of the adapters that ASK about it — `readText` and
+ * `fileExists` — are wired here exactly as `src/extension.ts` wires them (`readFileSync`,
+ * `existsSync`). `fileExists` matters as much as `readText` and for the same reason: "is this
+ * file there" changes its answer in the MIDDLE of an entry pass, and a fake answering from a
+ * table cannot tell a file the dial just created from one that was there all along — which is
+ * the difference the reveal turns on (code review finding 2). What stays faked is repo-tour's
+ * core and `git` — see `fakeCore` and `fakeGit` for why each is a fake rather than a weaker
+ * version of the real thing, and which suite owns the real one instead.
  */
 suite('the dial, the check and the commit (T-5)', () => {
   /** Holds both trees, so a reference and a target are siblings the way they really are. */
@@ -1196,12 +1209,13 @@ suite('the dial, the check and the commit (T-5)', () => {
       assert.equal(fake.stored()?.steps['st-2-file-parse']?.status, 'done',
         'an automated step has no check to pass — the file IS the reference, so arriving with it written is what completing it means');
       assert.deepEqual(pick(fake, 'git').map((call) => call.args), [
+        ['rev-parse', '--is-inside-work-tree'],
         ['init', '-q'],
         ['config', 'user.name'],
         ['config', 'user.email'],
         ['add', '--', path.join(target, 'src/parse.ts')],
-        ['commit', '-q', '-m', STEP_2_SUBJECT],
-      ], 'exactly the file this step wrote is staged — a second file sitting untouched in the same folder never rides along');
+        ['commit', '-q', '-m', STEP_2_SUBJECT, '--', path.join(target, 'src/parse.ts')],
+      ], 'the step\'s own file, and the commit NAMES it rather than taking whatever the index holds — what that pathspec actually commits is proven against real git in dial-commit.test.ts, since an argv assertion against a fake can only ever show what was asked for');
     });
 
     test('re-entering a step already written writes nothing, says nothing, and commits nothing more', async () => {
@@ -1218,6 +1232,68 @@ suite('the dial, the check and the commit (T-5)', () => {
       assert.deepEqual(pick(fake, 'confirmOverwrite'), [], 'identical content is not a conflict');
       assert.equal(session.getView()?.writeNote, undefined,
         'and a re-entered step must not re-announce a write that happened ten clicks ago');
+    });
+  });
+
+  /**
+   * Code review finding 2. `refresh(true)` — the only path that reaches `revealEditor` — runs
+   * inside `goTo`/`open`, which is BEFORE the entry pass has written anything: `fileExists` is
+   * false at that moment, so the session calls `clearEditor()`, and every push after the write
+   * lands is `refresh(false)`. So in scaffolded and automated — the two positions this ticket
+   * exists for — the first arrival at every `file` step blanked the editor's decorations, wrote
+   * the file, told the learner it had been written for them, and showed them nothing. AC4 asks
+   * for reveal + decoration on the automated path.
+   */
+  suite('the reveal the write earns (AC4, code review finding 2)', () => {
+    test('the arrival that writes the file is the arrival that reveals it', async () => {
+      const { session, fake } = await walking({ dial: 'automated' });
+
+      assert.deepEqual(pick(fake, 'revealEditor').map((call) => call.view.step.id), ['st-2-file-parse'],
+        'nothing existed to reveal when the walk arrived, so the pass that made the file exist is the only thing that can show it');
+      assert.equal(pick(fake, 'revealEditor')[0]?.view.fileExists, true);
+      assert.deepEqual(fake.names().filter((fn) => fn === 'clearEditor' || fn === 'revealEditor'),
+        ['clearEditor', 'revealEditor'],
+        'the clear was honest — there really was nothing there yet — and it is not the end of the story');
+      assert.match(session.getView()?.writeNote ?? '', /written for you/,
+        'the sentence and the reveal describe the same moment: the panel saying so over an editor showing nothing is the whole of finding 2');
+    });
+
+    test('a step re-entered is revealed by the NAVIGATION, and not a second time by the pass', async () => {
+      const { session, fake } = await walking({ dial: 'automated' });
+      fake.clearLog();
+
+      session.goTo('st-2-file-parse');
+      await session.settled();
+
+      assert.equal(pick(fake, 'revealEditor').length, 1,
+        'the file is there, so goTo reveals it and the pass has nothing to add — re-centring the editor under a learner reading it is the jank setDial\'s no-reveal rule exists to avoid');
+    });
+
+    test('Keep mine reveals nothing of its own — what is on screen is still the learner\'s file', async () => {
+      writeTarget('src/parse.ts', 'export function tokenize() {\n  return [];  // my own attempt\n}\n');
+      const { fake } = await walking({ dial: 'automated', overwrite: false });
+
+      assert.equal(pick(fake, 'revealEditor').length, 1, 'the arrival\'s own: the file existed all along');
+      assert.deepEqual(pick(fake, 'clearEditor'), []);
+    });
+
+    test('a pass the walk has already moved PAST writes its file and reveals nothing', async () => {
+      const { session, fake } = await walking({
+        dial: 'automated',
+        plan: asFileStep('st-3-symbol-handle', 'st-4-symbol-render'),
+      });
+      fake.clearLog();
+
+      session.next();
+      session.next();
+      await session.settled();
+
+      assert.deepEqual(pick(fake, 'revealEditor').map((call) => call.view.step.id), ['st-4-symbol-render'],
+        'a deferred pass still writes its own step\'s file, but the reveal is about where the LEARNER is — dragging the editor onto a step they have walked past is not a fix for finding 2 but a second bug');
+      assert.deepEqual(fake.names().filter((fn) => fn === 'clearEditor' || fn === 'revealEditor'),
+        ['clearEditor', 'clearEditor', 'revealEditor'],
+        'one clear per arrival at a file not written yet, and then the one reveal — a pass that refreshed WITH a reveal from behind the walk would clear the decorations off the step the learner is actually on, since `refresh` reveals whatever is current');
+      assert.ok(sameBytes('src/api/routes.ts'), 'and the pass it belonged to still did its work');
     });
   });
 
@@ -1286,6 +1362,56 @@ suite('the dial, the check and the commit (T-5)', () => {
       await session.settled();
       assert.equal(pick(fake, 'confirmOverwrite').length, 1,
         'the file now matches, so the second pass has nothing to ask about in the first place');
+    });
+
+    /**
+     * Code review finding 5. The remembered answer was keyed by `${step.id} ${absPath}` and
+     * nothing else, so it also answered an explicit `dial:set` on that very step — and one
+     * *Keep mine* therefore killed the dial for that step for the rest of the session,
+     * contradicting the promise `setDial` makes in its own header ("drag it to automated and
+     * the file should be there"). A learner who dismissed the modal once had no way back short
+     * of reloading the window.
+     */
+    test('one Keep mine does not kill the dial: an explicit dial change on that step may ask again', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      const { session, fake } = await walking({ dial: 'automated', overwrite: false });
+      assert.equal(pick(fake, 'confirmOverwrite').length, 1, 'the arrival asked, and was told to keep');
+
+      // The tree re-firing `goTo` is still answered from memory — that is the rule, and it is
+      // the reason `prompted` exists at all.
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      assert.equal(pick(fake, 'confirmOverwrite').length, 1);
+
+      // Moving the control is not the tree re-firing. It is a person asking for something.
+      session.setDial('st-2-file-parse', 'scaffolded');
+      await session.settled();
+
+      assert.equal(pick(fake, 'confirmOverwrite').length, 2,
+        'the prompt-once rule is about the entry pass the tree re-fires, never about a new deliberate gesture');
+      assert.equal(readTarget('src/parse.ts'), LEARNER_VERSION, 'and Keep mine, said twice, still means keep mine');
+    });
+
+    test('and the second answer is obeyed — Overwrite after a Keep really writes', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      let answer = false;
+      const plan = fixturePlan();
+      const fake = fakeAdapters({
+        plan,
+        target,
+        request: request('automated'),
+        progress: setCurrent(emptyProgress(plan), 'st-2-file-parse'),
+      });
+      const session = WalkSession.open(target, { ...fake.adapters, confirmOverwrite: () => Promise.resolve(answer) });
+      await session.settled();
+      assert.equal(readTarget('src/parse.ts'), LEARNER_VERSION, 'kept, as they asked the first time');
+
+      answer = true;
+      session.setDial('st-2-file-parse', 'automated');
+      await session.settled();
+
+      assert.ok(sameBytes('src/parse.ts'),
+        'drag it to automated and the file should be there — an answer remembered past the gesture it was given for is a dial that does nothing');
     });
   });
 
@@ -1429,7 +1555,7 @@ suite('the dial, the check and the commit (T-5)', () => {
       session.runCheck();
       await session.settled();
 
-      assert.deepEqual(pick(fake, 'git').map((call) => call.args[0]), ['init', 'config', 'config'],
+      assert.deepEqual(pick(fake, 'git').map((call) => call.args[0]), ['rev-parse', 'init', 'config', 'config'],
         'it never reaches commit — a tutorial inventing an author on a repository the learner will keep and push is graffiti with a signature');
       assert.match(session.getView()?.writeNote ?? '', /was not committed/);
       assert.equal(pick(fake, 'reportError').length, 1);
@@ -1447,6 +1573,21 @@ suite('the dial, the check and the commit (T-5)', () => {
 
       assert.equal(fake.stored()?.steps['st-2-file-parse']?.status, 'done', 'the step passed; only the bookkeeping failed');
       assert.match(session.getView()?.writeNote ?? '', /index\.lock/);
+    });
+
+    test('a refusal that is not about an identity does not tell them to configure one (code review finding 8)', async () => {
+      const { session, fake } = await walking({
+        dial: 'scaffolded',
+        gitFails: 'fatal: Unable to create \'.git/index.lock\': File exists.',
+      });
+      session.runCheck();
+      await session.settled();
+
+      const message = pick(fake, 'reportError')[0]?.message ?? '';
+      assert.equal(pick(fake, 'reportError').length, 1);
+      assert.match(message, /index\.lock/, 'the reason is the half they can act on, so it is carried either way');
+      assert.doesNotMatch(message, /git config/,
+        '"set git config user.name" is an instruction that fixes nothing here, and it points them away from the sentence that says what actually happened');
     });
   });
 
@@ -1511,6 +1652,112 @@ suite('the dial, the check and the commit (T-5)', () => {
       assert.deepEqual(pick(fake, 'saveProgress'), []);
       assert.match(session.getView()?.writeNote ?? '', /already been copied/);
     });
+
+    /**
+     * Security review finding 3 / code review finding 6. `reproduceFiles` overwrote whatever it
+     * found, with no comparison and no count — from `applyDial` (so: on open, and on every
+     * `goTo` in automated mode) and from a palette command that is always available. The case
+     * is not exotic: the learner runs `npm install` in the target to try the app — which the
+     * spec leaves to them on purpose — and the next reproduce silently replaces their
+     * `package-lock.json`. `reproduce`'s files are the learner's to have edited like any other.
+     */
+    suite('a generated file the learner has since changed (security review finding 3)', () => {
+      const MY_LOCKFILE = '{ "lockfileVersion": 3, "packages": { "": { "name": "mine" } } }\n';
+
+      test('the press that would replace one copies nothing, and says how many and which', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const { session, fake } = await walking({ dial: 'manual', plan: planWithReproduce() });
+        fake.clearLog();
+
+        session.reproduce();
+        await session.settled();
+
+        assert.equal(readTarget('package-lock.json'), MY_LOCKFILE, 'not one byte of theirs');
+        assert.deepEqual(tree(target), ['package-lock.json'],
+          'the list is copied as ONE act and recorded as one instant, so it is held as one too');
+        assert.match(session.getView()?.writeNote ?? '', /Nothing was copied/);
+        assert.match(session.getView()?.writeNote ?? '', /package-lock\.json/, 'named, not counted at them');
+        assert.equal(fake.stored()?.reproduced, undefined, 'nothing happened, so nothing is recorded as having');
+        assert.deepEqual(session.getView()?.reproduce, { count: 2, done: false },
+          'and the offer stays on the page, which is how they say yes');
+      });
+
+      test('the press after that is the gesture, and it replaces them', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const { session, fake } = await walking({ dial: 'manual', plan: planWithReproduce() });
+
+        session.reproduce();
+        await session.settled();
+        session.reproduce();
+        await session.settled();
+
+        assert.ok(sameBytes('package-lock.json'), 'asked with the count in front of them, and answered');
+        assert.deepEqual(tree(target), ['dist/bundle.js', 'package-lock.json'], 'and the rest of the list came with it');
+        assert.match(session.getView()?.writeNote ?? '', /was replaced/);
+        assert.notEqual(fake.stored()?.reproduced, undefined);
+      });
+
+      test('a file that already holds the reference\'s bytes is not a replacement and is never mentioned', async () => {
+        writeTarget('package-lock.json', fs.readFileSync(path.join(refRoot, 'package-lock.json'), 'utf8'));
+        const { session } = await walking({ dial: 'manual', plan: planWithReproduce() });
+
+        session.reproduce();
+        await session.settled();
+
+        assert.deepEqual(tree(target), ['dist/bundle.js', 'package-lock.json'],
+          'the identical-bytes short-circuit writeFile has always had, on this path too: one press, no warning about a file nobody is losing');
+        assert.equal(session.getView()?.writeNote, undefined);
+      });
+
+      test('two binaries that DECODE the same are not identical — a lossy read is no evidence at all', async () => {
+        // The premise, proven rather than assumed, exactly as the AC6 acceptance run proves its
+        // own byte comparison: 0xff and 0xfe are both invalid UTF-8 starts, so both decode to
+        // U+FFFD and a STRING comparison cannot tell these two files apart.
+        const reference = fs.readFileSync(path.join(refRoot, 'dist/bundle.js'));
+        const mine = Buffer.from(reference);
+        mine[1] = 0xfe; // was 0xff
+        assert.notDeepEqual(mine, reference, 'the bytes really do differ');
+        assert.equal(mine.toString('utf8'), reference.toString('utf8'), 'and a decode really cannot see it');
+        fs.mkdirSync(path.join(target, 'dist'), { recursive: true });
+        fs.writeFileSync(path.join(target, 'dist/bundle.js'), mine);
+
+        const { session } = await walking({ dial: 'manual', plan: planWithReproduce() });
+        session.reproduce();
+        await session.settled();
+
+        assert.ok(fs.readFileSync(path.join(target, 'dist/bundle.js')).equals(mine),
+          'a decode that lost something is not proof the bytes match — and reproduce is the one path that carries files which are not text at all');
+        assert.match(session.getView()?.writeNote ?? '', /dist\/bundle\.js/);
+      });
+
+      test('an arrival in automated mode is not a gesture: it copies nothing and says so alongside its own write', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const { session, fake } = await walking({ dial: 'automated', plan: planWithReproduce() });
+
+        assert.equal(readTarget('package-lock.json'), MY_LOCKFILE, 'this pass ran on activation, with no gesture anywhere near it');
+        assert.deepEqual(tree(target), ['package-lock.json', 'src/parse.ts'],
+          'the STEP\'s own file is still written — the dial is what the learner asked for; the never-taught list is not');
+        assert.equal(fake.stored()?.reproduced, undefined);
+        assert.match(session.getView()?.writeNote ?? '', /package-lock\.json/);
+        assert.match(session.getView()?.writeNote ?? '', /written for you/,
+          'one line, both sentences: the pass has something to say about the step\'s file AND about the files nobody asked about');
+      });
+
+      test('said once, not once per step — the offer carries the count for as long as it stands', async () => {
+        writeTarget('package-lock.json', MY_LOCKFILE);
+        const plan: PlanLike = { ...asFileStep('st-3-symbol-handle'), reproduce: ['package-lock.json', 'dist/bundle.js'] };
+        const { session } = await walking({ dial: 'automated', plan });
+        assert.match(session.getView()?.writeNote ?? '', /Nothing was copied/, 'said on the first automated step');
+
+        session.next();
+        await session.settled();
+
+        assert.doesNotMatch(session.getView()?.writeNote ?? '', /Nothing was copied/,
+          'a standing condition with a button next to it is stated once, the same rule the core and the commit notices follow');
+        assert.match(session.getView()?.writeNote ?? '', /routes\.ts was written for you/);
+        assert.equal(readTarget('package-lock.json'), MY_LOCKFILE);
+      });
+    });
   });
 
   // ── the plumbing the asynchronous half adds ────────────────────────────────────────────────
@@ -1543,6 +1790,97 @@ suite('the dial, the check and the commit (T-5)', () => {
       assert.deepEqual(pick(fake, 'coreCheck'), [],
         'a replaced session must not answer a stale click by driving surfaces the new one has already claimed');
       assert.deepEqual(pick(fake, 'saveProgress'), []);
+    });
+
+    /**
+     * Code review finding 3. `enqueue` re-guards a job that has not STARTED; `applyDial`
+     * re-guards itself at three points after its awaits; `applyCheck` re-guarded NOWHERE,
+     * across `await core()` and a two-parse structural check. A disposed session then wrote
+     * `progress.json`, repainted all three surfaces — undoing the clear `dispose()` had just
+     * pushed, or painting over the replacement session's view — and ran git. `openWalkAt`
+     * disposes and re-opens on the same folder and `deactivate()` disposes, so this is an
+     * ordinary gesture rather than a race anyone has to construct.
+     */
+    suite('a check whose session goes away mid-flight (code review finding 3)', () => {
+      /** A session that disposes ITSELF at a chosen point inside the check — the one thing an
+       *  `await` cannot see for itself — with the opening pass already settled and forgotten,
+       *  so everything the assertions read describes the check alone. */
+      async function checkDisposedDuring(work: 'the core load' | 'the parse' | 'the commit'): Promise<Fake> {
+        const plan = fixturePlan();
+        const fake = fakeAdapters({
+          plan,
+          target,
+          // Scaffolded for the commit case: an automated step is marked done by its own entry
+          // pass, and `commitFor` runs once per step — so a check pressed on one has nothing
+          // left to commit and the window would never open.
+          request: request(work === 'the commit' ? 'scaffolded' : 'automated'),
+          progress: setCurrent(emptyProgress(plan), 'st-2-file-parse'),
+          // Only the commit case needs a failing git: a commit that SUCCEEDS has nothing left
+          // to say, so a session disposed under it would look identical either way.
+          ...(work === 'the commit' ? { gitFails: 'fatal: Unable to create \'.git/index.lock\': File exists.' } : {}),
+        });
+        const walk: { session?: WalkSession } = {};
+        let armed = false;
+        walk.session = WalkSession.open(target, {
+          ...fake.adapters,
+          git: (args, cwd) => {
+            if (armed && work === 'the commit' && args[0] === 'commit') walk.session?.dispose();
+            return fake.adapters.git(args, cwd);
+          },
+          core: async () => {
+            const core = await fake.adapters.core();
+            if (!armed || !core || work === 'the commit') return core;
+            if (work === 'the core load') {
+              walk.session?.dispose();
+              return core;
+            }
+            return {
+              ...core,
+              check: (learnerSource, extract, language, relPath) => {
+                walk.session?.dispose();
+                return core.check(learnerSource, extract, language, relPath);
+              },
+            };
+          },
+        });
+        await walk.session.settled();
+        armed = true;
+        fake.clearLog();
+        walk.session.runCheck();
+        await walk.session.settled();
+        return fake;
+      }
+
+      test('disposed while the core is loading: nothing persisted, nothing repainted, no git', async () => {
+        const fake = await checkDisposedDuring('the core load');
+
+        assert.deepEqual(pick(fake, 'saveProgress'), []);
+        assert.deepEqual(pick(fake, 'git'), []);
+        assert.deepEqual(pick(fake, 'coreCheck'), [],
+          'it does not go on parsing the learner\'s file either — the earlier the check, the less work a dead session does');
+        assert.deepEqual(pushedSteps(fake, 'setPanel'), [undefined],
+          'the only push after the log was cleared is dispose\'s own "show nothing" — a repaint here undoes it, or paints over the session that replaced this one');
+      });
+
+      test('disposed inside the structural check itself — the widest window on this path', async () => {
+        const fake = await checkDisposedDuring('the parse');
+
+        assert.equal(pick(fake, 'coreCheck').length, 1, 'the parse really ran: this is disposal DURING the work, not before it');
+        assert.deepEqual(pick(fake, 'saveProgress'), [],
+          'the one-liner the handoff proposed for this — a disposed check at the top of refresh — would not have reached it, because commit PERSISTS before it refreshes');
+        assert.deepEqual(pick(fake, 'git'), [], 'and commitFor runs after the refresh, so it would not have reached that either');
+        assert.deepEqual(pushedSteps(fake, 'setPanel'), [undefined]);
+      });
+
+      test('disposed inside the commit git runs — the window the handoff flagged and left open', async () => {
+        const fake = await checkDisposedDuring('the commit');
+
+        assert.notDeepEqual(pick(fake, 'git'), [], 'the check passed and the commit was really attempted');
+        assert.deepEqual(pick(fake, 'reportError'), [],
+          'a refusal has nobody left to tell: the panel it would be shown in belongs to whatever comes next');
+        assert.deepEqual(pushedSteps(fake, 'setPanel').slice(-1), [undefined],
+          'and the last thing the panel was handed is still dispose\'s "show nothing"');
+      });
     });
 
     test('moving the dial on the step in front of the learner applies it at once', async () => {

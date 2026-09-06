@@ -1417,6 +1417,53 @@ suite('renderStepHtml — the write note, and the reproduce offer (AC6)', () => 
  *     would change" degrades to "repaint always", which is T-4 code review finding 1 back
  *     again, and the learner loses the radio holding keyboard focus on every dial click.
  */
+suite('stepRenderKey is BOUNDED, and still tells apart anything the page can show', () => {
+  // T-5 security review, finding 5. The key is computed on EVERY push, not once per load, and
+  // it used to `JSON.stringify` the raw step and the whole check report — so a plan with
+  // megabyte strings made every navigation build a megabyte string, inside the decision about
+  // whether to paint. Capping alone would have been the wrong fix: two plans differing only
+  // past the cap render identically, but their "…and N more" lines do not, so the key has to
+  // keep telling them apart. It carries the capped value AND the true length.
+
+  function hostile(): StepViewState {
+    const state = stateAt('st-2-file-parse');
+    const huge = 'x'.repeat(2_000_000);
+    state.step.decision.question = huge;
+    state.step.decision.why = huge;
+    state.step.decision.options = Array.from({ length: 5_000 }, (_, i) => ({
+      id: `opt-${i}`, label: huge, consequence: huge, taken: i === 0,
+    }));
+    return state;
+  }
+
+  test('a two-million-character plan with five thousand options makes a small key', () => {
+    const key = stepRenderKey(hostile(), FAKE_SKINS);
+    assert.ok(key.length < 200_000, `the key must be bounded by the caps, not by the plan (got ${key.length})`);
+  });
+
+  test('and it is still a different key from the same plan with one character changed past the cap', () => {
+    // The property the raw version was protecting, kept: length is what carries it, and
+    // `String.prototype.length` is O(1), so keeping it costs nothing.
+    const a = hostile();
+    const b = hostile();
+    b.step.decision.why = `${b.step.decision.why}!`;
+    assert.notEqual(stepRenderKey(a, FAKE_SKINS), stepRenderKey(b, FAKE_SKINS), 'a longer why renders a different page');
+
+    const c = hostile();
+    c.step.decision.options = c.step.decision.options.slice(0, 4_999);
+    assert.notEqual(stepRenderKey(a, FAKE_SKINS), stepRenderKey(c, FAKE_SKINS), 'one fewer option changes the "not shown" count');
+  });
+
+  test('an oversized check report does not blow the key up either', () => {
+    const state = stateAt('st-2-file-parse');
+    state.check = {
+      summary: 'y'.repeat(1_000_000),
+      report: report({ symbols: Array.from({ length: 20_000 }, (_, i) => ({ name: 'z'.repeat(500), kind: `k${i}`, status: 'missing' as const })) }),
+    };
+    assert.ok(stepRenderKey(state, FAKE_SKINS).length < 200_000);
+  });
+});
+
 suite('stepRenderKey — every field the page draws moves the repaint key', () => {
   /** `[what changed, the page before, the page after]` — one field apart, never two. */
   function mutations(): Array<[string, StepViewState, StepViewState]> {

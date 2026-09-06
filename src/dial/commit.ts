@@ -5,8 +5,9 @@
  * decides what to write, `check.ts` decides whether a step passed), this is the only one
  * that touches git, and it touches nothing else — no parsing, no scaffolding, no structural
  * comparison. Given a target folder, the step that just finished, and the files that step
- * wrote, it stages exactly those files and commits them with a subject naming the ordinal,
- * the question, and the option the plan says was actually taken.
+ * wrote, it stages exactly those files and commits exactly those paths — `git commit … --
+ * <paths>`, never a bare `git commit` — with a subject naming the ordinal, the question, and
+ * the option the plan says was actually taken.
  *
  * ## Why a missing identity is a REFUSAL, never a default
  *
@@ -27,6 +28,31 @@
  * completed step commits normally, with no state this module needs to remember in between.
  * Any fallback identity here would be a guess wearing the costume of a fact.
  *
+ * ## Why the commit NAMES its paths
+ *
+ * `git add <paths>` does not scope a commit. A bare `git commit -m <subject>` takes the WHOLE
+ * INDEX, so staging exactly the step's files buys nothing on its own: whatever the learner had
+ * already staged rides along, into the step's commit, under the step's subject. That is not a
+ * hypothetical — this extension `git init`s the folder for them, VS Code's *Stage All Changes*
+ * is one click, and the result is a learner's `.env` and their scratch notes landing in a
+ * commit titled `7: Why does the tokenizer get its own module? — What the author did`, on the
+ * repository they are about to push under their own name.
+ *
+ * So the commit carries a pathspec: `git commit -q -m <subject> -- <paths>`. A pathspec
+ * implies `--only`, which builds the commit from HEAD plus exactly those paths and leaves
+ * every other staged entry staged — still the learner's, to commit when and how they choose.
+ * Checked against the real binary, including the no-HEAD case of a repository this module has
+ * only just created, where the partial commit leaves the rest of the index intact; "nothing to
+ * commit" remains the ordinary refusal it always was when the named paths hold no change.
+ *
+ * It also closes the self-inflicted variant: when `commit` fails after `add` has succeeded (a
+ * stale `index.lock`, someone's `pre-commit` hook), the step's file is left staged — and the
+ * NEXT step's commit, named to its own paths, no longer sweeps it up under the wrong subject.
+ *
+ * The `add` is still load-bearing, not a leftover: a pathspec matching nothing git knows about
+ * is a hard error rather than an empty commit, so a brand-new file has to enter the index
+ * before the commit is allowed to name it.
+ *
  * ## No `vscode`, and no unhandled rejections
  *
  * Deliberately no `vscode` import, same house style as `src/start/build.ts`, `src/dial/
@@ -38,15 +64,18 @@
  *
  * `GitRunner` (`src/start/build.ts`) is async and REJECTS on a non-zero exit, with git's own
  * stderr as the message. That is git's normal way of saying "the key you asked for is not
- * set" or "there is nothing to commit" as much as it is a real failure, so every call here is
- * wrapped: a rejected `git config` reads as an empty value, and a rejected `add`/`commit`
- * becomes a `CommitResult` with that message as `reason`. Nothing in this module ever lets a
+ * set", "there is nothing to commit" or "this is not a repository" as much as it is a real
+ * failure, so every call here is wrapped: a rejected `git config` reads as an empty value, a
+ * rejected `rev-parse` as "not a repository yet", and a rejected `init`/`add`/`commit` becomes
+ * a `CommitResult` with that message as `reason`. Nothing in this module ever lets a
  * `GitRunner` rejection propagate, because `commitStep` runs off a `step:check`/*Next* webview
- * message (`src/walk/session.ts`) — a promise nobody is holding a `.catch` on.
+ * message (`src/walk/session.ts`) — a promise nobody is holding a `.catch` on, and whose
+ * once-per-session error notice can only throttle what comes back as a VALUE. That is why
+ * `commitStep`'s `try` opens at `ensureRepo` rather than after it: `git init` is a `GitRunner`
+ * call like every other, and on a machine with no `git` on `PATH` it is the FIRST one to fail
+ * — once per step, on all sixty-one of them, if its rejection is left to escape.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
 import type { GitRunner } from '../start/build.js';
 import type { StepLike } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
@@ -60,14 +89,40 @@ export interface CommitResult {
 }
 
 /**
- * `git init -q` when `target` has no `.git` yet; a no-op — `git` is not even invoked — when it
- * already does. Cheap enough to call at the top of every `commitStep`, which is exactly how it
- * is used: "is this folder a repository" is answered by a plain `fs` check, not by asking git
- * and parsing its opinion, so an already-established repo's history and config are never
- * touched by a step that merely happens to run first.
+ * "Would a `git commit` run here land in a repository that already exists?" — asked of git
+ * itself, cwd `target`, because no `fs` check can answer it. Outside any repository git exits
+ * non-zero, which is its ordinary way of saying "no" (exactly like the unset key in
+ * `configValue`), so that rejection reads as `false` rather than propagating.
+ */
+async function insideWorkTree(target: string, git: GitRunner): Promise<boolean> {
+  try {
+    return (await git(['rev-parse', '--is-inside-work-tree'], target)).trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `git init -q` when `target` is not inside a working tree yet; a no-op — no `init`, nothing
+ * written — when it already is. Cheap enough to call at the top of every `commitStep`, which
+ * is exactly how it is used.
+ *
+ * The question is "is this INSIDE a working tree", not "is there a `.git` HERE", and the
+ * difference is a learner's history. `fs.existsSync(<target>/.git)` answers the second: it is
+ * true only at the ROOT of a repository, so a target that sits *inside* one — a folder the
+ * learner made under a repo they already keep — reads as ungoverned and gets a brand-new
+ * NESTED repository created inside it. Every step then commits into that inner repo, and the
+ * learner's own `git log`, run where they expect to run it, never shows a single one of them.
+ *
+ * `git rev-parse --is-inside-work-tree` is the question AC7's "git-inited if needed" actually
+ * means, and it answers `true` for all three shapes that must not be re-inited: the root of a
+ * repository, any subdirectory of one, and a `.git` that is a FILE rather than a directory (a
+ * linked worktree or a submodule, whose real gitdir lives elsewhere). It is read-only in every
+ * one of them, so an already-established repo's history and config are never touched by a step
+ * that merely happens to run first.
  */
 export async function ensureRepo(target: string, git: GitRunner): Promise<void> {
-  if (fs.existsSync(path.join(target, '.git'))) return;
+  if (await insideWorkTree(target, git)) return;
   await git(['init', '-q'], target);
 }
 
@@ -141,16 +196,20 @@ function resolveFiles(target: string, files: readonly string[]): string[] {
 }
 
 /**
- * Ensures `target` is a repository, stages exactly `files` — containment-checked, nothing
- * else, so a second file sitting untouched in the same folder never rides along — and commits
- * them with `commitSubject(step)`.
+ * Ensures `target` is inside a repository, stages exactly `files` — containment-checked,
+ * nothing else — and commits exactly those same paths with `commitSubject(step)`, so neither
+ * a second file sitting untouched in the same folder nor one the learner has already STAGED
+ * ever rides along. The pathspec on the commit, not the `add`, is what makes that true; this
+ * file's header has the whole story.
  *
  * Refuses, gracefully, rather than committing: when there is nothing left to stage once
  * containment has filtered `files` (including the trivial case of an empty list), and when
  * this repository has no git identity configured (see this file's header — never invented,
- * never defaulted). Any OTHER git failure — a stale lock file, a detached HEAD git refuses to
- * commit onto, a full disk, anything this module did not anticipate — comes back the same way,
- * as `CommitResult.reason`, never as a thrown or rejected promise.
+ * never defaulted). Any OTHER git failure — a `git init` that could not run, a stale lock
+ * file, a detached HEAD git refuses to commit onto, a full disk, anything this module did not
+ * anticipate — comes back the same way, as `CommitResult.reason`, never as a thrown or
+ * rejected promise. That is what the single `try` around the whole body is for, `ensureRepo`
+ * included.
  */
 export async function commitStep(
   target: string,
@@ -158,20 +217,20 @@ export async function commitStep(
   files: readonly string[],
   git: GitRunner,
 ): Promise<CommitResult> {
-  await ensureRepo(target, git);
-
-  const resolved = resolveFiles(target, files);
-  if (resolved.length === 0) {
-    return { committed: false, reason: 'no files to stage' };
-  }
-
-  if (!(await identityConfigured(target, git))) {
-    return { committed: false, reason: 'no git identity configured in this folder' };
-  }
-
   try {
+    await ensureRepo(target, git);
+
+    const resolved = resolveFiles(target, files);
+    if (resolved.length === 0) {
+      return { committed: false, reason: 'no files to stage' };
+    }
+
+    if (!(await identityConfigured(target, git))) {
+      return { committed: false, reason: 'no git identity configured in this folder' };
+    }
+
     await git(['add', '--', ...resolved], target);
-    await git(['commit', '-q', '-m', commitSubject(step)], target);
+    await git(['commit', '-q', '-m', commitSubject(step), '--', ...resolved], target);
     return { committed: true };
   } catch (err) {
     return { committed: false, reason: err instanceof Error ? err.message : String(err) };
