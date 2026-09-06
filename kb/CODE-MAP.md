@@ -81,6 +81,26 @@ will be overwritten.
 - Exports: renderStartHtml, startScript
 - Imports: (none)
 
+## src/tutor/ask.ts
+
+- Exports: askTutor, checkReachable, startAsk
+- Imports: (none)
+
+## src/tutor/context.ts
+
+- Exports: MAX_DIFF_CHARS, NO_DIFFERENCE, NO_FILE_YET, clipMarker, renderOptionsText, tutorContext
+- Imports: (none)
+
+## src/tutor/core.ts
+
+- Exports: tutorCoreFor
+- Imports: (none)
+
+## src/tutor/transcript.ts
+
+- Exports: MAX_TURNS_KEPT, appendTurn, clearTranscript, getTranscript, sanitizeTranscript
+- Imports: (none)
+
 ## src/walk/editor.ts
 
 - Exports: StepDecorator
@@ -113,12 +133,12 @@ will be overwritten.
 
 ## src/walk/step-protocol.ts
 
-- Exports: handleStepMessage, parseStepMessage
+- Exports: MAX_ASK_TEXT, NOTHING_TO_ASK_MESSAGE, askTooLongMessage, handleStepMessage, parseStepMessage
 - Imports: (none)
 
 ## src/walk/step-view.ts
 
-- Exports: AUTHOR_BADGE, CHECK_HEADING, CHECK_PARSE_MESSAGE, EXPORTS_HEADING, FILE_MISSING_MESSAGE, IMPORTS_HEADING, MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, NOT_TEXT_MESSAGE, NO_HISTORY_MESSAGE, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_HEADING, SHAPE_NOTE_MESSAGE, T10_BADGE, TRUNCATION_MARKER, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, listOmittedMessage, optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey, stepScript
+- Exports: ASK_BUTTON_LABEL, ASK_PLACEHOLDER, AUTHOR_BADGE, CANCEL_BUTTON_LABEL, CHECK_HEADING, CHECK_PARSE_MESSAGE, EXPORTS_HEADING, FILE_MISSING_MESSAGE, IMPORTS_HEADING, MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT, MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE, NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_HEADING, SHAPE_NOTE_MESSAGE, T10_BADGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE, TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, USER_TURN_LABEL, listOmittedMessage, optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey, stepScript, turnsOmittedMessage
 - Imports: (none)
 
 ## src/walk/store.ts

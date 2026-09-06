@@ -76,6 +76,7 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import { statusText, type PlanLike, type Progress, type StepLike } from '../src/walk/model.js';
+import { NOTHING_TO_ASK_MESSAGE } from '../src/walk/step-protocol.js';
 import { fixturePlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
@@ -643,8 +644,17 @@ suite('the step panel drives the session, and repaints only when the page would 
    *
    * `step:check` runs first on purpose — it is one of the messages that re-enters nothing, so
    * it leaves the panel holding the state the guard is about. T-5 removed the sentence it used
-   * to reply (the button drives the real check now), so what is asserted here is the step id
-   * alone; the note's own lifetime has no producer to drive it until T-6's tutor arrives.
+   * to reply (the button drives the real check now), so the step id was for a while all this
+   * test could assert.
+   *
+   * **T-6 gave the note channel its producer back, so the second half of this test is now
+   * reachable.** A `tutor:ask` with a blank box is the panel's own refusal to send: it
+   * re-enters nothing either, and it is answered through `note` rather than through a repaint,
+   * because a repaint would tear the iframe down and delete the question the learner is being
+   * told to fix. `step-panel.ts`'s `setView` clears that note when the pushed view names a
+   * DIFFERENT step and keeps it across a same-step refresh — a rule with no unit suite
+   * anywhere, because that file imports `vscode`, and with no way to exercise it at all until
+   * something could produce a note. `step:next` is that navigation.
    */
   test('code review finding 5 — Next pressed IN THE PANEL leaves the panel on the step it moved TO', async () => {
     const dir = newTarget();
@@ -652,9 +662,16 @@ suite('the step panel drives the session, and repaints only when the page would 
     assert.equal(panel.getStateForTest()?.step.id, STEPS.shape, 'a never-walked target opens on step 1');
 
     panel.dispatchForTest({ type: 'step:check' });
+    panel.dispatchForTest({ type: 'tutor:ask', payload: { text: '   ' } });
+    const noteOnTheStepItWasMadeOn = panel.getStateForTest()?.note;
 
     panel.dispatchForTest({ type: 'step:next' });
 
+    assert.deepEqual(
+      [noteOnTheStepItWasMadeOn, panel.getStateForTest()?.note],
+      [NOTHING_TO_ASK_MESSAGE, undefined],
+      'the panel\'s note belongs to the step it was made on: a blank Ask puts it there, and navigating away must clear it — otherwise a sentence about a question nobody asked on THIS step follows the learner across the walk',
+    );
     assert.equal(session.getView()?.step.id, STEPS.file, 'the message really did navigate the session');
     assert.equal(
       panel.getStateForTest()?.step.id,
