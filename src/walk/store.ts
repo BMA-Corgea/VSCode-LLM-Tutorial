@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildDir, writeJsonAtomic } from '../start/build.js';
+import { DEFAULT_DIAL, DIALS, type BuildRequest, type Dial } from '../start/request.js';
 import { emptyProgress, type PlanLike, type Progress } from './model.js';
 
 export { buildDir };
@@ -89,6 +90,53 @@ export function loadProgress(target: string, plan: PlanLike): Progress {
     return emptyProgress(plan);
   }
   return isProgressShape(parsed) ? parsed : emptyProgress(plan);
+}
+
+function requestPath(target: string): string {
+  return path.join(buildDir(target), 'request.json');
+}
+
+/**
+ * What was ASKED for when this tutorial was built — `<target>/.repo-tour/build/request.json`,
+ * written by the start screen (T-3) beside the plan.
+ *
+ * Two things in it are load-bearing for the dial (T-5) and nothing had read either of them
+ * until now:
+ *
+ *   - **`repo`** is the REFERENCE ROOT. Scaffolded and automated mode both write from the
+ *     reference's own source, so without this there is nothing to copy from — the plan
+ *     records decisions, never file contents.
+ *   - **`dial`** is the GLOBAL setting. T-4 rendered and persisted a per-step override and
+ *     deliberately went no further, so `statusText` falls back to `manual` for any step
+ *     without one. AC1's "global, overridable per step" is only half true until this is read.
+ *
+ * Shape-checked and `null` on anything unusable, for the reason `loadProgress` is: this is
+ * read on the interaction path, and a `request.json` that is valid JSON but not a request
+ * would otherwise throw one property access later. A tutorial with no readable request is a
+ * real state — it can be walked, it just cannot be written into — so `null` is an answer
+ * callers must handle, not an error.
+ */
+export function loadRequest(target: string): BuildRequest | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(requestPath(target), 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const repo = parsed['repo'];
+  const dial = parsed['dial'];
+  if (typeof repo !== 'string') return null;
+  return {
+    idea: typeof parsed['idea'] === 'string' ? parsed['idea'] : '',
+    recreate: parsed['recreate'] === true,
+    repo,
+    target: typeof parsed['target'] === 'string' ? parsed['target'] : target,
+    // An unrecognised dial is the global default, never a guess: a value outside `DIALS`
+    // means the file was hand-edited or written by a future version, and "manual" is the
+    // only fallback that cannot overstate what has happened to the learner's files.
+    dial: typeof dial === 'string' && (DIALS as readonly string[]).includes(dial) ? (dial as Dial) : DEFAULT_DIAL,
+  };
 }
 
 export function saveProgress(target: string, progress: Progress): void {

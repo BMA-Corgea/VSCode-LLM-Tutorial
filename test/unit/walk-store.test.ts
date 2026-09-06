@@ -35,7 +35,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { currentStep, emptyProgress, markDone, setCurrent, type Progress } from '../../src/walk/model.js';
-import { buildDir, hasPlan, loadPlan, loadProgress, saveProgress } from '../../src/walk/store.js';
+import { buildDir, hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from '../../src/walk/store.js';
+import { DEFAULT_DIAL } from '../../src/start/request.js';
 import { fixturePlan, fixtureProgress, writeFixtureTarget } from './walk-fixtures.js';
 
 const madeDirs: string[] = [];
@@ -205,6 +206,50 @@ suite('loadProgress — a build that has never been walked is not an error', () 
 
     assert.equal(loadProgress(target, plan).current, 'st-1-shape-src');
     assert.equal(loadProgress(target, shortened).current, 'st-3-symbol-handle');
+  });
+});
+
+suite('loadRequest — the reference root and the GLOBAL dial (T-5 AC1)', () => {
+  // Nothing read this file until T-5. `repo` is where scaffolded/automated mode copy the
+  // learner's files FROM — the plan records decisions, never contents — and `dial` is the
+  // global setting T-4 rendered but never consulted, which is why the status bar falls back
+  // to "manual" for any step without a per-step override.
+  function writeRequest(target: string, body: unknown): void {
+    fs.writeFileSync(path.join(buildDir(target), 'request.json'), typeof body === 'string' ? body : JSON.stringify(body));
+  }
+
+  test('a real request round-trips, carrying the reference root and the global dial', () => {
+    const target = fixtureTarget();
+    writeRequest(target, { idea: '', recreate: true, repo: '/somewhere/reference', target, dial: 'automated' });
+    const req = loadRequest(target);
+    assert.equal(req?.repo, '/somewhere/reference');
+    assert.equal(req?.dial, 'automated');
+  });
+
+  test('no request.json at all is null — a walkable tutorial that simply cannot be written into', () => {
+    assert.equal(loadRequest(fixtureTarget()), null);
+  });
+
+  for (const [label, body] of [
+    ['unparseable', '{"repo":'],
+    ['valid JSON that is not a record', 'null'],
+    ['an array', '[]'],
+    ['a request with no repo', '{"dial":"automated"}'],
+    ['a repo of the wrong type', '{"repo":42,"dial":"automated"}'],
+  ] as const) {
+    test(`${label} is null, never a throw on the interaction path`, () => {
+      const target = fixtureTarget();
+      writeRequest(target, body);
+      assert.equal(loadRequest(target), null);
+    });
+  }
+
+  test('a dial outside DIALS falls back to the default rather than being trusted', () => {
+    const target = fixtureTarget();
+    writeRequest(target, { repo: '/ref', dial: 'turbo' });
+    // "manual" is the only fallback that cannot overstate what has happened to the
+    // learner's files, so a hand-edited or future value must not survive as itself.
+    assert.equal(loadRequest(target)?.dial, DEFAULT_DIAL);
   });
 });
 

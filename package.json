@@ -1,7 +1,7 @@
 {
   "name": "build-tutorials",
   "displayName": "Build Tutorials",
-  "description": "Walks you through building an app the way its decisions were made \u2014 a paint-by-numbers tutorial generated from a real repository. Part of the repo-tour suite.",
+  "description": "Walks you through building an app the way its decisions were made — a paint-by-numbers tutorial generated from a real repository. Part of the repo-tour suite.",
   "version": "0.0.1",
   "publisher": "bma-corgea",
   "license": "AGPL-3.0-or-later",
@@ -55,6 +55,11 @@
       {
         "command": "buildTutorials.goToStep",
         "title": "Build Tutorials: Go to step",
+        "category": "Build Tutorials"
+      },
+      {
+        "command": "buildTutorials.reproduceFiles",
+        "title": "Build Tutorials: Copy the files that aren’t taught",
         "category": "Build Tutorials"
       }
     ],
@@ -112,12 +117,17 @@
         "buildTutorials.llmProvider": {
           "type": "string",
           "default": "claude",
-          "description": "Which LLM provider repo-tour's interpret stage asks for each step's why and its roads-not-taken (spec \u00a74.3). The default runs the local claude CLI \u2014 a subscription tool, not an API key."
+          "description": "Which LLM provider repo-tour's interpret stage asks for each step's why and its roads-not-taken (spec §4.3). The default runs the local claude CLI — a subscription tool, not an API key."
         },
         "buildTutorials.llmModel": {
           "type": "string",
           "default": "",
           "description": "Model name passed to the provider. Empty uses repo-tour's own recommended default (its interpret module's DEFAULT_MODEL export) read at run time, so this setting never hardcodes a copy that can drift out of sync with repo-tour."
+        },
+        "buildTutorials.commitPerStep": {
+          "type": "boolean",
+          "default": true,
+          "description": "Commit each completed step in the tutorial folder, with the message “<ordinal>: <question> — <the option the author chose>”. The commits are yours: they use that folder’s own git identity, and if none is configured no commit is made and the panel says so rather than inventing an author."
         }
       }
     }
