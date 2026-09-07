@@ -13,7 +13,7 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — build
+- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — auto-review
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
@@ -46,6 +46,26 @@ start. AC4 as specified still holds; the refinement note's wording is only half 
   here were stale against the tracker. T-4 is **building** (resumed 2026-09-05 on go-ahead
   GA-3); T-5…T-8 sit at `plan` — unstarted, not blocked. The next human stop is T-4's
   **accept** gate.
+
+
+## Known landmines (not bugs today; they bite on a named trigger)
+
+<!-- Things deliberately LEFT unfixed, each with the condition that makes it real.
+     Never prune one silently: the point is that the next person meets it here
+     rather than re-discovering it the hard way. -->
+
+- **`feature-regulated@v1` has an unwired role.** Its `compliance-review` stage names the role
+  `compliance-officer`, which resolves in no tier — not the client roster, not the plugin
+  roster, not the catalog — so the stage would run on a **generic fallback agent** with no
+  compliance instructions. `/autodev:doctor` reports it as the standing `pipelines.wiring` WARN.
+  **Harmless right now** because nothing here targets that pipeline: every ticket runs on
+  `feature@v1` or `direction@v2`.
+  **TRIGGER — the moment any ticket targets `feature-regulated`, `compliance-officer` must be
+  wired or the stage pruned.** Shipping a regulated ticket through a generic fallback would put
+  a compliance stamp on work no compliance seat ever read.
+  Left deliberately unfixed and deliberately un-pruned 2026-09-07 (foreman agent, on the owner's
+  standing authority): pruning it would delete the fact that the preset exists, which is the
+  knowledge this entry is protecting.
 
 
 ## Recent past (~15 items / ~30 days)
