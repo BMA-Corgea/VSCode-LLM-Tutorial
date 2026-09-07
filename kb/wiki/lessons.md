@@ -29,9 +29,20 @@ Two operational notes that cost time here:
   `create()`; no verb changes it later, and the ledger fence blocks editing the ticket file by
   hand. Get it right at `new --risk`, because the only later remedy is to override the sizing
   by hand at dispatch and record why.
-- **Overriding it by hand works but leaves no trace on the ticket.** The reviewers ran a full
-  pass because they were told to, not because the record said to. That instruction lives in the
-  review documents and here — not on T-6, which still reads `low`.
+- **Overriding it by hand leaves no trace on the ticket, and that is an audit hole, not a
+  footnote.** The reviewers ran a full pass because they were told to, not because the record
+  said to. So T-6's record does not describe T-6's work: the ticket reads `risk: low` and a
+  full-depth review demonstrably happened, with nothing connecting the two. A later reader — a
+  conformance pass, an auditor, the next session — gets two options and both are wrong: believe
+  the label and conclude a security-surface ticket got a light review it did not get, or see the
+  depth of the review and be unable to explain why it happened. An override that cannot be
+  recorded is a divergence between what the factory did and what the factory says it did, which
+  is the green-board disease pointing the other way.
+
+  The remedy while the tracker cannot express it: put the override in the ticket's OWN evidence
+  trail, where someone reading the ticket will hit it — for T-6 that is
+  `.autodev/evidence/T-6/review-depth-override.md`, naming the override, who made it and why. A
+  lessons file is where the general rule lives; it is not where a reader of one ticket looks.
 
 ## A rule people remember is not a guard (T-11, incident 2026-09-07)
 
