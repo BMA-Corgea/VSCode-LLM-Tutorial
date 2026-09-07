@@ -403,6 +403,47 @@ export const CLEAR_BUTTON_LABEL = 'Forget this conversation';
  */
 export const USER_TURN_LABEL = 'You';
 export const TUTOR_TURN_LABEL = 'Tutor';
+/**
+ * T-7 (AC4). A third label, for a turn NEITHER of them said.
+ *
+ * `AskMessage.kind === 'note'` is the walk's own record — "detour taken: <title>" — stored in
+ * the conversation because that is where a learner looks for what happened in it, and kept off
+ * the send path by `sentTurns` so no model is ever told the assistant wrote it. Drawing it as
+ * a tutor turn would undo half of that: the learner would read a sentence the tutor never
+ * said, attributed to the tutor, in the one place on this page where attribution is the whole
+ * point. So it is named, and it is styled apart — see `.tutor-turn.turn-note`.
+ */
+export const NOTE_TURN_LABEL = 'This tutorial';
+
+/** T-7: the second button beside *Ask*, its waiting line, and the way out. Exported like every
+ *  other visible string here — one home, asserted rather than copied. */
+export const DETOUR_BUTTON_LABEL = 'Show me an unrelated example';
+export const DETOUR_WAITING_MESSAGE = 'writing an example…';
+export const DETOUR_BACK_LABEL = 'Back to my build';
+/**
+ * The spec's "regenerate" control (refinement notes; T-7 code review finding 9). Worded as
+ * what it DOES rather than as a verb from this codebase's own vocabulary: a learner reading an
+ * example that is not landing wants a different one, and "regenerate" is a word about a cache.
+ */
+export const DETOUR_REGENERATE_LABEL = 'Write a new example';
+/** What the second button costs, said where it is offered. `Show me an unrelated example` is
+ *  free on a retake and this one never is, and a control that spends money without saying so
+ *  is the shape T-6's AC4 rules out by name. */
+export const DETOUR_REGENERATE_HINT =
+  'Not happy with this example? Writing a new one asks the model again, so it is not free.';
+
+/** Why the button cannot act, when it cannot (conventions.md: never a disabled control with no
+ *  explanation). The provider's own sentence is drawn beside it by `tutor.unreachable`; this
+ *  is the part that says what the button in particular would have done. */
+export const DETOUR_UNREACHABLE_MESSAGE =
+  'An unrelated example needs the model, which cannot be reached right now — see above.';
+
+/** What the way out says when the detour belongs to a step the learner has walked away from.
+ *  `stepNumber` is 1-based, because it is read by a person. */
+export function detourElsewhereMessage(stepNumber: number | undefined): string {
+  const where = stepNumber === undefined ? 'another step' : `step ${stepNumber}`;
+  return `An unrelated example is open on ${where}.`;
+}
 
 /** What the section says before anybody has asked anything about this step. It names what the
  *  tutor can already see, because the commonest first question is one the context has already
@@ -601,6 +642,11 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .tutor-log { list-style:none; margin:0 0 12px; padding:0; display:flex; flex-direction:column; gap:10px; }
 .tutor-turn { border-left:2px solid var(--line); padding:0 0 0 10px; }
 .tutor-turn.turn-user { border-left-color:var(--accent); }
+/* T-7: a note is neither speaker. Dashed rather than solid, and the whole row muted, so it
+   reads as marginalia in the conversation instead of as something somebody said — which is
+   exactly what it is. The LABEL is what carries the distinction for a screen reader and in a
+   high-contrast theme; this is the second, visual half of the same fact. */
+.tutor-turn.turn-note { border-left-style:dashed; color:var(--muted); font-size:12px; }
 .turn-who { display:block; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); margin-bottom:3px; }
 /* pre-wrap, so a model's own line breaks survive without this page turning them into markup —
    the whole of AC5 is that a fence and nothing else becomes an element, and a newline is
@@ -616,6 +662,12 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
    happened, and both are the panel's answer to a control the learner pressed. The unreachable
    line is muted instead: it is a standing condition of their machine, not an event. */
 .tutor-note { color:var(--kw); font-size:12px; margin:0 0 8px; }
+/* T-7: the detour's own line and its controls sit under the ask, in the same section, because
+   they are the second rung of one escalation ladder rather than a feature of their own. */
+.detour-note { color:var(--kw); font-size:12px; margin:0 0 8px; }
+.detour-open { color:var(--kw); font-size:12px; margin:8px 0 0; }
+.detour-hint { color:var(--muted); font-size:12px; margin:0; }
+.detour-waiting { color:var(--muted); font-size:12px; }
 .tutor-unreachable { color:var(--muted); font-size:12px; margin:0 0 8px; }
 .tutor-ask { display:flex; flex-direction:column; gap:8px; }
 .tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); color:inherit; resize:vertical; }
@@ -641,7 +693,7 @@ main, section, .option { min-width:0; }
 .step-head h1, .option-label, .option-consequence, .why-text, .why-source, .witness-text,
 .note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
 .write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty,
-.tutor-elsewhere, .tutor-spend { overflow-wrap:anywhere; }
+.tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint { overflow-wrap:anywhere; }
 
 /* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
    title and the skin picker stop competing for one line and 48px of horizontal padding
@@ -1062,10 +1114,26 @@ function transcriptHtml(turns: AskMessage[]): string {
       // direction: mislabelling the learner's own words as the model's costs a moment of
       // confusion, while labelling a model's words as the learner's own would hand a stranger's
       // sentence the authority of something they wrote themselves.
-      const mine = turn?.role === 'user';
-      return `<li class="tutor-turn ${mine ? 'turn-user' : 'turn-tutor'}">`
-        + `<span class="turn-who">${escapeHtml(mine ? USER_TURN_LABEL : TUTOR_TURN_LABEL)}</span>`
-        + `<div class="turn-text">${answerHtml(turn?.content)}</div>`
+      //
+      // T-7 adds a THIRD case ahead of the other two, and its order matters: a note is stored
+      // with `role: 'assistant'` (that is what `sanitizeTranscript` allow-lists), so asking
+      // about the role first would draw it as something the tutor said — the one attribution
+      // this page may not get wrong. `kind` is compared against the literal `'note'`, never
+      // interpolated, for the reason the roles are not: it reaches this page from
+      // `progress.json`.
+      const isNote = turn?.kind === 'note';
+      const mine = !isNote && turn?.role === 'user';
+      const klass = isNote ? 'turn-note' : mine ? 'turn-user' : 'turn-tutor';
+      const who = isNote ? NOTE_TURN_LABEL : mine ? USER_TURN_LABEL : TUTOR_TURN_LABEL;
+      return `<li class="tutor-turn ${klass}">`
+        + `<span class="turn-who">${escapeHtml(who)}</span>`
+        // A note is the WALK's own sentence, not a model's, so it is escaped and drawn FLAT —
+        // no fence pass. `answerHtml` honours ``` because a tutor writes code in the normal
+        // course of its work; a note is `detour taken: <title>`, whose only variable part is a
+        // model-authored TITLE, and letting a title open a `<pre>` would hand a string a
+        // formatting capability for no reason at all. Both arms escape everything (AC5); they
+        // differ only in whether one construct survives that escaping.
+        + `<div class="turn-text">${isNote ? escapeHtml(replyText(turn?.content)) : answerHtml(turn?.content)}</div>`
         + '</li>';
     })
     .join('');
@@ -1137,7 +1205,90 @@ function tutorHtml(state: StepViewState): string {
     + elsewhereHtml(state)
     + `<div class="tutor-ask">${input}<div class="tutor-controls">${controls}</div></div>`
     + spendHtml(tutor?.spend)
+    + detourHtml(state)
     + '</section>';
+}
+
+/**
+ * T-7: *Show me an unrelated example*, and the way back from one.
+ *
+ * **Inside the tutor section, under *Ask*, and that is the spec's own shape**: an escalation
+ * ladder rather than two unrelated features. A learner who cannot follow the explanation asks;
+ * a learner the explanation is not reaching gets shown the same idea somewhere else entirely.
+ * Putting the second rung in its own section would make it look like an alternative to the
+ * first rather than the next thing to try.
+ *
+ * **The button is on every step, always** (the spec: "visible always, honest when
+ * unreachable"). It is never removed and never silently inert:
+ *
+ *   - while an example is being written it is REPLACED by a sentence and *Cancel*, which is
+ *     the shape *Ask* already uses for the same state and for the same reason — a control that
+ *     was never rendered cannot be pressed by accident, and the press that stops it has to be
+ *     on the page;
+ *   - while an example is OPEN it is replaced by *Back to my build*, because that is the only
+ *     thing a learner in a detour wants from this panel, and offering a second example on top
+ *     of the first would be offering to lose their place;
+ *   - when the provider cannot be reached it stays exactly where it is, with the reason under
+ *     it. `tutor.unreachable` already carries the provider's own sentence a few lines up;
+ *     `DETOUR_UNREACHABLE_MESSAGE` is the part that says what THIS button would have done. A
+ *     box that vanished would tell somebody the feature was gone rather than that a binary was
+ *     missing — the identical argument the ask input's own comment makes.
+ *
+ * A detour open on ANOTHER step names that step and still offers the way out, exactly as
+ * `elsewhereHtml` does for a live ask: a control that names something it cannot act on is the
+ * one thing this repository's conventions rule out, and the session's return works from
+ * wherever the learner is standing.
+ */
+function detourHtml(state: StepViewState): string {
+  const detour = state.detour;
+  const open = detour?.open;
+
+  const note = typeof detour?.note === 'string' && detour.note !== ''
+    ? `<p class="detour-note" id="detour-note">${escapeHtml(planText(detour.note))}</p>`
+    : '';
+
+  if (open) {
+    const here = open.stepId === state.step.id;
+    const steps = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+    const index = steps.findIndex((step) => step?.id === open.stepId);
+    const where = here
+      ? ''
+      : `<p class="detour-hint">${escapeHtml(detourElsewhereMessage(index >= 0 ? index + 1 : undefined))}</p>`;
+    // *Write a new example* is offered only where the learner is standing in the example it
+    // would replace — on THIS step, with a detour open. Its presence is a pure function of
+    // `state.step.id` and `open.stepId`, both already in `stepRenderKey`, so it adds no field
+    // to the key and no mutation to its sweep.
+    const regenerate = here
+      ? `<button type="button" class="btn btn-quiet" id="btn-detour-regenerate">${escapeHtml(DETOUR_REGENERATE_LABEL)}</button>`
+      : '';
+    const cost = here ? `<p class="detour-hint">${escapeHtml(DETOUR_REGENERATE_HINT)}</p>` : '';
+    return '<div class="detour">'
+      + note
+      + where
+      + `<p class="detour-open">${escapeHtml(planText(open.title, MAX_CHECK_TEXT))}</p>`
+      + `<div class="tutor-controls"><button type="button" class="btn" id="btn-detour-back">${escapeHtml(DETOUR_BACK_LABEL)}</button>`
+      + regenerate
+      + '</div>'
+      + cost
+      + '</div>';
+  }
+
+  if (detour?.generating === true) {
+    return '<div class="detour">'
+      + note
+      + `<div class="tutor-controls"><span class="detour-waiting" id="detour-waiting">${escapeHtml(DETOUR_WAITING_MESSAGE)}</span>`
+      + `<button type="button" class="btn" id="btn-tutor-cancel-detour">${escapeHtml(CANCEL_BUTTON_LABEL)}</button></div>`
+      + '</div>';
+  }
+
+  const unreachable = typeof state.tutor?.unreachable === 'string' && state.tutor.unreachable !== ''
+    ? `<p class="detour-hint">${escapeHtml(DETOUR_UNREACHABLE_MESSAGE)}</p>`
+    : '';
+  return '<div class="detour">'
+    + note
+    + `<div class="tutor-controls"><button type="button" class="btn btn-quiet" id="btn-detour-start">${escapeHtml(DETOUR_BUTTON_LABEL)}</button></div>`
+    + unreachable
+    + '</div>';
 }
 
 /**
@@ -1420,6 +1571,19 @@ const CLIENT_SCRIPT = `
   on('btn-tutor-cancel-elsewhere', 'click', function () { post('tutor:cancel', {}); });
   on('btn-tutor-clear', 'click', function () { post('tutor:clear', {}); });
 
+  // ── T-7: the detour ───────────────────────────────────────────────────────────────────
+
+  // Each of these is on the page only in the state it belongs to (see detourHtml); \`on\` is
+  // null-safe, so the rest of the time these lines hook nothing rather than needing a
+  // condition of their own — the same shape \`btn-reproduce\` above uses.
+  on('btn-detour-start', 'click', function () { post('detour:start', {}); });
+  on('btn-detour-regenerate', 'click', function () { post('detour:regenerate', {}); });
+  on('btn-detour-back', 'click', function () { post('detour:back', {}); });
+  // The same \`tutor:cancel\` the ask uses: the host's cancel goes through the ledger and stops
+  // every live request, and a detour being written is one of them. One message is the whole
+  // control, exactly as it is for the ask-on-another-step line.
+  on('btn-tutor-cancel-detour', 'click', function () { post('tutor:cancel', {}); });
+
   // Enter sends, Shift+Enter makes a newline — sql-gauntlet's pattern, which the owner asked
   // for by name. Every other key falls straight through, so nothing here interferes with
   // typing, and the guard order matters: an event with no \`key\` at all (an older browser, a
@@ -1646,7 +1810,11 @@ function keyOfList<T>(value: unknown, max: number, project: (entry: T) => unknow
 function keyOfTranscript(turns: unknown): unknown {
   if (!Array.isArray(turns)) return null;
   const shown = (turns as Array<AskMessage | undefined>).slice(-MAX_TURNS_RENDERED);
-  return [shown.map((turn) => [turn?.role, keyOf(turn?.content, MAX_REPLY_TEXT)]), turns.length];
+  // `kind` joins the projection because T-7 draws it: a note takes a different class, a
+  // different label and a different escaping path from a tutor turn, so two transcripts
+  // identical but for it render DIFFERENTLY and must not share a key. It is the same rule
+  // `role` is here for, one field later.
+  return [shown.map((turn) => [turn?.role, turn?.kind ?? null, keyOf(turn?.content, MAX_REPLY_TEXT)]), turns.length];
 }
 
 export function stepRenderKey(state: StepViewState, skins: SkinsModule): string {
@@ -1721,6 +1889,23 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
           keyOf(state.tutor.accepted ?? null, MAX_ASK_TEXT),
         ]
       : null,
+    // ── T-7: the detour (plan R4). Three fields, all of them drawn by `detourHtml`, all of
+    // them therefore here. `generating` is the one that would hurt most to lose — the button
+    // would go on looking pressable while an example was being written, and the example would
+    // appear only when something else forced a repaint, which reads exactly like a button
+    // that ignores you. `open` decides WHICH control is on the page at all (the way out
+    // instead of the way in), and `note` is the sentence AC5 requires a failed generation to
+    // carry, so a second failure with a different reason under an unchanged key would show
+    // the learner the first one's sentence.
+    //
+    // `state.tutor.unreachable` is deliberately NOT repeated here: it is already in the tutor
+    // block above, and `detourHtml`'s hint is derived from that same value — one entry, one
+    // field, no way for the two to disagree about whether a repaint is due.
+    [
+      state.detour?.generating === true,
+      state.detour?.open ? [keyOf(state.detour.open.stepId), keyOf(state.detour.open.title)] : null,
+      keyOf(state.detour?.note ?? null, MAX_PLAN_TEXT),
+    ],
     keyOfList<SkinRow | undefined>(skins.SKINS, MAX_LIST_ROWS, (row) => [keyOf(row?.name), keyOf(row?.label), keyOf(row?.note)]),
   ]);
 }

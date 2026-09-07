@@ -21,6 +21,36 @@ will be overwritten.
 - Exports: CORE_MODULE_NAMES, loadAnyModule, loadCore, resolveCoreRoot
 - Imports: (none)
 
+## src/detour/narrator.ts
+
+- Exports: BACK_LABEL, BAD_RANGE_LABEL, CONTROL_STAND_IN, DETOUR_ASIDE, FILES_HEADING, FIRST_STOP_HINT, LAST_STOP_HINT, MAX_LABEL_TEXT, MAX_ROWS_RENDERED, MAX_STOP_TEXT, NARRATOR_TITLE, NEXT_LABEL, NOT_TEXT_MESSAGE, NO_FILES_MESSAGE, NO_STOPS_MESSAGE, PREV_LABEL, TRUNCATION_MARKER, domainSentence, linesLabel, narratorScript, parseNarratorMessage, renderNarratorHtml, rowsOmittedMessage, stopProgressMessage
+- Imports: (none)
+
+## src/detour/panel.ts
+
+- Exports: NarratorPanel, detourAdaptersFor
+- Imports: (none)
+
+## src/detour/prompt.ts
+
+- Exports: DETOUR_PROMPT_VERSION, MAX_DETOUR_INSTRUCTIONS_CHARS, MAX_DETOUR_PATH_CHARS, MAX_DETOUR_PATH_SEGMENTS, MAX_DETOUR_PROMPT_CHARS, MAX_DETOUR_REPLY_CHARS, detourLineCount, detourPrompt, isDetourRefusal, parseDetourReply, prepareDetourWrite, refusalSentence, unsafeDetourPathReason
+- Imports: (none)
+
+## src/detour/session.ts
+
+- Exports: DetourSession, tabPrefixes
+- Imports: (none)
+
+## src/detour/store.ts
+
+- Exports: MAX_CACHE_BYTES, MAX_CACHE_ENTRIES, detourCachePath, detourDir, detoursRoot, isDetourWriteRefused, pruneDetourCache, readCachedDetour, removeDetour, removeDetourAt, sanitizeDetour, tutorialId, writeCachedDetour, writeDetourFiles
+- Imports: (none)
+
+## src/detour/types.ts
+
+- Exports: DETOUR_LIMITS
+- Imports: (none)
+
 ## src/dial/check.ts
 
 - Exports: referenceExtract, runCheck
@@ -28,7 +58,7 @@ will be overwritten.
 
 ## src/dial/commit.ts
 
-- Exports: commitStep, commitSubject, ensureRepo, identityConfigured
+- Exports: TUTORIAL_DIR_IGNORE, TUTORIAL_IGNORE_HEADER, commitStep, commitSubject, ensureRepo, ensureTranscriptIgnored, identityConfigured
 - Imports: (none)
 
 ## src/dial/core.ts
@@ -83,12 +113,12 @@ will be overwritten.
 
 ## src/tutor/ask.ts
 
-- Exports: askTutor, checkReachable, startAsk
+- Exports: AskLedger, DEFAULT_TIMEOUT_MS, FETCH_UNIMPLEMENTED_DETAIL, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS, askTutor, askWithPrompt, boundedTimeoutMs, checkReachable, isFetchRequestReply, startAsk, startPromptAsk, withoutFetchProtocol
 - Imports: (none)
 
 ## src/tutor/context.ts
 
-- Exports: MAX_DIFF_CHARS, NO_DIFFERENCE, NO_FILE_YET, clipMarker, renderOptionsText, tutorContext
+- Exports: MAX_CONTEXT_CHARS, MAX_DIFF_CHARS, MAX_DIFF_INPUT_BYTES, MAX_OPTIONS_SENT, MAX_OPTION_TEXT, MAX_PAGE_TEXT, MAX_PROMPT_TEXT, MAX_TURN_CHARS, NOT_ONE_FILE, NOT_TEXT_MESSAGE, NO_DIFFERENCE, NO_FILE_YET, Outbound, diffNote, optionsOmittedNote, renderOptionsText, textCutNote, tooBigToDiff, turnCutNote, tutorContext
 - Imports: (none)
 
 ## src/tutor/core.ts
@@ -98,7 +128,7 @@ will be overwritten.
 
 ## src/tutor/transcript.ts
 
-- Exports: MAX_TURNS_KEPT, appendTurn, clearTranscript, getTranscript, sanitizeTranscript
+- Exports: MAX_TURNS_KEPT, appendTurn, clearTranscript, getTranscript, sanitizeTranscript, sentTurns
 - Imports: (none)
 
 ## src/walk/editor.ts
@@ -138,7 +168,7 @@ will be overwritten.
 
 ## src/walk/step-view.ts
 
-- Exports: ASK_BUTTON_LABEL, ASK_PLACEHOLDER, AUTHOR_BADGE, CANCEL_BUTTON_LABEL, CHECK_HEADING, CHECK_PARSE_MESSAGE, EXPORTS_HEADING, FILE_MISSING_MESSAGE, IMPORTS_HEADING, MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT, MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE, NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_HEADING, SHAPE_NOTE_MESSAGE, T10_BADGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE, TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, USER_TURN_LABEL, listOmittedMessage, optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey, stepScript, turnsOmittedMessage
+- Exports: ASK_BUTTON_LABEL, ASK_PLACEHOLDER, AUTHOR_BADGE, CANCEL_BUTTON_LABEL, CHECK_HEADING, CHECK_PARSE_MESSAGE, CLEAR_BUTTON_LABEL, DETOUR_BACK_LABEL, DETOUR_BUTTON_LABEL, DETOUR_REGENERATE_HINT, DETOUR_REGENERATE_LABEL, DETOUR_UNREACHABLE_MESSAGE, DETOUR_WAITING_MESSAGE, EXPORTS_HEADING, FILE_MISSING_MESSAGE, IMPORTS_HEADING, MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT, MAX_TURNS_RENDERED, NOTE_TURN_LABEL, NOT_TEXT_MESSAGE, NO_HISTORY_MESSAGE, PREPARING_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_HEADING, SHAPE_NOTE_MESSAGE, T10_BADGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE, TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, USER_TURN_LABEL, detourElsewhereMessage, listOmittedMessage, optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey, stepScript, turnsOmittedMessage
 - Imports: (none)
 
 ## src/walk/store.ts

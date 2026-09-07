@@ -4,7 +4,7 @@
  * `src/core.ts` — because it must stay loadable via dynamic `import()` for its
  * `import.meta.url` asset lookups (skins, grammar paths) to keep resolving correctly.
  *
- * Eight entry points (seven fixed, plus one per `test/unit/*.test.ts` file), all CJS /
+ * Nine entry points (eight fixed, plus one per `test/unit/*.test.ts` file), all CJS /
  * platform:node, so a plain `require()` or dynamic `import()` of the output works the same
  * inside the extension host and outside it:
  *   - src/extension.ts        -> dist/extension.js            (external: vscode, repo-tour) — the extension
@@ -14,6 +14,7 @@
  *   - test/walk.test.ts       -> dist/test/walk.test.js        (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/dial.test.ts       -> dist/test/dial.test.js        (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/tutor.test.ts      -> dist/test/tutor.test.js       (external: vscode, repo-tour, mocha) — vscode-test
+ *   - test/detour.test.ts     -> dist/test/detour.test.js      (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/unit/*.test.ts     -> dist/test/unit/*.js           (external: repo-tour, mocha)  — plain mocha, no vscode
  *
  * The unit/vscode-test split is a directory split on purpose: `.vscode-test.mjs`'s own
@@ -83,6 +84,12 @@ const builds = [
     ...shared,
     entryPoints: ['test/tutor.test.ts'],
     outfile: 'dist/test/tutor.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
+    entryPoints: ['test/detour.test.ts'],
+    outfile: 'dist/test/detour.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
   },
   ...(unitEntryPoints.length > 0

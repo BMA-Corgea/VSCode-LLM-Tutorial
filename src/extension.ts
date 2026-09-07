@@ -20,6 +20,8 @@ import {
   type BuildContext, type BuildOutcome, type ResumeContext,
 } from './start/build.js';
 import type { BuildRequest } from './start/request.js';
+import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
+import { readSkin } from './skins.js';
 import { StepDecorator } from './walk/editor.js';
 import { resolveInsideTarget } from './walk/paths.js';
 import { WalkSession, type WalkAdapters } from './walk/session.js';
@@ -256,6 +258,11 @@ export async function resumeOnActivate(
 let walkTree: DecisionsTreeProvider | undefined;
 let walkPanel: StepViewProvider | undefined;
 let walkDecorator: StepDecorator | undefined;
+/** T-7: the detour's narrator webview. A window-wide singleton like the four surfaces above
+ *  it, made once in `activate()` and handed to whichever session is running — the same
+ *  reasoning `walkPanel` carries: a session is REPLACED whenever the learner opens a different
+ *  target, and a panel pinned to the first one would outlive it. */
+let walkNarrator: NarratorPanel | undefined;
 let walkStatus: WalkStatusBar | undefined;
 let walkSession: WalkSession | undefined;
 let walkSkins: StartPanelDeps['skins'] | undefined;
@@ -349,6 +356,34 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     // ── T-6: the tutor ───────────────────────────────────────────────────────────────────
     tutorCore: () => tutorCoreNow(context),
     tutorSettings: tutorSettingsNow,
+
+    // ── T-7: the detour ──────────────────────────────────────────────────────────────────
+    //
+    // `globalStorageUri.fsPath` is AC2 in one line: the example's files land in the
+    // extension's own storage and never in `target`, so the learner's explorer, their `git
+    // status` and eventually their commit are untouched by construction rather than by a rule
+    // somebody has to remember. The session cannot derive this folder — it is the EXTENSION's
+    // to know — which is why it arrives as an adapter rather than being composed downstream.
+    //
+    // Absent when the narrator was never made (nothing but a defensive branch: `registerWalk`
+    // makes it before any session exists), and an absent adapter set is answered honestly by
+    // the panel rather than by a button that does nothing.
+    ...(walkNarrator
+      ? {
+          detour: detourAdaptersFor({
+            globalStorageRoot: context.globalStorageUri.fsPath,
+            narrator: walkNarrator,
+            // Read at the moment of the render rather than captured, so a learner who changes
+            // skin mid-detour is obeyed on the next stop — `commitPerStep`'s rule.
+            skin: () => readSkin(context.globalState, walkSkins?.DEFAULT_SKIN ?? 'system'),
+            // The WALK's decorator, so a detour stop and a step share one decoration type and
+            // one `clear()` that really clears — see `StepDecorator.revealRangeAt`.
+            revealRange: async (absPath, startLine, endLine) => {
+              await walkDecorator?.revealRangeAt(absPath, startLine, endLine);
+            },
+          }),
+        }
+      : {}),
 
     commitPerStep: () => vscode.workspace.getConfiguration('buildTutorials').get<boolean>('commitPerStep', true),
     // The walk's channel for a failure the LEARNER has to know about — today, a
@@ -532,6 +567,18 @@ function tutorSettingsNow(): { provider: string; model: string; timeoutMs: numbe
 function registerWalk(context: vscode.ExtensionContext): void {
   walkTree = new DecisionsTreeProvider();
   walkDecorator = new StepDecorator();
+  // Routed through `walkSession` by getter for the reason `StepPanelDeps.session` is a
+  // function: the narrator outlives any one session, and a captured one would keep driving a
+  // walk that has been replaced. An optional call, so a press that lands between two sessions
+  // is a no-op rather than a crash.
+  walkNarrator = new NarratorPanel(
+    {
+      prev: () => { walkSession?.detourPrev(); },
+      next: () => { walkSession?.detourNext(); },
+      back: () => { walkSession?.returnFromDetour(); },
+    },
+    () => walkSkins,
+  );
   walkStatus = new WalkStatusBar();
   walkPanel = new StepViewProvider(context, {
     skins: () => walkSkins,
@@ -542,6 +589,7 @@ function registerWalk(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     walkTree,
     walkDecorator,
+    walkNarrator,
     walkStatus,
     // The provider itself, ONE entry for the window's whole life. It owns the listeners it
     // hooks in `resolveWebviewView` and replaces them on each re-resolve, rather than

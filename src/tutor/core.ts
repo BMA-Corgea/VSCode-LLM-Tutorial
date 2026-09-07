@@ -15,10 +15,27 @@
  * a tutor that quietly bills is not honest, whatever else it gets right.
  */
 
-/** repo-tour's `AskMessage` — one turn of the conversation, and the only shape stored. */
+/**
+ * repo-tour's `AskMessage` — one turn of the conversation, and the only shape stored.
+ *
+ * `kind` is THIS extension's addition (T-7) and repo-tour knows nothing about it. A turn with
+ * `kind: 'note'` is something the WALK recorded — "detour taken: <title>" — rather than
+ * something either party said. It is drawn to the learner as part of the conversation and it is
+ * **never sent to a model**.
+ *
+ * That second half is not optional and it is not automatic. repo-tour's `trimMessages` rebuilds
+ * every turn as `{ role, content }`, so it drops `kind` and KEEPS the turn — which means a note
+ * handed to it arrives at the model as a sentence the assistant appears to have written. Notes
+ * are therefore filtered out by `sentTurns` BEFORE the prompt is built, not by hoping the
+ * downstream trimmer notices a field it has never heard of. (T-6's security review, finding 7:
+ * the transcript is an injection channel into the next prompt; inventing a synthetic assistant
+ * turn is that channel, self-inflicted.)
+ */
 export interface AskMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** Present only on turns the walk recorded about itself. Never sent to a model. */
+  kind?: 'note';
 }
 
 /**

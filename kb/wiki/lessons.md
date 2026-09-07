@@ -150,6 +150,72 @@ T-7 shipped that failure in miniature anyway, from a different direction: two wr
 detour directory, disagreeing on the security-critical argument, with the test suite proving the
 property against the one nothing called.
 
+## A paragraph in the right file about the wrong function documents itself out of the code (T-7)
+
+`store.ts` states, at length and correctly, that the containment root handed to `writeTextAtomic`
+must be the PROVEN store rather than the composed detour directory — because a planted
+`detours/<hash> -> /somewhere` makes the attacker's folder the root of the containment question
+and every write through it is perfectly "contained". `writeDetourFiles` obeys it and carried most
+of the module's suite, **including the test that plants the link and asserts the far end stays
+empty. It had no caller.** The code that shipped was a second writer in `session.ts`, written the
+same day under the same plan, which passed the composed directory; a symlink swapped in between
+the check and the write put a file outside with nothing thrown.
+
+Neither file is wrong about anything it says. They disagree, and the suite could not see it,
+because the tests that prove the rule are attached to the function that obeys it and nobody runs.
+This is T-5's lesson's sibling — there, a comment claiming a defence was complete stopped the next
+reader looking; here, a test proving a property against dead code stopped the suite looking.
+
+**An exported function with no caller in `src/` is a finding, not a loose end** (T-6 found the
+same shape in `clearTranscript`). Unify or delete; do not keep. And when the stated reason for two
+paths is real — here, that clearing the directory has to precede the `realpath` — the answer is to
+move the ordering inside the one implementation, never to keep two.
+
+## A cache is a second parser, and it will be the looser one (T-7)
+
+Persisting model output means the validated shape is re-entered from disk by a function that is
+not the parser. `sanitizeDetour` is genuinely careful — drops rather than coerces, rebuilds field
+by field, re-applies the count limits — and its module header said in as many words that "the
+cache is a SECOND door into the same data and gets the same bounds as the first". It got the same
+COUNT bounds. It did not get the path allow-list, which is the one bound the whole ticket exists
+for; nor a stop's range fitting its file; nor the parser's treatment of a lone `\r`; nor its
+case-folded duplicate rule.
+
+Nothing escaped, because the write gate re-runs the lexical check itself rather than trusting a
+caller — which was a deliberate decision in another file, and is now load-bearing rather than
+defensive.
+
+**If a validator's header says "the same bounds as the first", the bounds it means have to be a
+value both of them IMPORT — not a property both of them are supposed to have implemented.** And
+the direction matters: the second door must never be STRICTER than the first, or the write path
+refuses silently, the cache never hits, and the acceptance criterion fails with every test green.
+
+## "Leaves nothing behind" needs a list of what "nothing" covers (T-7)
+
+AC3 was satisfied: the tabs close, the directory goes, the workspace hash is byte-identical. And
+the narrator said on screen, *"These files live outside your project. Going back closes them and
+deletes them."* True of the tabs, true of the directory, and not true of the cached copy — same
+model-written bytes, in global storage, never pruned, surviving the return and the window
+closing. Neither half was a bug; the pair was a promise the code did not keep.
+
+It was invisible because **the acceptance check measured the workspace and the thing that
+persists is in global storage**. When a criterion says "leaves nothing behind", write down every
+place the feature writes, and check each one — or the check proves the sentence only where you
+already looked.
+
+Two fixes, both needed: the copy is bounded, and the sentence now says the copy exists and why.
+This repository's honest-controls rule is not only about buttons.
+
+## A sentence with two owners is a sentence drawn twice (T-7)
+
+`DetourSession` returned its refusal AND recorded it for the panel; `WalkSession` took the
+returned one and recorded it again on its own channel. Both are reasonable in isolation. Together
+the learner read the identical sentence twice, one line apart, in the same section.
+
+**When a lower layer already stores what it returns, the upper layer's job is to route it, not to
+re-store it.** The value is still returned — a caller needs to know a refusal happened — but the
+storing happens once, where the sentence was composed.
+
 ## Containment was never a check for whether a contained file is one the learner meant to send anywhere (T-6)
 
 T-4 and T-5 both hardened one boundary — *is this path inside the root* — and T-6 asks that

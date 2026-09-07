@@ -60,6 +60,9 @@ import {
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, PREPARING_MESSAGE,
+  DETOUR_BACK_LABEL, DETOUR_BUTTON_LABEL, DETOUR_REGENERATE_HINT, DETOUR_REGENERATE_LABEL,
+  DETOUR_UNREACHABLE_MESSAGE, DETOUR_WAITING_MESSAGE,
+  NOTE_TURN_LABEL, detourElsewhereMessage,
   optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey,
   stepScript, turnsOmittedMessage,
 } from '../../src/walk/step-view.js';
@@ -110,7 +113,9 @@ function stateAt(id: string, overrides: Partial<StepViewState> = {}): StepViewSt
     dial: stepDial(progress, id), skin: 'system',
     // T-6: a step nobody has asked about has an EMPTY conversation — the ordinary state, and
     // what every test that is not about the tutor starts from.
-    transcript: [], ...overrides,
+    // T-7: nothing being written and nothing open — the state that puts *Show me an
+    // unrelated example* on the page, and what every test that is not about it starts from.
+    transcript: [], detour: { generating: false }, ...overrides,
   };
 }
 
@@ -197,6 +202,9 @@ function recordingEffects(): { effects: StepEffects; asked: string[] } {
     openFile: () => undefined,
     runCheck: () => undefined,
     reproduce: () => undefined,
+    startDetour: () => undefined,
+    regenerateDetour: () => undefined,
+    returnFromDetour: () => undefined,
     persistDial: () => undefined,
     persistSkin: () => undefined,
     ask: (text) => { asked.push(text); },
@@ -321,16 +329,22 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     // …and page-wide, so a control cannot hide just outside the <ul>. The count is the point:
     // it is what turns "the alternatives are not selectable" from a claim about one element
     // into a claim about the whole document, and every ticket that adds a control has to come
-    // back here and say which one it added. T-6's is the tutor's *Ask*.
-    assert.equal(occurrences(html, /<button/g), 5, 'Previous, Open the file, Check my work, Next, Ask — and nothing else');
+    // back here and say which one it added. T-6's is the tutor's *Ask*; T-7's is the detour's
+    // *Show me an unrelated example*, which is on EVERY step by design (the spec's "visible
+    // always") and so is on this one.
+    assert.equal(
+      occurrences(html, /<button/g),
+      6,
+      'Previous, Open the file, Check my work, Next, Ask, Show me an unrelated example — and nothing else',
+    );
     assert.equal(occurrences(html, /<input/g), 3, 'the three dial radios — and nothing else');
     assert.equal(occurrences(html, /<textarea/g), 1, 'the tutor\'s box, and only it');
 
-    // T-5's reproduce offer and T-6's tutor are the only things that add to that count, and
-    // neither adds anything to the options list — the alternatives stay unselectable whatever
-    // else the page grows.
+    // T-5's reproduce offer, T-6's tutor and T-7's detour are the only things that add to that
+    // count, and none of them adds anything to the options list — the alternatives stay
+    // unselectable whatever else the page grows.
     const withOffer = renderStepHtml(stateAt('st-4-symbol-render', { reproduce: { count: 3, done: false } }), FAKE_SKINS);
-    assert.equal(occurrences(withOffer, /<button/g), 6, 'the four actions, Copy them in, and Ask');
+    assert.equal(occurrences(withOffer, /<button/g), 7, 'the four actions, Copy them in, Ask, and the detour');
     assert.equal(occurrences(withOffer, /<input/g), 3, 'and still only the dial radios');
     assert.ok(!/<button/i.test(optionsList(withOffer)), 'and nothing selectable moved into the options list');
 
@@ -339,7 +353,36 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     // move and there is no pressable *Ask* on a page that already has a question with the
     // model (the same "never rendered beats disabled" argument the options list makes).
     const thinking = renderStepHtml(stateAt('st-4-symbol-render', { tutor: { thinking: true } }), FAKE_SKINS);
-    assert.equal(occurrences(thinking, /<button/g), 5, 'still five: Cancel took Ask\'s place');
+    assert.equal(occurrences(thinking, /<button/g), 6, 'still six: Cancel took Ask\'s place, and the detour button is untouched');
+
+    // T-7 swaps the same way, and the two swaps are independent: an example being written
+    // takes the detour's own button away and puts its *Cancel* there, while *Ask* stays
+    // exactly where it was. Six either way, which is the property — a page that grew a
+    // control while another was in flight would be a page with two ways to spend money on it.
+    const writing = renderStepHtml(stateAt('st-4-symbol-render', { detour: { generating: true } }), FAKE_SKINS);
+    assert.equal(occurrences(writing, /<button/g), 6, 'still six: the detour\'s Cancel took its own button\'s place');
+    const inDetour = renderStepHtml(
+      stateAt('st-4-symbol-render', { detour: { generating: false, open: { stepId: 'st-4-symbol-render', title: 'Vending machine' } } }),
+      FAKE_SKINS,
+    );
+    // SEVEN here, and the extra one is deliberate: *Write a new example* — the spec's
+    // "regenerate" control (T-7 code review finding 9) — sits beside *Back to my build* on the
+    // step the detour is open on. It is the one place the count is allowed to grow, because it
+    // is the one state where a learner has an example in front of them and needs a way to ask
+    // for a different one; without it the cache had no escape hatch at all. It says what it
+    // costs, in `DETOUR_REGENERATE_HINT`, right under itself.
+    assert.equal(occurrences(inDetour, /<button/g), 7, 'Back to my build took the detour button\'s place, and Write a new example joined it');
+    assert.ok(inDetour.includes('id="btn-detour-regenerate"'), 'the regenerate control is really there');
+    assert.ok(inDetour.includes(DETOUR_REGENERATE_HINT), 'and it says that it is not free');
+
+    // NOT on a detour open somewhere else: a control that would replace an example the learner
+    // is not looking at is a control that names something it cannot act on.
+    const elsewhere = renderStepHtml(
+      stateAt('st-4-symbol-render', { detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'Vending machine' } } }),
+      FAKE_SKINS,
+    );
+    assert.equal(occurrences(elsewhere, /<button/g), 6, 'a detour open elsewhere offers the way out and nothing more');
+    assert.ok(!elsewhere.includes('id="btn-detour-regenerate"'));
     assert.ok(!thinking.includes('id="btn-tutor-ask"'), 'no Ask button anywhere while a question is in flight');
     assert.ok(thinking.includes('id="btn-tutor-cancel"'), 'and a Cancel that really exists');
   });
@@ -793,6 +836,11 @@ const ELEMENT_IDS = [
   // step, and a conversation with something in it — so the tests that care about their absence
   // delete them, exactly as the two above.
   'btn-tutor-cancel-elsewhere', 'btn-tutor-clear',
+  // T-7. `detourHtml` draws exactly ONE of these three at a time — the way in, the Cancel
+  // while one is being written, or the way out — so the real page never has all three. They
+  // are all here for the same reason the T-6 three are: the harness pre-creates every id the
+  // script names, and the tests that care about an absence delete the node deliberately.
+  'btn-detour-start', 'btn-detour-back', 'btn-tutor-cancel-detour',
 ];
 
 /** `saved` seeds what `getState()` returns BEFORE the script loads — the view-scoped blob a
@@ -2262,6 +2310,50 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
       // appearance is already keyed — but only as a side effect of a field that was keyed for
       // another reason, which is exactly the kind of coverage that quietly stops being true.
       pair('the clear control appearing with the first turn', { transcript: [] }, { transcript: turns(['user', 'why?']) }),
+
+      // ── T-7's own, and plan R4 is why they are here (six mutations for three fields). ──
+      //
+      // Each of these changes what is on the page, so each of them must move the key. The
+      // sharpest is `generating`: without it the button would go on looking pressable while
+      // an example was being written, and the example would appear only when something else
+      // forced a repaint — which reads exactly like a button that ignores you. `open` decides
+      // WHICH control is drawn at all, and `note` is the sentence AC5 requires a failure to
+      // carry, so a second failure with a different reason under an unchanged key would show
+      // the learner the first one's words.
+      pair('state.detour.generating', { detour: { generating: false } }, { detour: { generating: true } }),
+      pair('state.detour.open appearing', { detour: { generating: false } }, {
+        detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'A vending machine' } },
+      }),
+      pair('state.detour.open title', {
+        detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'A vending machine' } },
+      }, {
+        detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'A card game' } },
+      }),
+      // The step id is drawn too — an example open ELSEWHERE names which step it is on, so
+      // moving it changes a sentence even though the title has not moved.
+      pair('state.detour.open stepId', {
+        detour: { generating: false, open: { stepId: 'st-3-symbol-handle', title: 'A vending machine' } },
+      }, {
+        detour: { generating: false, open: { stepId: 'st-4-symbol-render', title: 'A vending machine' } },
+      }),
+      pair('state.detour.note appearing', { detour: { generating: false } }, {
+        detour: { generating: false, note: 'The model did not answer with the JSON this asks for.' },
+      }),
+      pair('state.detour.note changing', {
+        detour: { generating: false, note: 'The model sent 7 files and a worked example may have at most 5.' },
+      }, {
+        detour: { generating: false, note: 'The model narrated a file it never sent (ghost.ts).' },
+      }),
+
+      // T-7 (AC4): a note is drawn with its own class, its own label and its own escaping
+      // path, so a transcript identical BUT FOR `kind` renders differently and must not share
+      // a key. This is the one T-7 field that is not on `state.detour` at all — it rides in on
+      // the transcript, which is exactly how a rendered field goes missing from a key.
+      pair('a turn\'s kind', {
+        transcript: [{ role: 'assistant', content: 'detour taken: A vending machine' }],
+      }, {
+        transcript: [{ role: 'assistant', content: 'detour taken: A vending machine', kind: 'note' }],
+      }),
     ];
   }
 
@@ -2298,6 +2390,7 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
         spend: { preparing: 0, sending: 1, unwatched: 1, replies: 2, inputTokens: 90, outputTokens: 12, usd: 0.004, metered: true },
         accepted: 'why?',
       },
+      detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'A vending machine' }, note: 'one tab is still open' },
     });
     const state = stateAt('st-2-file-parse', everything());
     assert.equal(stepRenderKey(state, FAKE_SKINS), stepRenderKey(stateAt('st-2-file-parse', everything()), FAKE_SKINS),
@@ -2564,4 +2657,371 @@ suite('renderStepHtml — the spend line is TOTAL, like every other lookup on th
     assert.ok(!section.includes('NaN'), 'and never a NaN on somebody\'s page');
     assert.ok(!section.includes('$0.00'));
   });
+});
+
+// ── T-7: the detour's controls and the note in the transcript ───────────────────────────────
+
+suite('renderStepHtml — the detour, the second rung of the ladder (T-7, ACs 3, 4, 5)', () => {
+  test('the button is on EVERY step, in the tutor section, beside Ask', () => {
+    for (const id of ['st-1-shape-src', 'st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render']) {
+      const section = tutorSection(renderStepHtml(stateAt(id), FAKE_SKINS));
+      assert.ok(section.includes('id="btn-detour-start"'), `${id} has the detour button`);
+      assert.ok(section.includes(DETOUR_BUTTON_LABEL), 'with its label, where the eye already is');
+      assert.ok(section.includes('id="btn-tutor-ask"'), 'and *Ask* is still there — a ladder, not a replacement');
+    }
+  });
+
+  test('an unreachable provider keeps the button and says what it would have done', () => {
+    const section = tutorSection(renderStepHtml(
+      stateAt('st-2-file-parse', { tutor: { thinking: false, unreachable: 'not found on PATH' } }),
+      FAKE_SKINS,
+    ));
+    // Honest, not hidden: a control that vanished would tell somebody the feature was gone
+    // rather than that a binary was missing (the ask input's own argument, applied again).
+    assert.ok(section.includes('id="btn-detour-start"'), 'the button stays exactly where it was');
+    assert.ok(section.includes(DETOUR_UNREACHABLE_MESSAGE), 'with the reason under it');
+    assert.ok(section.includes('not found on PATH'), "and the provider's own sentence still above it");
+  });
+
+  test('while an example is being written the button is REPLACED by a Cancel that can act', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', { detour: { generating: true } }), FAKE_SKINS));
+    assert.ok(!section.includes('id="btn-detour-start"'), 'never rendered beats disabled');
+    assert.ok(section.includes(DETOUR_WAITING_MESSAGE), 'and it says what it is doing');
+    assert.ok(section.includes('id="btn-tutor-cancel-detour"'), 'with a control that really stops it');
+  });
+
+  test('while an example is OPEN the way out takes the button\'s place, and names the example', () => {
+    const section = tutorSection(renderStepHtml(
+      stateAt('st-2-file-parse', { detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'A vending machine' } } }),
+      FAKE_SKINS,
+    ));
+    assert.ok(!section.includes('id="btn-detour-start"'), 'no offer to start a second one on top of the first');
+    assert.ok(section.includes('id="btn-detour-back"'), 'the way out is on the page');
+    assert.ok(section.includes(DETOUR_BACK_LABEL));
+    assert.ok(section.includes('A vending machine'), 'and the learner is told which example they are in');
+    // The spec's "regenerate" control, which T-7 shipped without (code review finding 9) — and
+    // the cost said where it is offered, because it is the one control here that is never free.
+    assert.ok(section.includes(DETOUR_REGENERATE_LABEL), 'no way to ask for a different example');
+    assert.ok(section.includes(DETOUR_REGENERATE_HINT), 'and no word about what asking costs');
+  });
+
+  test('an example open on ANOTHER step names that step and still offers the way out', () => {
+    const section = tutorSection(renderStepHtml(
+      stateAt('st-2-file-parse', { detour: { generating: false, open: { stepId: 'st-4-symbol-render', title: 'A card game' } } }),
+      FAKE_SKINS,
+    ));
+    // The same failure `tutor.elsewhere` fixed: a control named on a page that does not have
+    // it. The session's return works from wherever the learner is standing, so the button may
+    // honestly be here.
+    assert.ok(section.includes(detourElsewhereMessage(4)), 'it says which step, 1-based, because a person reads it');
+    assert.ok(section.includes('id="btn-detour-back"'), 'and the control that acts on it is right there');
+  });
+
+  test('a plan that no longer has the step says "another step" rather than a raw id', () => {
+    const section = tutorSection(renderStepHtml(
+      stateAt('st-2-file-parse', { detour: { generating: false, open: { stepId: 'st-gone', title: 'A card game' } } }),
+      FAKE_SKINS,
+    ));
+    assert.ok(section.includes(detourElsewhereMessage(undefined)));
+    assert.ok(!section.includes('st-gone'), 'and never shows an internal id to a learner');
+  });
+
+  test('the refusal sentence is drawn, escaped, and capped like every other string here', () => {
+    const hostileNote = '<img src=x onerror="alert(1)"> ' + 'z'.repeat(MAX_PLAN_TEXT * 2);
+    const html = renderStepHtml(stateAt('st-2-file-parse', { detour: { generating: false, note: hostileNote } }), FAKE_SKINS);
+    const section = tutorSection(html);
+    assert.ok(section.includes('detour-note'), 'AC5: the sentence is on the page');
+    assert.ok(!section.includes('<img'), 'and nothing in it became markup');
+    assert.ok(section.includes('&lt;img'), 'it is drawn as text');
+    // Cut with a VISIBLE marker, never silently shortened — the whole-codebase rule for a cap.
+    assert.ok(section.includes(TRUNCATION_MARKER), 'the cap fired, and said so');
+    assert.ok(section.length < hostileNote.length, 'so one string cannot set the page size');
+  });
+
+  test('a note in the TRANSCRIPT is drawn as a note, never as something the tutor said (AC4)', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      transcript: [
+        { role: 'user', content: 'why is this its own module?' },
+        { role: 'assistant', content: 'because it changes for its own reasons' },
+        { role: 'assistant', content: 'detour taken: A vending machine', kind: 'note' },
+      ],
+    }), FAKE_SKINS));
+
+    assert.ok(section.includes('turn-note'), 'it gets its own class');
+    assert.ok(section.includes(NOTE_TURN_LABEL), 'and its own speaker label');
+    // The one that matters: a note is STORED with role 'assistant' (that is what
+    // `sanitizeTranscript` allow-lists), so a renderer that asked about the role first would
+    // attribute the walk's own sentence to the tutor — in the one place on this page where
+    // attribution is the entire point.
+    const noteRow = /<li class="tutor-turn turn-note">[\s\S]*?<\/li>/.exec(section);
+    assert.ok(noteRow, 'the note is its own row');
+    assert.ok(!noteRow[0].includes(TUTOR_TURN_LABEL), 'and is NOT labelled as the tutor');
+    assert.ok(noteRow[0].includes('detour taken: A vending machine'), 'with the title AC4 records');
+    // …while the real tutor turn beside it is untouched.
+    assert.ok(section.includes('turn-tutor'), 'the tutor\'s own turn still reads as the tutor\'s');
+  });
+
+  test('a note is drawn FLAT — a model-authored title cannot open a code block', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      transcript: [{ role: 'assistant', content: 'detour taken: ```js\nalert(1)\n```', kind: 'note' }],
+    }), FAKE_SKINS));
+    assert.ok(!section.includes('<pre class="tutor-code">'), 'no fence pass on a note');
+    assert.ok(section.includes('```'), 'the backticks are drawn as the text they are');
+  });
+
+  test('a forged kind is not a note — only the literal string is honoured', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      transcript: poison([{ role: 'assistant', content: 'trust me', kind: 'notes' }]),
+    }), FAKE_SKINS));
+    assert.ok(!section.includes('turn-note'), 'anything but `note` is an ordinary turn');
+    assert.ok(section.includes('turn-tutor'), 'drawn as the tutor\'s, which is the conservative direction');
+  });
+});
+
+suite('the step panel\'s client script — the detour\'s two buttons', () => {
+  test('the start button posts detour:start, and the host accepts it', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-2-file-parse'));
+    dom.elements.get('btn-detour-start')!.dispatch('click');
+
+    assert.deepEqual(dom.posted, [{ type: 'detour:start', payload: {} }]);
+    // Through the REAL parser: a drift between what the button sends and what the host takes
+    // is a control that silently does nothing, which is what this pairing exists to catch.
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'detour:start' });
+  });
+
+  test('the way out posts detour:back, and the host accepts it', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-2-file-parse'));
+    dom.elements.get('btn-detour-back')!.dispatch('click');
+
+    assert.deepEqual(dom.posted, [{ type: 'detour:back', payload: {} }]);
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'detour:back' });
+  });
+
+  test('the detour\'s Cancel posts the SAME tutor:cancel — one control, one message', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-2-file-parse'));
+    dom.elements.get('btn-tutor-cancel-detour')!.dispatch('click');
+
+    assert.deepEqual(dom.posted, [{ type: 'tutor:cancel', payload: {} }]);
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'tutor:cancel' });
+  });
+
+  test('the script still loads on a page where none of the three is rendered', () => {
+    // The real page never has all three at once — `detourHtml` draws exactly one state — so
+    // the harness's pre-created nodes are taken away deliberately to reproduce what a browser
+    // really hands this script: `getElementById` answering nothing.
+    const dom = buildFakeDom();
+    for (const id of ['btn-detour-start', 'btn-detour-back', 'btn-tutor-cancel-detour']) dom.elements.delete(id);
+    assert.doesNotThrow(() => { runScript(dom, stateAt('st-2-file-parse')); });
+    dom.elements.get('btn-next')!.dispatch('click');
+    assert.deepEqual(dom.posted, [{ type: 'step:next', payload: {} }], 'and the rest of the page is still wired');
+  });
+});
+
+// ── the sweep, done by REFLECTION rather than by hand ────────────────────────────────────────
+
+/**
+ * **The audit one level up: would a NEW rendered field fail anything?**
+ *
+ * The mutation sweep above is excellent and it enumerates its fields BY HAND, so what it
+ * proves is that the fields *somebody remembered to add* are keyed. A field added to
+ * `StepViewState` tomorrow, drawn by `bodyHtml` and absent from both `stepRenderKey` and that
+ * list, would pass every test in this file — which is the same gap `stepRenderKey` itself
+ * exists to close, one level up. It is exactly the shape of T-7 code finding 3: an invariant
+ * that survives only because nobody has contradicted it yet.
+ *
+ * So this walks the state OBJECT instead of a list. Every leaf reachable from a fully-populated
+ * state is mutated, one at a time, and the load-bearing direction is asserted:
+ *
+ *   > **If the page changed, the key must have changed.**
+ *
+ * Only that direction. The converse — key moved, page did not — is over-keying, which costs one
+ * wasted repaint and is the safe error; the hand-written sweep above is where it is checked for
+ * the fields where it matters, because a generic sweep cannot tell a deliberate over-key from
+ * an accident.
+ *
+ * A new field joins the walk automatically, because the walk is over `Object.keys`. What it
+ * cannot see is a field the fixture leaves `undefined` — `structuredClone` cannot invent one —
+ * so `EVERYTHING` below has to stay exhaustive, and the guard for THAT is the shape assertion
+ * at the end of this suite, which fails when `StepViewState` grows a key the fixture omits.
+ */
+suite('stepRenderKey — the sweep, by reflection, so a NEW field cannot slip past it', () => {
+  /** Every optional field of `StepViewState` present and non-empty. */
+  function everything(): StepViewState {
+    return stateAt('st-2-file-parse', {
+      check: { summary: 'every part is there: 1 export present', report: report({ symbols: [{ name: 'tokenize', kind: 'function', status: 'present' }] }) },
+      shape: { signatures: ['export function f(): void {'], imports: ['import x from "y";'] },
+      writeNote: 'the reference file was written',
+      reproduce: { count: 4, done: false },
+      transcript: [
+        { role: 'user', content: 'why is this its own module?' },
+        { role: 'assistant', content: 'because the parser has one job' },
+        { role: 'assistant', content: 'detour taken: A vending machine', kind: 'note' },
+      ],
+      tutor: {
+        thinking: true,
+        stage: 'sending',
+        unreachable: 'claude was not found on PATH',
+        note: 'you stopped waiting',
+        elsewhere: { stepId: 'st-4-symbol-render', stage: 'sending' },
+        spend: { preparing: 1, sending: 1, unwatched: 1, replies: 2, inputTokens: 90, outputTokens: 12, usd: 0.004, metered: true },
+        accepted: 'why is this its own module?',
+      },
+      detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'A vending machine' }, note: 'one tab is still open' },
+    });
+  }
+
+  /**
+   * Fields that change the page and deliberately do NOT move the key. Every entry is a
+   * DECISION with a reason, and the list is short on purpose: a new name appearing here is how
+   * an oversight would be laundered into a policy, so adding one should feel expensive.
+   */
+  const EXCLUDED: Array<[RegExp, string]> = [
+    [/^dial$/, 'the browser already has the radio checked; a repaint would fight the control'],
+    [/^skin$/, 'the client script applies it without a rebuild'],
+    [/^note$/, 'the client script writes it into its own node between repaints'],
+    [/^progress\b/, 'nothing on the page reads it — the session resolves the dial now'],
+    // The one the T-7 review found and wrote down rather than fixed: `plan.steps` turns
+    // `detour.open.stepId` into a step NUMBER for `detourElsewhereMessage`. `WalkSession.plan`
+    // is assigned once in the constructor and never reassigned, so within a session the value
+    // cannot move. It is named here so the ticket that adds "reload the plan without reopening
+    // the walk" finds it, rather than discovering it as a stale step number on a page.
+    [/^plan\b/, 'assigned once per session and never reassigned — see the T-7 code review'],
+  ];
+
+  /** Every leaf path in `value`, as dotted/bracketed strings. */
+  function leaves(value: unknown, at: string, out: string[]): void {
+    if (Array.isArray(value)) {
+      value.forEach((entry, i) => leaves(entry, `${at}[${i}]`, out));
+      return;
+    }
+    if (typeof value === 'object' && value !== null) {
+      for (const k of Object.keys(value)) leaves((value as Record<string, unknown>)[k], at === '' ? k : `${at}.${k}`, out);
+      return;
+    }
+    out.push(at);
+  }
+
+  function read(root: unknown, path: string): unknown {
+    return path.split(/\.|\[(\d+)\]\.?/).filter((p) => p !== undefined && p !== '')
+      .reduce<unknown>((at, part) => (at as Record<string, unknown> | undefined)?.[part], root);
+  }
+
+  function write(root: unknown, path: string, next: unknown): void {
+    const parts = path.split(/\.|\[(\d+)\]\.?/).filter((p) => p !== undefined && p !== '');
+    const last = parts.pop();
+    if (last === undefined) return;
+    const parent = parts.reduce<unknown>((at, part) => (at as Record<string, unknown> | undefined)?.[part], root);
+    if (parent !== null && typeof parent === 'object') (parent as Record<string, unknown>)[last] = next;
+  }
+
+  /** A different value of the same shape — enough to move a render if the field is drawn. */
+  function otherValue(value: unknown): unknown {
+    if (typeof value === 'string') return `${value}~mutated`;
+    if (typeof value === 'number') return value + 17;
+    if (typeof value === 'boolean') return !value;
+    return 'mutated';
+  }
+
+  test('every leaf that changes the page changes the key — walked, not listed', () => {
+    const paths: string[] = [];
+    leaves(everything(), '', paths);
+    assert.ok(paths.length > 40, `the walk found only ${paths.length} leaves — it is not reaching the state`);
+
+    const skipped: string[] = [];
+    let checked = 0;
+    for (const path of paths) {
+      const excuse = EXCLUDED.find(([pattern]) => pattern.test(path));
+      if (excuse) { skipped.push(path); continue; }
+
+      const before = everything();
+      const after = everything();
+      write(after, path, otherValue(read(after, path)));
+
+      let pageBefore: string;
+      let pageAfter: string;
+      try {
+        pageBefore = pageWithoutNonce(renderStepHtml(before, FAKE_SKINS));
+        pageAfter = pageWithoutNonce(renderStepHtml(after, FAKE_SKINS));
+      } catch (err) {
+        assert.fail(`renderStepHtml threw on a mutated ${path}: ${String(err)} — a push must never take down the panel`);
+      }
+      if (pageBefore === pageAfter) continue; // not drawn; nothing to key
+      checked += 1;
+      assert.notEqual(
+        stepRenderKey(before, FAKE_SKINS), stepRenderKey(after, FAKE_SKINS),
+        `${path} changes the page and NOT the repaint key — the panel would store it and never draw it. `
+        + 'Add it to stepRenderKey, or to EXCLUDED with the reason it is safe.',
+      );
+    }
+    assert.ok(checked > 20, `only ${checked} drawn leaves were found — the fixture is not populating the state`);
+    assert.deepEqual(
+      skipped.filter((p) => !EXCLUDED.some(([pattern]) => pattern.test(p))), [],
+      'every skip must have an entry in EXCLUDED',
+    );
+  });
+
+  test('the fixture really does populate every key StepViewState has', () => {
+    // The one thing reflection cannot do is discover a field nobody set: `structuredClone` of a
+    // state with `detour` absent has no `detour` to walk. So the fixture's exhaustiveness is
+    // the sweep's own precondition, and this is what fails when the type grows a field the
+    // fixture forgot — the moment to add it above, before it is drawn and unkeyed.
+    const state = everything();
+    const present = new Set(Object.keys(state));
+    for (const required of ['step', 'plan', 'progress', 'dial', 'skin', 'fileExists', 'check', 'shape', 'writeNote', 'reproduce', 'transcript', 'tutor', 'detour']) {
+      assert.ok(present.has(required), `the reflective sweep's fixture does not set \`${required}\`, so it cannot see it`);
+    }
+    assert.ok(state.tutor !== undefined && Object.keys(state.tutor).length >= 7, 'and every field of `tutor`');
+    assert.ok(state.detour !== undefined && Object.keys(state.detour).length >= 3, 'and every field of `detour`');
+  });
+});
+
+// ── one sentence, one place on the page ──────────────────────────────────────────────────────
+
+/**
+ * **T-7 code review finding 5.** `DetourSession.refuse` stores the sentence AND returns it, and
+ * `WalkSession.startDetour` used to put the returned copy through `setTutorNote` as well — so
+ * the identical string was drawn twice, once under `class="tutor-note"` and once under
+ * `class="detour-note"`, in adjacent paragraphs of the same section. The reviewer measured it
+ * through this very function. Same for the return's "this tab is still open".
+ *
+ * The fix is in `session.ts` (the walk routes, it does not re-store), and this is the assertion
+ * that would catch it coming back through the PAGE: whatever the host puts in the two note
+ * fields, the page draws each of them once — and a state carrying the same sentence in both is
+ * still drawn twice here, correctly, because at that point the host really has said it twice.
+ * That is why the walk-level test in `walk-session.test.ts` asserts `tutor.note === undefined`:
+ * the page cannot fix a host that repeats itself, and it should not try.
+ */
+suite('a detour refusal is drawn once (T-7 code review finding 5)', () => {
+  const SENTENCE = 'The model sent 7 files and a worked example may have at most 5. Nothing was written. Try again.';
+
+  test('the sentence the session stores appears exactly once on the page', () => {
+    const html = renderStepHtml(
+      stateAt('st-2-file-parse', { detour: { generating: false, note: SENTENCE } }),
+      FAKE_SKINS,
+    );
+    assert.equal(occurrences(html, new RegExp(escapeRe(SENTENCE), 'g')), 1, 'the refusal is on the page twice');
+    assert.match(html, new RegExp(`<p class="detour-note" id="detour-note">${escapeRe(SENTENCE)}</p>`),
+      'and it is under the detour’s own class, where `#detour-note` is what the client script writes into');
+  });
+
+  test('the two note channels are still separate — a host that says two things says both', () => {
+    // The fix must not have been "collapse the channels": the tutor's note and the detour's are
+    // about different controls and a walk can legitimately have something to say about each.
+    const html = renderStepHtml(
+      stateAt('st-2-file-parse', {
+        tutor: { thinking: false, note: 'You stopped waiting. The model is still finishing that question.' },
+        detour: { generating: false, note: SENTENCE },
+      }),
+      FAKE_SKINS,
+    );
+    assert.match(html, new RegExp(`<p class="detour-note" id="detour-note">${escapeRe(SENTENCE)}</p>`));
+    assert.match(html, /class="tutor-note"[^>]*>[^<]*still finishing that question/);
+  });
+
+  function escapeRe(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
 });

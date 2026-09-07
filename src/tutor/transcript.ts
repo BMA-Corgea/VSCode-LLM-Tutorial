@@ -129,10 +129,31 @@ export function sanitizeTranscript(raw: unknown): AskMessage[] {
     const role = entry['role'];
     const content = entry['content'];
     if ((role === 'user' || role === 'assistant') && typeof content === 'string') {
-      out.push({ role, content: Outbound.turn(content) });
+      // T-7 widens the allow-list by exactly ONE field, and by one VALUE of it. `kind` survives
+      // only when it is the literal `'note'`; every other value — `'system'`, an object with a
+      // `toString`, a number, `null` — is dropped and the turn is kept as an ordinary one. The
+      // rebuild is still a rebuild, so this is a second allowed field rather than a hole: an
+      // entry carrying `{ role, content, kind: 'note', extra: '<script>' }` still leaves `extra`
+      // behind. Widening an allow-list is the one change to this function that can quietly
+      // un-prove its own security review, which is why the value is checked and not just the key.
+      const kind = entry['kind'];
+      out.push(kind === 'note' ? { role, content: Outbound.turn(content), kind: 'note' } : { role, content: Outbound.turn(content) });
     }
   }
   return out;
+}
+
+/**
+ * The turns that may be SENT — the transcript minus the walk's own notes.
+ *
+ * Separate from `getTranscript` on purpose: the panel draws notes and a model must never see
+ * them. Calling `getTranscript` on the send path would hand repo-tour's `trimMessages` a note,
+ * and `trimMessages` rebuilds turns as `{ role, content }` — dropping `kind` and keeping the
+ * sentence, which arrives at the model looking like something the assistant wrote. The filter
+ * has to be here, upstream of a trimmer that cannot know what it is discarding.
+ */
+export function sentTurns(progress: Progress, stepId: string): AskMessage[] {
+  return getTranscript(progress, stepId).filter((m) => m.kind !== 'note');
 }
 
 /**
