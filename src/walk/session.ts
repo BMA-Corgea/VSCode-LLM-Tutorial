@@ -202,7 +202,7 @@ import {
 } from '../tutor/ask.js';
 import { tutorContext } from '../tutor/context.js';
 import type { AskMessage, TutorCore } from '../tutor/core.js';
-import { appendTurn, clearTranscript, getTranscript } from '../tutor/transcript.js';
+import { appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
 import {
   currentStep,
   nextStepId,
@@ -1110,9 +1110,14 @@ export class WalkSession {
     this.lastAsked = { stepId, text };
     // Sent BEFORE the commit, so the push that raises the spinner is made with the request
     // already live — there is no window in which the page says "thinking…" and nothing is.
-    // `getTranscript` re-reads what was just appended, which is the sanitising round trip the
-    // stored transcript owes: what the model is shown is what the panel will draw.
-    ticket.send(settings, ctx, getTranscript(this.progress, stepId));
+    // `sentTurns` re-reads what was just appended, which is the sanitising round trip the
+    // stored transcript owes — and then drops the walk's own notes (T-7). What the model is
+    // shown is what the panel draws MINUS anything neither party said: a "detour taken: …"
+    // note is part of the learner's record of the conversation and would reach the model as a
+    // sentence the assistant appears to have written, because repo-tour's `trimMessages`
+    // rebuilds turns as `{ role, content }` and so keeps the sentence while dropping the field
+    // that marked it. The filter belongs here, upstream of that trimmer.
+    ticket.send(settings, ctx, sentTurns(this.progress, stepId));
 
     // Registered BEFORE the commit, and the order is the last of AC4's locks. `commit`
     // persists and then pushes to four surfaces, any of which is an adapter that can throw —

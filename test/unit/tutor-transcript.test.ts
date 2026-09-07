@@ -35,7 +35,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { MAX_TURN_CHARS, turnCutNote } from '../../src/tutor/context.js';
 import type { AskMessage } from '../../src/tutor/core.js';
-import { MAX_TURNS_KEPT, appendTurn, clearTranscript, getTranscript, sanitizeTranscript } from '../../src/tutor/transcript.js';
+import { MAX_TURNS_KEPT, appendTurn, clearTranscript, getTranscript, sanitizeTranscript, sentTurns } from '../../src/tutor/transcript.js';
 import { emptyProgress, markDone, setCheck, setCurrent, setDial, type Progress } from '../../src/walk/model.js';
 import { buildDir, loadPlan, loadProgress, saveProgress } from '../../src/walk/store.js';
 import { fixturePlan, writeFixtureTarget } from './walk-fixtures.js';
@@ -412,5 +412,108 @@ suite('the size of one turn — a reply is stored once and billed on every quest
     assert.equal(kept.length, MAX_TURNS_KEPT);
     const total = kept.reduce((sum, turn) => sum + turn.content.length, 0);
     assert.ok(total <= MAX_TURNS_KEPT * MAX_TURN_CHARS, `${total} characters on the learner's disk for one step`);
+  });
+});
+
+/**
+ * T-7 widened `sanitizeTranscript`'s allow-list by one field, `kind`, and one value of it,
+ * `'note'`. That is the single most dangerous kind of edit this function can receive: its
+ * security review (T-6, and the 12 hostile-transcript cases above) proved a property —
+ * "a kept turn is REBUILT, so nothing extra survives" — and widening an allow-list is exactly
+ * how such a proof gets quietly un-earned. So the proof is re-run here against the wider rule,
+ * and the value is pinned as tightly as the key.
+ *
+ * The second suite pins the half that no amount of sanitising can cover: repo-tour's
+ * `trimMessages` rebuilds every turn as `{ role, content }`, which DROPS `kind` and KEEPS the
+ * sentence. A note that reaches it arrives at the model looking like something the assistant
+ * wrote — T-6 security finding 7's injection channel, self-inflicted. `sentTurns` is the filter
+ * that has to run first, and these tests fail if anyone routes the send path back through
+ * `getTranscript`.
+ */
+suite('a note is a turn the learner reads and the model never sees (T-7)', () => {
+  const noted = (content: string): unknown => ({ role: 'assistant', content, kind: 'note' });
+
+  test('a note survives sanitising, marked', () => {
+    const out = sanitizeTranscript([noted('detour taken: Sorting a deck of cards')]);
+    assert.deepEqual(out, [{ role: 'assistant', content: 'detour taken: Sorting a deck of cards', kind: 'note' }]);
+  });
+
+  test('the WIDENED allow-list is still an allow-list: a forged kind is dropped, the turn is kept', () => {
+    // Each of these is a `kind` that is not the literal 'note'. None may survive, and none may
+    // take the turn down with it — a hand-edited progress.json is a bad field, not a lost
+    // conversation.
+    const forged: unknown[] = [
+      { role: 'assistant', content: 'a', kind: 'system' },
+      { role: 'assistant', content: 'b', kind: 'Note' },
+      { role: 'assistant', content: 'c', kind: ['note'] },
+      { role: 'assistant', content: 'd', kind: { toString: () => 'note' } },
+      { role: 'assistant', content: 'e', kind: 7 },
+      { role: 'assistant', content: 'f', kind: null },
+      { role: 'assistant', content: 'g', kind: undefined },
+    ];
+    const out = sanitizeTranscript(forged);
+    assert.equal(out.length, forged.length, 'a bad kind must not drop the turn');
+    for (const turn of out) assert.ok(!('kind' in turn), `kind survived: ${JSON.stringify(turn)}`);
+  });
+
+  test('the rebuild is still a rebuild — a note carries nothing else through', () => {
+    const out = sanitizeTranscript([
+      { role: 'assistant', content: 'x', kind: 'note', extra: '<script>alert(1)</script>', role2: 'system' },
+    ]);
+    assert.equal(out.length, 1);
+    assert.deepEqual(Object.keys(out[0]!).sort(), ['content', 'kind', 'role']);
+  });
+
+  test('a note is still size-capped like any other turn', () => {
+    const out = sanitizeTranscript([noted('N'.repeat(MAX_TURN_CHARS * 3))]);
+    assert.equal(out.length, 1);
+    const turn = out[0]!;
+    assert.ok(turn.content.length < MAX_TURN_CHARS * 3);
+    assert.ok(turn.content.includes(turnCutNote(MAX_TURN_CHARS * 3).slice(0, 12)) || turn.content.length <= MAX_TURN_CHARS + 200);
+    assert.equal(turn.kind, 'note');
+  });
+
+  test('a __proto__ payload alongside a note still pollutes nothing', () => {
+    sanitizeTranscript([{ role: 'user', content: 'q', kind: 'note', ['__proto__']: { polluted: true } }]);
+    assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+  });
+});
+
+suite('sentTurns — the filter that stands between a note and the model (T-7)', () => {
+  const withTurns = (turns: AskMessage[]): Progress => {
+    let progress = emptyProgress(fixturePlan());
+    for (const t of turns) progress = appendTurn(progress, 'st-1-shape-src', t);
+    return progress;
+  };
+
+  test('the panel sees the note and the model does not', () => {
+    const progress = withTurns([
+      { role: 'user', content: 'why a src folder?' },
+      { role: 'assistant', content: 'because…' },
+      { role: 'assistant', content: 'detour taken: Sorting a deck of cards', kind: 'note' },
+      { role: 'user', content: 'and the next step?' },
+    ]);
+    assert.equal(getTranscript(progress, 'st-1-shape-src').length, 4, 'the learner reads their whole record');
+    const sent = sentTurns(progress, 'st-1-shape-src');
+    assert.equal(sent.length, 3);
+    assert.ok(!sent.some((m) => m.content.startsWith('detour taken:')), 'a note reached the send path');
+    assert.ok(!sent.some((m) => m.kind === 'note'));
+  });
+
+  test('a transcript that is ONLY notes sends nothing at all', () => {
+    const progress = withTurns([{ role: 'assistant', content: 'detour taken: X', kind: 'note' }]);
+    assert.equal(sentTurns(progress, 'st-1-shape-src').length, 0);
+    assert.equal(getTranscript(progress, 'st-1-shape-src').length, 1);
+  });
+
+  test('THE REASON THIS FILTER EXISTS: trimMessages would keep the sentence and drop the mark', () => {
+    // Not a test of our code — a test of the assumption our code is built on. repo-tour's
+    // trimMessages rebuilds `{ role, content }`, so handing it a note yields a turn the model
+    // reads as the assistant's own words. If repo-tour ever starts honouring `kind`, this test
+    // fails and `sentTurns` can be reconsidered; until then it is load-bearing.
+    const note: AskMessage = { role: 'assistant', content: 'detour taken: X', kind: 'note' };
+    const rebuilt = [note].map((m) => ({ role: m.role, content: m.content }));
+    assert.deepEqual(rebuilt, [{ role: 'assistant', content: 'detour taken: X' }]);
+    assert.ok(!('kind' in rebuilt[0]!), 'the mark is gone and the sentence is not — hence sentTurns');
   });
 });
