@@ -74,21 +74,70 @@
  * `commitStep`'s `try` opens at `ensureRepo` rather than after it: `git init` is a `GitRunner`
  * call like every other, and on a machine with no `git` on `PATH` it is the FIRST one to fail
  * — once per step, on all sixty-one of them, if its rejection is left to escape.
+ *
+ * ## A git that was STOPPED is not a git that said no (T-13)
+ *
+ * The paragraph above is exactly why the timeout `GitRunner` now carries needed a shape of its
+ * own rather than the ordinary rejection. Two of the swallows here read a rejection as an
+ * ANSWER — `rev-parse` rejecting means "not a repository yet", `config` rejecting means "that
+ * key is unset at every level" — and both of those readings are false for a subprocess that
+ * was killed at thirty seconds, in the direction that costs the learner something real:
+ *
+ *   - a timed-out `rev-parse --is-inside-work-tree` read as `false` makes `ensureRepo` run
+ *     `git init` **inside a repository that already exists**. Where `target` is a subdirectory
+ *     of the learner's own repo that creates the nested repository this file's own header
+ *     spends a paragraph arguing against, and every later step commits into it where the
+ *     learner's `git log` will never look.
+ *   - a timed-out `git config user.name` read as `''` reports "no git identity configured in
+ *     this folder" to somebody whose identity is configured perfectly well, together with the
+ *     advice to go and set it — advice that fixes nothing and hides what happened.
+ *
+ * So `gitTimedOut` is checked before either swallow and the rejection is re-thrown, into the
+ * one `try` in `commitStep` that turns everything into `CommitResult.reason`. The learner
+ * still gets a value rather than an unhandled rejection; what changes is that the sentence
+ * says git was stopped, instead of asserting something about their repository that nobody
+ * actually found out. `ensureTranscriptIgnored` is the deliberate exception — see its own
+ * comment.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { GitRunner } from '../start/build.js';
+import { gitTimedOut, type GitRunner } from '../start/build.js';
 import type { StepLike } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
 
+/**
+ * WHY a commit did not happen, as a value (T-13 review finding 3).
+ *
+ * `reason` is a sentence for a person, and two of the things in it come out of `plan.json` —
+ * `commitSubject(step)` is the plan's own question and option label, and the runner puts the
+ * whole argv into an ordinary failure's message. A caller that decides what to TELL the
+ * learner by matching that sentence is therefore letting "a repository someone else pointed
+ * the build at" choose its branch. Driven: a plan whose question read `timed out after 1
+ * second and was stopped` sent an ordinary exit-1 commit down the stopped-git path, and one
+ * reading `no git identity configured in this folder` sent it down the identity path.
+ *
+ * So the sentence is for reading and this is for branching, and the two never swap jobs.
+ */
+export type CommitRefusal =
+  /** Containment left nothing to stage — including the trivial empty list. */
+  | 'nothing-to-stage'
+  /** No `user.name` / `user.email` here: a refusal on principle, see this file's header. */
+  | 'no-identity'
+  /** A subprocess this extension stopped at its own bound — nobody found out an answer. */
+  | 'git-stopped'
+  /** Git answered, and the answer was no: a stale lock, a hook, a detached HEAD, a full disk. */
+  | 'git-failed';
+
 /** What `commitStep` (and, upstream of it, `identityConfigured`) actually did — never a throw,
- *  see this file's header. `reason` is set on every `committed: false`, so the panel always
- *  has something to show rather than a silent no-op. */
+ *  see this file's header. `reason` and `refusal` are BOTH set on every `committed: false`:
+ *  the first so the panel always has something to show rather than a silent no-op, the second
+ *  so no caller has to read the first to find out which of the four things happened. */
 export interface CommitResult {
   committed: boolean;
   reason?: string;
+  refusal?: CommitRefusal;
 }
 
 /**
@@ -100,7 +149,11 @@ export interface CommitResult {
 async function insideWorkTree(target: string, git: GitRunner): Promise<boolean> {
   try {
     return (await git(['rev-parse', '--is-inside-work-tree'], target)).trim() === 'true';
-  } catch {
+  } catch (err) {
+    // A git that was STOPPED never answered the question, and answering it `false` on its
+    // behalf is what would `git init` a second repository inside the learner's own. See this
+    // file's header; the re-throw lands in `commitStep`'s single `try`.
+    if (gitTimedOut(err)) throw err;
     return false;
   }
 }
@@ -230,6 +283,33 @@ export async function ensureTranscriptIgnored(target: string, git: GitRunner): P
   } catch {
     // See the header: hardening that could not happen is not a reason to refuse the commit or
     // the question it runs in front of.
+    //
+    // A TIMEOUT is swallowed here too, and it is the one place in this file where that is
+    // deliberate rather than an oversight (T-13). The two swallows above re-throw because they
+    // would otherwise ANSWER a question nobody found the answer to; this one asks nothing and
+    // reports nothing on any path — its whole contract is "never throws and never reports",
+    // for the reason the header gives, and a timeout is not a different kind of "could not".
+    //
+    // What it costs has to be stated as the AGGREGATE, because "thirty seconds" is true of
+    // this call and is not the number a learner experiences (review finding 9). Bounds are
+    // serial, and on a machine where git has stopped answering they all fire:
+    //
+    //   - one *Check my work* press, with `rev-parse --is-inside-work-tree` still answering,
+    //     runs `rev-parse --git-dir` here and then `config user.name` + `config user.email`.
+    //     That is FOUR calls but THREE bounds — `identityConfigured` runs the two `config`
+    //     calls in `Promise.all`, so they share one — ≈ 90 seconds.
+    //   - with the `add` stopped as well it is five calls and FOUR bounds, ≈ 120 seconds — and
+    //     five rather than six because a stopped `add` throws, so the `commit` never runs.
+    //   - the ask path pays its own before any of that: the 15 s `claude --version` probe and
+    //     the 30 s `diff --no-index`, plus this call's 30 s ONCE per session — up to 75 s from
+    //     the press to the model being asked.
+    //
+    // Each bound is 30 s, or 35 s where the subprocess needed the runner's second signal
+    // (`GIT_KILL_GRACE_MS`). That is a bounded wait rather than the unbounded one this ticket
+    // removed, and it is the honest price of running a hardening step in front of both.
+    // `ensureTranscriptIgnoredOnce` in `src/walk/session.ts` sets its flag BEFORE its await,
+    // which is what keeps this particular 30 s a once-per-session cost rather than a per-ask
+    // one — deliberate, and the reason the ask figure above is 75 s and not 105 s.
   }
 }
 
@@ -244,7 +324,9 @@ export async function ensureTranscriptIgnored(target: string, git: GitRunner): P
 async function configValue(target: string, key: string, git: GitRunner): Promise<string> {
   try {
     return (await git(['config', key], target)).trim();
-  } catch {
+  } catch (err) {
+    // Unset and stopped are different facts, and only the first one is git's answer (T-13).
+    if (gitTimedOut(err)) throw err;
     return '';
   }
 }
@@ -317,6 +399,19 @@ function resolveFiles(target: string, files: readonly string[]): string[] {
  * anticipate — comes back the same way, as `CommitResult.reason`, never as a thrown or
  * rejected promise. That is what the single `try` around the whole body is for, `ensureRepo`
  * included.
+ *
+ * A git that was STOPPED at its bound (T-13) is one of those "anything else", and comes back
+ * as `refusal: 'git-stopped'` with the runner's own sentence — `git commit … timed out after
+ * 30 seconds and was stopped` — rather than as a claim about the repository.
+ *
+ * The consequence the caller is entitled to pass on is that the learner's own FILE is
+ * untouched, and it is worth saying precisely, because a looser version of this sentence was
+ * wrong (review finding 6). This module does write: `ensureTranscriptIgnored` appends to
+ * `.git/info/exclude` and creates the directory for it, and `ensureRepo` can run `git init`.
+ * What it never writes is anything the learner authored or would ever open — every write it
+ * makes is inside `.git/`, which is the same argument this file's header makes for using
+ * `exclude` instead of a tracked `.gitignore`. So "nothing of yours was edited" holds; "it
+ * writes nothing" did not, and is not what is claimed here.
  */
 export async function commitStep(
   target: string,
@@ -329,17 +424,24 @@ export async function commitStep(
 
     const resolved = resolveFiles(target, files);
     if (resolved.length === 0) {
-      return { committed: false, reason: 'no files to stage' };
+      return { committed: false, reason: 'no files to stage', refusal: 'nothing-to-stage' };
     }
 
     if (!(await identityConfigured(target, git))) {
-      return { committed: false, reason: 'no git identity configured in this folder' };
+      return { committed: false, reason: 'no git identity configured in this folder', refusal: 'no-identity' };
     }
 
     await git(['add', '--', ...resolved], target);
     await git(['commit', '-q', '-m', commitSubject(step), '--', ...resolved], target);
     return { committed: true };
   } catch (err) {
-    return { committed: false, reason: err instanceof Error ? err.message : String(err) };
+    // `gitTimedOut` reads the runner's own property, never the message — the message contains
+    // `commitSubject(step)`, which is the plan's text, and classifying on it is the defect
+    // review finding 3 drove. This is the only place the two are told apart.
+    return {
+      committed: false,
+      reason: err instanceof Error ? err.message : String(err),
+      refusal: gitTimedOut(err) ? 'git-stopped' : 'git-failed',
+    };
   }
 }

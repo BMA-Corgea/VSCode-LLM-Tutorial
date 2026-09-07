@@ -38,12 +38,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
-import { realGit, type GitRunner } from '../../src/start/build.js';
+import { GIT_TIMEOUT_MS, GitTimeoutError, realGit, type GitRunner } from '../../src/start/build.js';
 import { tutorCoreFor, type TutorCore } from '../../src/tutor/core.js';
 import {
   MAX_CONTEXT_CHARS,
   MAX_DIFF_CHARS,
   MAX_DIFF_INPUT_BYTES,
+  DIFF_TIMED_OUT,
   MAX_OPTIONS_SENT,
   NO_DIFFERENCE,
   NO_FILE_YET,
@@ -335,6 +336,130 @@ suite('learnerDiff — git’s exit code 1 means “they differ”, and that is 
     assert.equal(ctx.build?.learnerDiff, undefined);
     assert.ok(ctx.build?.question, 'and the rest of the context is still built — the step is still answerable');
     assert.ok(!core.buildContextBlock(ctx).includes('diff --git '), 'nothing diff-shaped should reach the block');
+  });
+
+  // ── T-13: a comparison that was STOPPED is the seventh state, and it says so ──────────────
+
+  /**
+   * The one `undefined` above is "git could not", which is an answer git gave. A killed
+   * subprocess gave none, and the difference matters here more than anywhere else in this
+   * repository: the tutor is about to answer a stuck learner, and silence is read by a model
+   * as "nothing to see". Two pins, because a timeout can arrive in two states.
+   *
+   * **What they cannot see.** Whether a real killed `git diff` leaves a syntactically valid
+   * partial diff or a torn line is git's business and is not asserted; what is asserted is
+   * that this module does not send whatever it finds. The thirty seconds themselves are not
+   * waited out — `test/unit/build.test.ts` drives a real hanging git for that.
+   */
+  test('a stopped diff is a SENTENCE, not an omission — the model is told it was never shown their work', async () => {
+    const stopped: GitRunner = (args) => Promise.reject(new GitTimeoutError(args, GIT_TIMEOUT_MS.short));
+    const ctx = await tutorContext(stepById('st-4-symbol-render'), refRoot, target, stopped);
+
+    assert.equal(ctx.build?.learnerDiff, DIFF_TIMED_OUT,
+      'omitted, this is indistinguishable from a step with nothing to compare — and the tutor would '
+      + 'answer as though the learner’s file were fine');
+    assert.match(DIFF_TIMED_OUT, /says nothing about whether they have written it/,
+      'and the sentence is explicit that it is not evidence of an empty file');
+    assert.ok(core.buildContextBlock(ctx).includes(DIFF_TIMED_OUT), 'it really reaches the prompt');
+  });
+
+  test('and a PARTIAL diff left behind by the stopped git is dropped rather than sent as the whole one', async () => {
+    // Git writes `--output` as it goes, so a killed diff leaves a truncated one on disk. This
+    // module cannot tell a truncated diff from a complete small one, and sending it would tell
+    // the model "here is the difference" about a comparison that never finished — the same
+    // failure security review finding 8 named, a diff that lies about its own completeness.
+    const halfWritten: GitRunner = (args) => {
+      const flag = args.find((a) => a.startsWith('--output='));
+      if (flag) fs.writeFileSync(flag.slice('--output='.length), 'diff --git a/reference/x b/learner/x\n@@ -1 +');
+      return Promise.reject(new GitTimeoutError(args, GIT_TIMEOUT_MS.short));
+    };
+    const ctx = await tutorContext(stepById('st-4-symbol-render'), refRoot, target, halfWritten);
+
+    assert.equal(ctx.build?.learnerDiff, DIFF_TIMED_OUT);
+    assert.ok(!core.buildContextBlock(ctx).includes('diff --git '),
+      'no fragment of the abandoned comparison reaches the model');
+  });
+
+  /**
+   * Review finding 3, on this module's own path. `learnerDiffFor` passes the step's relative
+   * paths in the argv, and the runner puts the whole argv into an ordinary failure's message —
+   * so a `plan.json` naming a file after this extension's own timeout sentence used to be able
+   * to turn "they differ", the answer this entire module exists to read, into `DIFF_TIMED_OUT`.
+   * The consequence is the worse direction: the tutor is told the comparison was abandoned
+   * when it succeeded, and the learner's actual work never reaches the model.
+   */
+  test('a step whose FILENAME forges the timeout sentence still gets the real diff', async () => {
+    const forged = 'src/timed out after 1 second and was stopped.ts';
+    write(refRoot, forged, 'export const a = 1;\n');
+    write(target, forged, 'export const a = 2;\n');
+
+    const ctx = await tutorContext(stepFor(forged), refRoot, target, realGit);
+
+    assert.notEqual(ctx.build?.learnerDiff, DIFF_TIMED_OUT,
+      'git exited 1 because the files differ, which is an ANSWER. A path out of plan.json must not be able '
+      + 'to tell this module its own subprocess was stopped');
+    assert.ok(diffBody(ctx.build?.learnerDiff).startsWith('diff --git '),
+      'and the learner’s real work reaches the model, which is the thing the forgery would have cost them');
+  });
+
+  test('exit 1 — "they differ" — is still read as the answer it is (the discriminator)', async () => {
+    write(target, RENDER, `${fs.readFileSync(path.join(refRoot, RENDER), 'utf8')}\nexport const different = 1;\n`);
+    const ctx = await tutorContext(stepById('st-4-symbol-render'), refRoot, target, realGit);
+    assert.notEqual(ctx.build?.learnerDiff, DIFF_TIMED_OUT);
+    assert.ok(diffBody(ctx.build?.learnerDiff).startsWith('diff --git '),
+      'the ordinary non-zero exit this whole module is built around must not be swept into the new branch');
+  });
+});
+
+// ── T-13 review finding 8: the header's counting claims are a record, and records get checked ──
+
+/**
+ * In this file the sentence count IS the design — the whole argument of the "ways there is no
+ * diff" header is that collapsing the states would leave the tutor guessing — and four
+ * counting claims in it had drifted from the code: "seven sentences" where five are sentences,
+ * "the header's six", "one of the four", "the other five".
+ *
+ * Prose cannot be typechecked, so it is asserted. The list below is the code side, maintained
+ * by hand on purpose: adding a state means adding it here, and the header assertion then fails
+ * until the sentence that describes the design is updated with it. That is the point — a
+ * comment easier to write than to earn is this project's most-repeated failure.
+ *
+ * **What this cannot see:** it checks the numbers, not the descriptions. A header that counted
+ * correctly and described the wrong states would pass.
+ */
+suite('the "ways there is no diff" header counts what the module actually does', () => {
+  /** Every "no diff" answer that produces a SENTENCE. Two further states are said with
+   *  silence — a path that escapes its tree, and a comparison git could not make — and
+   *  silence is not a sentence, which is precisely the arithmetic that had gone wrong. */
+  const SENTENCES = [NO_FILE_YET, NO_DIFFERENCE, NOT_ONE_FILE, tooBigToDiff(1), DIFF_TIMED_OUT];
+  const SILENCES = 2;
+
+  const header = fs.readFileSync(path.join(process.cwd(), 'src', 'tutor', 'context.ts'), 'utf8');
+
+  test('the sentences are distinct — a count over duplicates would count nothing', () => {
+    assert.equal(new Set(SENTENCES).size, SENTENCES.length,
+      'two states saying the same words would be the collapse this header argues against');
+  });
+
+  test('the header’s own numbers are the numbers', () => {
+    assert.equal(SENTENCES.length, 5, 'the list above is the code side of the claim');
+    assert.match(header, /Seven ways there is no diff, and FIVE different sentences/,
+      `the header must say ${SENTENCES.length} sentences for ${SENTENCES.length + SILENCES} states. It said `
+      + '"seven sentences" while two of the seven were deliberately silent — and it said so three lines above '
+      + 'the paragraph that explains they are silent');
+    assert.match(header, /Five of\n \* the seven get a sentence; two are said with SILENCE/,
+      'and it says the split out loud rather than leaving it to be counted');
+  });
+
+  test('and the doc comments that quote a count agree with it', () => {
+    assert.match(header, /Which of the header's five sentences a refusal is/,
+      '`refusalSentence` said "the header\'s six sentences"');
+    assert.match(header, /it earns a sentence for the same reason the other four do/,
+      '`DIFF_TIMED_OUT` said "the other five" when there are four others');
+    assert.match(header, /one of the five "no diff" SENTENCES the header\n \* lists/,
+      '`learnerDiffFor` said "one of the four"');
+    assert.doesNotMatch(header, /the header's six sentences|one of the four "no diff"|the other five do/,
+      'none of the stale phrasings survive');
   });
 });
 
