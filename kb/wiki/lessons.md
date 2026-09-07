@@ -9,6 +9,52 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## Give the prose to someone who has not seen the predicate (T-12)
+
+T-12's fix stated its rule in prose above the code — deliberately, because the instruction was to
+design *a rule* rather than hand-type four filenames, so that a reader could extend it correctly.
+The prose was **right**. The predicates behind it were not.
+
+The reviewer found six under-refusals — `.envrc`, `.husky/pre-commit`,
+`.github/copilot-instructions.md`, `.codex/config.toml`, `.zed/settings.json`, `auth.json` — and it
+found them by **reading the stated rule cold and enumerating what it covers**, then checking that
+list against what the code actually did. It also found the opposite: `.env.example` and its family
+withheld, which the prose never asked for.
+
+That is a test method, not an anecdote:
+
+> **When a rule is stated in prose and implemented as a predicate, verify it by giving the prose to
+> someone who has not seen the predicate and asking them to enumerate what it covers. The gap
+> between their list and the predicate's behaviour is the bug — in both directions.**
+
+It works because the two artefacts are written by the same person minutes apart, and the prose is
+where the intent is complete while the predicate is where attention ran out. Reading them together
+hides the gap; reading the prose *first and alone* is what exposes it. The same trick applies to a
+docstring against its function, an AC against its test, and a schema comment against its validator.
+
+Corollary worth keeping: **a rule that is documented well enough to audit is a rule that can be
+audited against its documentation.** Writing the prose was not overhead that happened to be nice —
+it is what made the six misses findable.
+
+## Choosing the narrower option does not exempt you from the rejected one's failure (T-12)
+
+The decision form offered three shapes for T-12 and the owner picked **A** (deny known-secret
+names). Option **B** — copy only what the tutorial's steps reference — was rejected on the record
+for one reason: it *"will silently stop delivering legitimate files… you would discover it as
+missing scaffolding halfway through a tutorial, not as an error."*
+
+The implementation of A then withheld `.env.example`, `.env.sample`, `.env.template` — the
+placeholders projects commit on purpose — and a learner would have met that exactly as B's
+rejection describes: missing scaffolding, mid-tutorial, no error.
+
+> **Picking the narrower option makes its sibling's failure a bug instead of a design. It does not
+> make it impossible.**
+
+So the reason an option was rejected is a **test to run against the option you chose**. Every
+rejected alternative in a decision record names a failure mode someone already thought was worth
+avoiding; that list is free, specific, and written before anyone was invested in the
+implementation.
+
 ## An absent value read as a meaningful one — the same bug in the product and in the harness (T-13)
 
 Two failures from the same hour, which look unrelated and are not:

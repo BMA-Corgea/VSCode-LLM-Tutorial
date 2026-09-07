@@ -13,7 +13,7 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
+- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — build
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
 - **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
 
