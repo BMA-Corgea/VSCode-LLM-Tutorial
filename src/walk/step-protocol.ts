@@ -264,6 +264,7 @@ export type InboundMessage =
   | { type: 'tutor:cancel' }
   | { type: 'tutor:clear' }
   | { type: 'detour:start' }
+  | { type: 'detour:regenerate' }
   | { type: 'detour:back' };
 
 export type OutboundMessage = { type: 'step:note'; payload: { note: string } };
@@ -344,6 +345,13 @@ export interface StepEffects {
    * change does — as a fresh `WalkView`.
    */
   startDetour(): void;
+  /**
+   * *Write a new example* — the spec's "regenerate" control (code review finding 9). The same
+   * routing and the same reason as `startDetour`: whether there is a cache entry to bypass is
+   * the session's question, and a panel one push out of date must not be the thing that
+   * decides.
+   */
+  regenerateDetour(): void;
   /**
    * *Back to my build* (AC3). Routed and not second-guessed, exactly like `reproduce:run`:
    * whether there is a detour to come back from is the session's question, and a panel one
@@ -438,6 +446,12 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
       effects.startDetour();
       return { state };
     }
+    case 'detour:regenerate': {
+      // Routed exactly as `detour:start` is, and for the same reason: the outcome takes a model
+      // call to reach and a sentence composed here would be this file guessing at it.
+      effects.regenerateDetour();
+      return { state };
+    }
     case 'detour:back': {
       effects.returnFromDetour();
       return { state };
@@ -467,7 +481,7 @@ const INBOUND_TYPES = [
   // be a webview-supplied key for work the host is about to do on disk — the one shape of
   // message this file exists to refuse. `narrator.ts`'s own three messages make the identical
   // argument for the identical reason.
-  'detour:start', 'detour:back',
+  'detour:start', 'detour:regenerate', 'detour:back',
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -512,6 +526,7 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
     case 'tutor:cancel':
     case 'tutor:clear':
     case 'detour:start':
+    case 'detour:regenerate':
     case 'detour:back':
       return { type };
     case 'dial:set': {

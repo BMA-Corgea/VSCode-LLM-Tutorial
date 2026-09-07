@@ -37,9 +37,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { AskLedger, type AskSettings } from '../../src/tutor/ask.js';
 import type { AskMessage, LlmReply, TutorCore } from '../../src/tutor/core.js';
-import { DETOUR_PROMPT_VERSION, prepareDetourWrite } from '../../src/detour/prompt.js';
-import { detourDir, detoursRoot, readCachedDetour, writeCachedDetour } from '../../src/detour/store.js';
-import { DetourSession, refusalSentence, type DetourAdapters } from '../../src/detour/session.js';
+import { DETOUR_PROMPT_VERSION, detourPrompt, prepareDetourWrite } from '../../src/detour/prompt.js';
+import {
+  detourDir, detoursRoot, readCachedDetour, writeCachedDetour,
+  type DetourCacheKey, type DetourKey,
+} from '../../src/detour/store.js';
+import {
+  DetourSession, refusalSentence, type DetourAdapters, type DetourStartResult,
+} from '../../src/detour/session.js';
+import type { PlanLike, StepLike } from '../../src/walk/model.js';
 import type { NarratorViewState } from '../../src/detour/narrator.js';
 import type { Detour } from '../../src/detour/types.js';
 import { fixturePlan } from './walk-fixtures.js';
@@ -49,6 +55,46 @@ import { fixturePlan } from './walk-fixtures.js';
 const SPEND_GUARD = 'a test in detour-session.test.ts reached the real model';
 
 const STEP_ID = 'st-2-file-parse';
+
+/**
+ * The other half of every key (T-7 code review findings 1 and 2). `globalStorageUri` is
+ * per-EXTENSION and a repo-tour step id carries no repository identity, so a harness with only
+ * one of these could not see either finding — the two tutorials that collide have to be real
+ * inputs to a real session, which is what `makeFake({ tutorial })` is for.
+ */
+const TUTORIAL = 'tutorial-a-aaaaaaaaaaaaaaaaaaaaaa';
+const OTHER_TUTORIAL = 'tutorial-b-bbbbbbbbbbbbbbbbbbbbbb';
+
+/** One step of one tutorial, for the assertions that name a directory on disk. */
+function key(stepId: string, tutorial: string = TUTORIAL): DetourKey {
+  return { tutorial, stepId };
+}
+
+/**
+ * The cache key a `start(step, plan, refRoot)` really uses — built from the REAL prompt.
+ *
+ * **The prompt is the key** (T-7 code review finding 9): a cache is a memo of
+ * `prompt -> reply`, and keying it by step id and version alone meant a plan rebuilt with a
+ * different `decision.question` served yesterday's example forever, with `runLlm` calls = 0.
+ * A test that wants to read an entry back has to compose the same prompt, and doing it through
+ * `detourPrompt` rather than a fixture is what makes that a real assertion.
+ */
+function cacheKeyFor(
+  s: StepLike,
+  plan: PlanLike,
+  refRoot: unknown = 'ref',
+  over: { promptVersion?: number; tutorial?: string } = {},
+): DetourCacheKey {
+  const refName = typeof refRoot === 'string' && refRoot.trim().length > 0
+    ? path.basename(path.resolve(refRoot))
+    : refRoot;
+  return {
+    tutorial: over.tutorial ?? TUTORIAL,
+    stepId: s.id,
+    promptVersion: over.promptVersion ?? DETOUR_PROMPT_VERSION,
+    prompt: detourPrompt(s, plan, refName),
+  };
+}
 
 /** A well-formed reply: three files, three stops, every stop inside its own file. Three rather
  *  than one because AC2 counts tabs ("≥ 3 detour tabs open") and one file cannot carry that. */
@@ -93,6 +139,25 @@ interface Fake {
   unreachable: () => string | undefined;
   /** Tabs the fake pretends it cannot close, by absolute path. */
   stuck: Set<string>;
+  /**
+   * Wait for the delivery half of `start` to have run (T-7 code review finding 3).
+   *
+   * `start` now returns as soon as the request is SENT — the press has to be visible in one
+   * chain hop, so the model call cannot be awaited inside it — and the parse/write/tabs half
+   * arrives later through `DetourDeps.resume`. This is the harness's stand-in for the walk's
+   * chain: it settles every job `resume` has been handed, including jobs a job produced.
+   */
+  settle: () => Promise<void>;
+  /**
+   * Both halves in one, for the many tests that just want a finished detour — and it answers
+   * with what the PANEL ends up drawing rather than with what the pre-flight returned.
+   *
+   * That distinction is the fix to code review finding 3 showing through the harness.
+   * `start` returns as soon as the request is sent, so its own answer can no longer be the
+   * outcome; the outcome is `view(stepId)` — is a detour open for this step, and what is the
+   * sentence. Tests about the pre-flight itself call `session.start` directly.
+   */
+  run: (step: StepLike, plan: PlanLike, refRoot?: unknown) => Promise<DetourStartResult>;
 }
 
 interface FakeOptions {
@@ -106,6 +171,11 @@ interface FakeOptions {
   noSettings?: boolean;
   openThrows?: (absPath: string) => boolean;
   closeThrows?: boolean;
+  /** Which TUTORIAL this session's detours belong to — the other half of every key. */
+  tutorial?: string;
+  /** Share another fake's global storage. ONE disk, two tutorials, is the shape of the
+   *  collision T-7's review found; two disks cannot see it. */
+  storage?: string;
 }
 
 const tempDirs: string[] = [];
@@ -152,7 +222,7 @@ function fakeCore(log: Call[], options: FakeOptions): TutorCore {
 
 function makeFake(options: FakeOptions = {}): Fake {
   const log: Call[] = [];
-  const storage = tmpDir('detour-storage-');
+  const storage = options.storage ?? tmpDir('detour-storage-');
   const ledger = new AskLedger();
   const stuck = new Set<string>();
   let refreshes = 0;
@@ -186,15 +256,57 @@ function makeFake(options: FakeOptions = {}): Fake {
     skin: () => 'system',
   };
 
+  // Not the walk's own chain — a queue that behaves like it. Jobs run in order, and a job that
+  // enqueues another is drained too, which is what `settle` below waits on.
+  const pending: Array<() => Promise<void>> = [];
+  let draining: Promise<void> = Promise.resolve();
+
   const session = new DetourSession({
     adapters,
     ledger,
     settings: () => Promise.resolve(options.noSettings === true ? undefined : settings),
     refresh: () => { refreshes += 1; },
     reportUnreachable: (detail) => { unreachable = detail; },
+    tutorial: options.tutorial ?? TUTORIAL,
+    resume: (job) => {
+      pending.push(job);
+      draining = draining.then(async () => {
+        const next = pending.shift();
+        if (next) await next();
+      });
+    },
   });
 
-  return { session, log, storage, ledger, refreshes: () => refreshes, unreachable: () => unreachable, stuck };
+  const settle = async (): Promise<void> => {
+    // Microtasks AND a macrotask turn, twice. `delivered` resolves on a microtask, `resume` is
+    // called from its `.then`, and the ledger's own bookkeeping (which is what `live()` reads)
+    // settles on a timer — so a microtask-only drain would read the ledger one turn early.
+    for (let round = 0; round < 3; round += 1) {
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+      await draining;
+    }
+  };
+
+  const fake: Fake = {
+    session,
+    log,
+    storage,
+    ledger,
+    refreshes: () => refreshes,
+    unreachable: () => unreachable,
+    stuck,
+    settle,
+    run: async (s2, p2, refRoot = '/somewhere/the-authors-repo') => {
+      const pre = await session.start(s2, p2, refRoot);
+      await settle();
+      const view = session.view(s2.id);
+      return view.open !== undefined && view.open.stepId === s2.id
+        ? { started: true, title: view.open.title, ...(view.note !== undefined ? { note: view.note } : {}) }
+        : { started: false, note: view.note ?? (pre.started ? '' : pre.note) };
+    },
+  };
+  return fake;
 }
 
 function step() {
@@ -222,6 +334,21 @@ function calls(log: Call[], fn: Call['fn']): Call[] {
   return log.filter((entry) => entry.fn === fn);
 }
 
+/**
+ * Wait until the request has really reached the fake runner.
+ *
+ * Needed since the model call came off the walk's chain (code review finding 3): `start` now
+ * returns the moment `sendPrompt` is called, and `AskLedger` probes availability before it
+ * reaches `runLlm` — so a test that released its runner immediately after the press would be
+ * releasing a `resolve` that had not been handed out yet, and the request would never end.
+ */
+async function reachedRunner(log: Call[]): Promise<void> {
+  for (let i = 0; i < 200 && calls(log, 'runLlm').length === 0; i += 1) {
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+  }
+  assert.ok(calls(log, 'runLlm').length > 0, 'the request never reached the runner');
+}
+
 // ── AC1 and AC2: what one press actually does ───────────────────────────────────────────────
 
 suite('DetourSession.start — the example is written, opened and narrated (ACs 1, 2)', () => {
@@ -231,13 +358,13 @@ suite('DetourSession.start — the example is written, opened and narrated (ACs 
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
 
-    const result = await fake.session.start(s, plan, '/somewhere/the-authors-repo');
+    const result = await fake.run(s, plan, '/somewhere/the-authors-repo');
 
     assert.equal(result.started, true, 'a well-formed reply opens a detour');
     assert.equal(result.started && result.title, GOOD_DETOUR.title, 'and hands back the title AC4 records');
 
     // The files, on a real disk, under the extension's own storage and nowhere else.
-    const dir = detourDir(fake.storage, STEP_ID);
+    const dir = detourDir(fake.storage, key(STEP_ID));
     assert.deepEqual(
       treeOf(dir),
       ['coins.ts', 'machine.ts', path.join('stock', 'tray.ts')].sort(),
@@ -286,7 +413,7 @@ suite('DetourSession.start — the example is written, opened and narrated (ACs 
   test('the narrator is raised BEFORE the reveal, so the prose is never behind the highlight', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
     const order = fake.log.map((c) => c.fn);
     const narrator = order.indexOf('showNarrator');
@@ -300,7 +427,7 @@ suite('DetourSession.start — the example is written, opened and narrated (ACs 
   test('the prompt that is SENT is the detour prompt, not the tutor conversation', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, '/tmp/checkouts/the-authors-repo');
+    await fake.run(s, plan, '/tmp/checkouts/the-authors-repo');
 
     const sent = calls(fake.log, 'runLlm');
     assert.equal(sent.length, 1, 'exactly one model call for one press');
@@ -327,12 +454,12 @@ suite('DetourSession.start — the cache (AC5)', () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
 
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
     assert.equal(calls(fake.log, 'runLlm').length, 1, 'the first press pays for one answer');
     await fake.session.returnToBuild();
 
     const before = fake.log.length;
-    const again = await fake.session.start(s, plan, 'ref');
+    const again = await fake.run(s, plan, 'ref');
 
     assert.equal(again.started, true, 'the retake opens the same example');
     const after = fake.log.slice(before);
@@ -349,28 +476,96 @@ suite('DetourSession.start — the cache (AC5)', () => {
   test('the cache is keyed by prompt VERSION, so a bumped version is a miss by construction', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
-    assert.ok(readCachedDetour(fake.storage, STEP_ID, DETOUR_PROMPT_VERSION) !== null, 'it really was cached');
+    assert.ok(readCachedDetour(fake.storage, cacheKeyFor(s, plan)) !== null, 'it really was cached');
     assert.equal(
-      readCachedDetour(fake.storage, STEP_ID, DETOUR_PROMPT_VERSION + 1),
+      readCachedDetour(fake.storage, cacheKeyFor(s, plan, 'ref', { promptVersion: DETOUR_PROMPT_VERSION + 1 })),
       null,
       'and the entry does not answer for a prompt that no longer asks the same question',
     );
   });
 
-  test('the cache is per STEP — a different step is a miss and pays for its own answer', async () => {
+  test('the cache is keyed by the PROMPT — a rebuilt plan with a new question is a miss (finding 9)', async () => {
+    // Driven in the review and served the stale example with `runLlm` calls = 0: the same step
+    // id, the same prompt version, a plan whose `decision.question` had changed. A cache is a
+    // memo of `prompt -> reply` and the only honest key for a memo is its input.
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
-    const plan = fixturePlan();
-    const first = plan.steps.find((s) => s.id === STEP_ID);
-    const other = plan.steps.find((s) => s.id === 'st-4-symbol-render');
-    assert.ok(first && other);
-
-    await fake.session.start(first, plan, 'ref');
+    const { plan, step: s } = step();
+    await fake.run(s, plan, 'ref');
     await fake.session.returnToBuild();
-    await fake.session.start(other, plan, 'ref');
+    assert.equal(calls(fake.log, 'runLlm').length, 1);
 
-    assert.equal(calls(fake.log, 'runLlm').length, 2, 'two steps, two answers — the key is the step id');
+    // The SAME step id, rebuilt against a different question — which is what a plan regenerated
+    // from a newer reference commit looks like.
+    const rebuilt = {
+      ...plan,
+      steps: plan.steps.map((entry) => (entry.id === s.id
+        ? { ...entry, decision: { ...entry.decision, question: 'A COMPLETELY DIFFERENT QUESTION about this step' } }
+        : entry)),
+    };
+    const changed = rebuilt.steps.find((entry) => entry.id === s.id);
+    assert.ok(changed);
+
+    await fake.run(changed, rebuilt, 'ref');
+
+    assert.equal(calls(fake.log, 'runLlm').length, 2, 'a changed question was served the old example');
+  });
+
+  test('two TUTORIALS that share a step id do not share a cache entry (finding 2)', async () => {
+    // The merge bar. repo-tour mints a step id as `sha256(file + kind + symbol)` with no
+    // repository in it, and `globalStorageUri` is one directory for every tutorial — so two
+    // projects with a `src/index.ts` collided by construction. Driven in the review: tutorial B
+    // pressed the button and was served tutorial A's worked example with `runLlm` calls = 0.
+    //
+    // ONE storage root, deliberately: that is the shape of the bug, and two disks cannot see
+    // it. This is the review's own lesson made into a test — *the test to write is two inputs
+    // that share a key, not one input twice*.
+    const a = makeFake({ canned: replyOf(GOOD_DETOUR) });
+    const b = makeFake({
+      canned: replyOf({ ...GOOD_DETOUR, title: 'B’s OWN example' }),
+      tutorial: OTHER_TUTORIAL,
+      storage: a.storage,
+    });
+
+    const { plan, step: s } = step();
+    await a.run(s, plan, 'ref');
+    assert.equal(calls(a.log, 'runLlm').length, 1, 'A paid for its own example');
+
+    await b.run(s, plan, 'ref');
+
+    assert.equal(calls(b.log, 'runLlm').length, 1, 'tutorial B was served tutorial A’s example for free');
+    assert.equal(b.session.view(STEP_ID).open?.title, 'B’s OWN example', 'and B is reading A’s example');
+  });
+
+  test('two TUTORIALS that share a step id do not share a DIRECTORY (finding 1)', async () => {
+    // The other half, and the one that lost a learner's files: `closeOpen` awaits
+    // `closeTabsUnder` and only then deletes, so a session disposed while a tab was slow to
+    // close deleted whatever was at that path when the await returned — which, keyed by step id
+    // alone, was the OTHER tutorial's live detour. Driven in the review: three tabs left open on
+    // deleted files, a narrator describing them, and no sentence anywhere.
+    const a = makeFake({ canned: replyOf(GOOD_DETOUR) });
+    const b = makeFake({ canned: replyOf(GOOD_DETOUR), tutorial: OTHER_TUTORIAL, storage: a.storage });
+    const { plan, step: s } = step();
+
+    await a.run(s, plan, 'ref');
+    await b.run(s, plan, 'ref');
+
+    const dirA = detourDir(a.storage, key(STEP_ID));
+    const dirB = detourDir(a.storage, key(STEP_ID, OTHER_TUTORIAL));
+    assert.notEqual(dirA, dirB, 'two tutorials shared one detour directory');
+    assert.ok(fs.existsSync(dirA) && fs.existsSync(dirB), 'both detours are on disk at once');
+
+    // A disposes. B is untouched — files, tabs and all.
+    await a.session.dispose();
+
+    assert.equal(fs.existsSync(dirA), false, 'A did not clean up after itself');
+    assert.deepEqual(
+      treeOf(dirB).sort(),
+      ['coins.ts', 'machine.ts', path.join('stock', 'tray.ts')].sort(),
+      'one tutorial’s dispose deleted another tutorial’s live detour',
+    );
+    assert.equal(b.session.activeStepId(), STEP_ID, 'and B still believes its detour is open — because it is');
   });
 
   test('a poisoned cache entry is a MISS, not a detour — it is sanitised, never trusted', async () => {
@@ -380,13 +575,13 @@ suite('DetourSession.start — the cache (AC5)', () => {
     // Hand-written by "another tool" — legal JSON, wrong shape. `sanitizeDetour` drops the
     // whole entry rather than half-trusting it, because a stop refers to one of the detour's
     // own files and a half-trusted detour opens editor tabs.
-    writeCachedDetour(fake.storage, STEP_ID, DETOUR_PROMPT_VERSION, GOOD_DETOUR);
+    writeCachedDetour(fake.storage, cacheKeyFor(s, plan), GOOD_DETOUR);
     const cachePath = path.join(detoursRoot(fake.storage), 'cache');
     const entry = fs.readdirSync(cachePath)[0];
     assert.ok(entry);
     fs.writeFileSync(path.join(cachePath, entry), JSON.stringify({ title: 'x', domain: 'y', files: 'not an array', stops: [] }));
 
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
     assert.equal(result.started, true, 'the press still works');
     assert.equal(calls(fake.log, 'runLlm').length, 1, 'by paying for a fresh answer rather than opening the poison');
   });
@@ -399,11 +594,11 @@ suite('DetourSession.start — a failed generation says WHY (AC5)', () => {
   async function refusedBy(canned: string): Promise<{ note: string; storage: string; log: Call[] }> {
     const fake = makeFake({ canned });
     const { plan, step: s } = step();
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
     assert.equal(result.started, false, 'a reply this shape must not open a detour');
     assert.equal(calls(fake.log, 'openDetourTab').length, 0, 'and must open no tabs');
     assert.equal(calls(fake.log, 'showNarrator').length, 0, 'and raise no narrator');
-    assert.equal(treeOf(detourDir(fake.storage, STEP_ID)).length, 0, 'and leave nothing on disk');
+    assert.equal(treeOf(detourDir(fake.storage, key(STEP_ID))).length, 0, 'and leave nothing on disk');
     return { note: result.started ? '' : result.note, storage: fake.storage, log: fake.log };
   }
 
@@ -455,7 +650,7 @@ suite('DetourSession.start — a failed generation says WHY (AC5)', () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR), availability: { ok: false, detail: 'not found on PATH' } });
     const { plan, step: s } = step();
 
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
 
     assert.equal(result.started, false);
     assert.ok(result.started === false && result.note.includes('not found on PATH'), "the provider's OWN words, not a house phrasing");
@@ -467,7 +662,7 @@ suite('DetourSession.start — a failed generation says WHY (AC5)', () => {
   test('no tutor wired at all is an honest answer rather than a broken button', async () => {
     const fake = makeFake({ noSettings: true });
     const { plan, step: s } = step();
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
     assert.equal(result.started, false);
     assert.ok(result.started === false && result.note.includes('repo-tour'), 'it names what is missing');
     assert.equal(calls(fake.log, 'availability').length, 0, 'and does not probe a provider it has no way to reach');
@@ -476,7 +671,7 @@ suite('DetourSession.start — a failed generation says WHY (AC5)', () => {
   test('the poison is real — a test that answers for nothing reaches no model, it FAILS', async () => {
     const fake = makeFake();
     const { plan, step: s } = step();
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
     assert.equal(result.started, false, 'the failure is a refusal, not a crash');
     assert.ok(result.started === false && result.note.includes(SPEND_GUARD), 'and it is the guard that answered');
   });
@@ -497,7 +692,7 @@ suite('DetourSession.start — every write goes through prepareDetourWrite', () 
       }),
     });
     const { plan, step: s } = step();
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
     return { note: result.note, storage: fake.storage, started: result.started };
   }
 
@@ -543,7 +738,7 @@ suite('DetourSession.start — every write goes through prepareDetourWrite', () 
     fs.symlinkSync(outside, detoursRoot(fake.storage), 'dir');
 
     const { plan, step: s } = step();
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
 
     assert.equal(result.started, false, 'the detour is refused rather than written through the link');
     assert.deepEqual(treeOf(outside), [], 'and the folder on the other end stays EMPTY');
@@ -554,8 +749,8 @@ suite('DetourSession.start — every write goes through prepareDetourWrite', () 
     const { plan, step: s } = step();
 
     // First press writes the detour for real.
-    await fake.session.start(s, plan, 'ref');
-    const dir = detourDir(fake.storage, STEP_ID);
+    await fake.run(s, plan, 'ref');
+    const dir = detourDir(fake.storage, key(STEP_ID));
 
     // Now replace one of its files with a link out. A second press clears the directory first,
     // so this is not the state a real second press would find — which is exactly why the check
@@ -575,9 +770,9 @@ suite('DetourSession.start — every write goes through prepareDetourWrite', () 
   test('the written paths are the ones prepareDetourWrite returned, under the RESOLVED root', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
-    const realDir = fs.realpathSync(detourDir(fake.storage, STEP_ID));
+    const realDir = fs.realpathSync(detourDir(fake.storage, key(STEP_ID)));
     for (const call of calls(fake.log, 'openDetourTab')) {
       assert.ok(call.fn === 'openDetourTab');
       assert.ok(
@@ -600,7 +795,7 @@ suite('DetourSession — the generation is the LEDGER\'s request (plan R2)', () 
     const { plan, step: s } = step();
 
     assert.equal(fake.ledger.spend().replies, 0, 'nothing spent before the press');
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
     const spend = fake.ledger.spend();
     assert.equal(spend.replies, 1, 'the detour\'s answer is counted');
@@ -617,8 +812,11 @@ suite('DetourSession — the generation is the LEDGER\'s request (plan R2)', () 
     });
     const { plan, step: s } = step();
 
-    const running = fake.session.start(s, plan, 'ref');
-    await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+    // The press RETURNS while the request runs — that is code review finding 3's fix, and it
+    // is why this reads the ledger after an `await` rather than through a `setTimeout` race.
+    const pre = await fake.session.start(s, plan, 'ref');
+    assert.deepEqual(pre, { started: false, note: '' }, 'the press comes back before the model does');
+    await reachedRunner(fake.log);
 
     const live = fake.ledger.live();
     assert.equal(live.length, 1, 'the ledger knows about it');
@@ -627,7 +825,7 @@ suite('DetourSession — the generation is the LEDGER\'s request (plan R2)', () 
     assert.equal(fake.session.view(STEP_ID).generating, true, 'the button says so');
 
     release?.({ text: replyOf(GOOD_DETOUR), inputTokens: 1, outputTokens: 1, usd: 0, metered: false });
-    await running;
+    await fake.settle();
     assert.equal(fake.ledger.live().length, 0, 'and it is gone when it ends');
     assert.equal(fake.session.view(STEP_ID).generating, false, 'as is the sentence about waiting');
   });
@@ -644,7 +842,7 @@ suite('DetourSession — the generation is the LEDGER\'s request (plan R2)', () 
 
     assert.equal(result.started, false, 'the detour does not open behind a cancel');
     assert.equal(calls(fake.log, 'openDetourTab').length, 0, 'and nothing was opened');
-    assert.equal(treeOf(detourDir(fake.storage, STEP_ID)).length, 0, 'and nothing was written');
+    assert.equal(treeOf(detourDir(fake.storage, key(STEP_ID))).length, 0, 'and nothing was written');
   });
 
   test('cancel() answers whether it acted — a Cancel with nothing running must stay a no-op', async () => {
@@ -665,7 +863,7 @@ suite('DetourSession — the generation is the LEDGER\'s request (plan R2)', () 
 
     const first = fake.session.start(s, plan, 'ref');
     await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
-    const second = await fake.session.start(s, plan, 'ref');
+    const second = await fake.run(s, plan, 'ref');
 
     assert.equal(second.started, false);
     assert.ok(second.started === false && second.note.includes('already'), 'and it says so rather than doing nothing');
@@ -683,8 +881,8 @@ suite('DetourSession.returnToBuild — closes what it opened, deletes what it wr
   test('the tabs, the narrator and the directory all go, and the title comes back for AC4', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
-    const dir = detourDir(fake.storage, STEP_ID);
+    await fake.run(s, plan, 'ref');
+    const dir = detourDir(fake.storage, key(STEP_ID));
     assert.equal(treeOf(dir).length, 3, 'the example really was on disk first');
 
     const before = fake.log.length;
@@ -705,8 +903,8 @@ suite('DetourSession.returnToBuild — closes what it opened, deletes what it wr
   test('the tabs are closed BEFORE the files are deleted', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
-    const dir = detourDir(fake.storage, STEP_ID);
+    await fake.run(s, plan, 'ref');
+    const dir = detourDir(fake.storage, key(STEP_ID));
 
     let existedWhenClosing: boolean | undefined;
     // The adapter is asked while the return is mid-flight, which is the only moment the order
@@ -727,13 +925,13 @@ suite('DetourSession.returnToBuild — closes what it opened, deletes what it wr
   test('BOTH spellings of the folder are handed to the tab matcher', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
     await fake.session.returnToBuild();
     const close = calls(fake.log, 'closeTabsUnder')[0];
     assert.ok(close?.fn === 'closeTabsUnder');
 
-    const composed = detourDir(fake.storage, STEP_ID);
+    const composed = detourDir(fake.storage, key(STEP_ID));
     const resolved = fs.realpathSync(path.dirname(composed)) + path.sep + path.basename(composed);
     assert.ok(close.prefixes.includes(composed) || close.prefixes.includes(resolved), 'the folder is named');
     // On a platform whose temp root is a symlink the two differ and BOTH must be matched, or
@@ -762,9 +960,9 @@ suite('DetourSession.returnToBuild — honest when a tab will not close', () => 
   test('the directory is STILL deleted and the learner is told WHICH tab to close', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
-    const dir = detourDir(fake.storage, STEP_ID);
+    const dir = detourDir(fake.storage, key(STEP_ID));
     const stubborn = path.join(fs.realpathSync(dir), 'machine.ts');
     fake.stuck.add(stubborn);
 
@@ -781,8 +979,8 @@ suite('DetourSession.returnToBuild — honest when a tab will not close', () => 
   test('the plural agrees with itself, because a sentence that does not reads like a bug', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
-    const real = fs.realpathSync(detourDir(fake.storage, STEP_ID));
+    await fake.run(s, plan, 'ref');
+    const real = fs.realpathSync(detourDir(fake.storage, key(STEP_ID)));
     fake.stuck.add(path.join(real, 'machine.ts'));
     fake.stuck.add(path.join(real, 'coins.ts'));
 
@@ -794,11 +992,11 @@ suite('DetourSession.returnToBuild — honest when a tab will not close', () => 
   test('an adapter that throws is reported as everything still open — the conservative direction', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR), closeThrows: true });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
     const result = await fake.session.returnToBuild();
     assert.equal(result.returned, true, 'the return still completes');
-    assert.equal(fs.existsSync(detourDir(fake.storage, STEP_ID)), false, 'the files still go');
+    assert.equal(fs.existsSync(detourDir(fake.storage, key(STEP_ID))), false, 'the files still go');
     const note = result.returned ? result.note ?? '' : '';
     assert.ok(note.includes('coins.ts') && note.includes('machine.ts'), 'and every tab is named, because none of them is known to have closed');
   });
@@ -810,7 +1008,7 @@ suite('DetourSession.returnToBuild — honest when a tab will not close', () => 
     });
     const { plan, step: s } = step();
 
-    const result = await fake.session.start(s, plan, 'ref');
+    const result = await fake.run(s, plan, 'ref');
     assert.equal(result.started, true, 'one tab that will not open does not cost the learner the example');
     assert.ok(result.started && result.note?.includes('machine.ts'), 'and it is said out loud');
     assert.equal(calls(fake.log, 'showNarrator').length >= 1, true, 'the narrator still walks the stops');
@@ -839,20 +1037,20 @@ suite('DetourSession — nothing lands after the moment it belonged to', () => {
     assert.equal(result.started, false);
     assert.equal(calls(fake.log, 'openDetourTab').length, 0, 'no tab');
     assert.equal(calls(fake.log, 'showNarrator').length, 0, 'no narrator');
-    assert.equal(treeOf(detourDir(fake.storage, STEP_ID)).length, 0, 'and no files');
+    assert.equal(treeOf(detourDir(fake.storage, key(STEP_ID))).length, 0, 'and no files');
   });
 
   test('dispose is idempotent and turns every method into a no-op', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
     await fake.session.dispose();
     await fake.session.dispose();
-    assert.equal(fs.existsSync(detourDir(fake.storage, STEP_ID)), false, 'the detour went with the session');
+    assert.equal(fs.existsSync(detourDir(fake.storage, key(STEP_ID))), false, 'the detour went with the session');
 
     const before = fake.log.length;
-    const started = await fake.session.start(s, plan, 'ref');
+    const started = await fake.run(s, plan, 'ref');
     await fake.session.goto(1);
     await fake.session.next();
     const returned = await fake.session.returnToBuild();
@@ -876,7 +1074,7 @@ suite('DetourSession — nothing lands after the moment it belonged to', () => {
     const result = await running;
 
     assert.equal(result.started, false, 'the overtaken generation does not open');
-    assert.equal(treeOf(detourDir(fake.storage, STEP_ID)).length, 0, 'and leaves no directory behind');
+    assert.equal(treeOf(detourDir(fake.storage, key(STEP_ID))).length, 0, 'and leaves no directory behind');
     assert.equal(calls(fake.log, 'openDetourTab').length, 0, 'and no tab anywhere');
   });
 
@@ -887,13 +1085,13 @@ suite('DetourSession — nothing lands after the moment it belonged to', () => {
     const other = plan.steps.find((st) => st.id === 'st-4-symbol-render');
     assert.ok(first && other);
 
-    await fake.session.start(first, plan, 'ref');
-    const firstDir = detourDir(fake.storage, STEP_ID);
-    await fake.session.start(other, plan, 'ref');
+    await fake.run(first, plan, 'ref');
+    const firstDir = detourDir(fake.storage, key(STEP_ID));
+    await fake.run(other, plan, 'ref');
 
     assert.equal(fs.existsSync(firstDir), false, "the first example's files are gone");
     assert.equal(fake.session.activeStepId(), 'st-4-symbol-render', 'and the open one is the second');
-    assert.equal(treeOf(detourDir(fake.storage, 'st-4-symbol-render')).length, 3, 'which really is on disk');
+    assert.equal(treeOf(detourDir(fake.storage, key('st-4-symbol-render'))).length, 3, 'which really is on disk');
   });
 });
 
@@ -905,7 +1103,7 @@ suite('DetourSession — next, prev and goto walk the narrator (AC2)', () => {
   async function opened() {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
     return fake;
   }
 
@@ -939,7 +1137,7 @@ suite('DetourSession — next, prev and goto walk the narrator (AC2)', () => {
 
   test('each stop reveals ITS OWN file, at its own lines', async () => {
     const fake = await opened();
-    const dir = fs.realpathSync(detourDir(fake.storage, STEP_ID));
+    const dir = fs.realpathSync(detourDir(fake.storage, key(STEP_ID)));
     await fake.session.goto(1);
     await fake.session.goto(2);
 
@@ -984,7 +1182,7 @@ suite('DetourSession.view — what the button is told', () => {
   test('an open detour is reported on EVERY step, with the step it belongs to', async () => {
     const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
 
     const here = fake.session.view(STEP_ID);
     const elsewhere = fake.session.view('st-4-symbol-render');
@@ -1001,7 +1199,7 @@ suite('DetourSession.view — what the button is told', () => {
   test('a refusal is on the view as well as in the result, so the panel can draw it', async () => {
     const fake = makeFake({ canned: 'not json at all' });
     const { plan, step: s } = step();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
     const note = fake.session.view(STEP_ID).note;
     assert.ok(note !== undefined && note.length > 0, 'AC5: the panel has the sentence');
     fake.session.clearNote();
@@ -1012,7 +1210,7 @@ suite('DetourSession.view — what the button is told', () => {
     const fake = makeFake({ canned: 'not json at all' });
     const { plan, step: s } = step();
     const before = fake.refreshes();
-    await fake.session.start(s, plan, 'ref');
+    await fake.run(s, plan, 'ref');
     assert.ok(fake.refreshes() > before, 'the panel was told');
     assert.equal(fake.session.view(STEP_ID).generating, false, 'and nothing is left generating');
   });
@@ -1028,11 +1226,11 @@ suite('DetourSession — a second example does not un-tell the first one\'s bad 
     const other = plan.steps.find((st) => st.id === 'st-4-symbol-render');
     assert.ok(first && other);
 
-    await fake.session.start(first, plan, 'ref');
-    const stubborn = path.join(fs.realpathSync(detourDir(fake.storage, STEP_ID)), 'machine.ts');
+    await fake.run(first, plan, 'ref');
+    const stubborn = path.join(fs.realpathSync(detourDir(fake.storage, key(STEP_ID))), 'machine.ts');
     fake.stuck.add(stubborn);
 
-    const result = await fake.session.start(other, plan, 'ref');
+    const result = await fake.run(other, plan, 'ref');
 
     assert.equal(result.started, true, 'the new example opens');
     const note = result.started ? result.note ?? '' : '';
@@ -1041,5 +1239,229 @@ suite('DetourSession — a second example does not un-tell the first one\'s bad 
     // extra step in front of it.
     assert.ok(note.includes('machine.ts'), `the old detour's stuck tab is still named, got "${note}"`);
     assert.ok(fake.session.view(STEP_ID).note?.includes('machine.ts'), 'and the panel is told the same thing');
+  });
+});
+
+// ── the fixes T-7's reviews asked for, each pinned by the reproduction that found it ─────────
+
+suite('DetourSession — the press is visible, and every refusal says something (findings 3, 4, 10, 12)', () => {
+  teardown(cleanTempDirs);
+
+  test('the press RETURNS before the model does, with the button already drawn as waiting', async () => {
+    // Code review finding 3, at this level. `start` used to await `ticket.delivered` — up to
+    // 3,600 seconds — and `WalkSession.startDetour` awaited `start` inside its chain job, so
+    // every other control on the panel waited on a model. The observable property is here: the
+    // press comes back, and it comes back with the state that draws the wait.
+    const fake = makeFake({ runner: () => new Promise<LlmReply>(() => { /* never answers */ }) });
+    const { plan, step: s } = step();
+
+    const pre = await fake.session.start(s, plan, 'ref');
+
+    assert.deepEqual(pre, { started: false, note: '' }, 'the press is answered immediately');
+    assert.equal(fake.session.view(STEP_ID).generating, true, 'and the panel has been told to draw the wait');
+    assert.ok(fake.refreshes() > 0, 'and pushed to, so the wait is on screen rather than only in the host');
+    fake.session.cancel();
+  });
+
+  test('Cancel while the request is SENDING says it is still being billed (finding 4)', async () => {
+    // Driven in the review: after *Cancel*, `spend() = {sending: 1, unwatched: 1}` and both
+    // `detour.note` and `tutor.note` were `undefined`. The sentence written for that case lived
+    // in the delivery path and could never run, because `cancel()` bumps `seq` and
+    // `stopped(seq)` is checked first — so the string appeared nowhere in `test/` either.
+    const fake = makeFake({ runner: () => new Promise<LlmReply>(() => { /* never answers */ }) });
+    const { plan, step: s } = step();
+    await fake.session.start(s, plan, 'ref');
+    await reachedRunner(fake.log);
+
+    assert.equal(fake.session.cancel(), true);
+
+    const note = fake.session.view(STEP_ID).note;
+    assert.ok(note !== undefined && note.length > 0, 'a Cancel that stops a paid request said nothing at all');
+    assert.match(note, /still be billed/, 'and it is honest about what stopping does not do');
+    assert.equal(fake.ledger.spend().unwatched, 1, 'which is true — the request goes on running and on billing');
+    assert.equal(fake.session.view(STEP_ID).generating, false, 'and the wait comes off the button');
+  });
+
+  test('Cancel BEFORE the request is sent says nothing was charged (finding 4)', async () => {
+    // The other half of the split, and `cancelAsk`'s own: what a cancel MEANS depends on which
+    // side of `send` it lands on, and saying "you will still be billed" for a request that was
+    // never sent would be a lie in the opposite direction.
+    const { plan, step: s } = step();
+
+    // `cancel()` reads `ticket.phase`, and a ticket is `preparing` from `ledger.open` until
+    // `sendPrompt`. That window is one statement wide inside `start`, so the phase itself is
+    // driven directly against the real ledger — the value `cancel` branches on is real even
+    // though the window is not one this harness can stop inside.
+    const probe = makeFake({ runner: () => new Promise<LlmReply>(() => { /* never */ }) });
+    const ticket = probe.ledger.open(STEP_ID);
+    assert.equal(ticket.phase, 'preparing', 'a ticket is preparing until it is sent');
+    ticket.abandon();
+    assert.equal(probe.ledger.spend().sending, 0, 'and abandoning one is a real cancellation, not a detach');
+
+    // The session's own pre-flight sentences are the reachable half of the same promise: every
+    // path that stops before `sendPrompt` says nothing was charged, because nothing was.
+    const noSettings = makeFake({ noSettings: true });
+    const refused = await noSettings.run(s, plan, 'ref');
+    assert.equal(refused.started, false);
+    assert.ok(refused.started === false && refused.note.includes('repo-tour could not be loaded'),
+      'a pre-flight that stops before sending says so, and says nothing was charged');
+    assert.equal(noSettings.ledger.spend().sending, 0, 'because nothing was');
+  });
+
+  test('a request detached by something ELSE still says why nothing arrived (finding 4)', async () => {
+    // `cancel()` now speaks for the detour's own button. This is the other way a ticket ends
+    // with nothing delivered — `abandonAll()` reached it from a tutor Cancel or from
+    // `clearConversation` — which does not move this session's `seq`, so the delivery path
+    // really does run, and it used to run into a sentence nobody could ever see.
+    const fake = makeFake({ runner: () => new Promise<LlmReply>(() => { /* never answers */ }) });
+    const { plan, step: s } = step();
+    await fake.session.start(s, plan, 'ref');
+    await reachedRunner(fake.log);
+
+    fake.ledger.abandonAll();
+    await fake.settle();
+
+    const note = fake.session.view(STEP_ID).note;
+    assert.ok(note !== undefined && note.includes('stopped before it arrived'),
+      `the detour went silent when its request was detached: ${String(note)}`);
+    assert.equal(calls(fake.log, 'openDetourTab').length, 0, 'and nothing opened behind it');
+    assert.equal(treeOf(detourDir(fake.storage, key(STEP_ID))).length, 0, 'and nothing was written');
+  });
+
+  test('a second press while one is in flight is REFUSED, not queued into a rebuild (finding 10)', async () => {
+    // Unreachable through the panel before: `startDetour` awaited the whole model call inside
+    // its chain job, so a second press waited its turn, found `generating` already cleared, hit
+    // the cache and tore the finished detour down to rebuild it — driven as `openDetourTab`×3,
+    // `showNarrator`, `closeTabsUnder`, `closeNarrator`, `openDetourTab`×3, with no sentence.
+    const fake = makeFake({ runner: () => new Promise<LlmReply>(() => { /* never answers */ }) });
+    const { plan, step: s } = step();
+    await fake.session.start(s, plan, 'ref');
+    await reachedRunner(fake.log);
+
+    const second = await fake.session.start(s, plan, 'ref');
+
+    assert.equal(second.started, false);
+    assert.ok(second.started === false && second.note.includes('already being written'), 'and it says so');
+    assert.equal(fake.session.view(STEP_ID).note, second.started === false ? second.note : '',
+      'the sentence is stored where the panel draws it, not only returned');
+    assert.equal(calls(fake.log, 'runLlm').length, 1, 'and no second billed request was started');
+    assert.equal(calls(fake.log, 'closeTabsUnder').length, 0, 'and nothing was torn down');
+    fake.session.cancel();
+  });
+
+  test('the narrator is raised ONCE per open, and once per cached retake (finding 12)', async () => {
+    // `present` raised it directly and then again inside `goto(0)`, so `webview.html` was built
+    // twice on every open — a whole page rebuilt for nothing, on the extension host.
+    const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
+    const { plan, step: s } = step();
+
+    await fake.run(s, plan, 'ref');
+    assert.equal(calls(fake.log, 'showNarrator').length, 1, 'the narrator was rendered twice on one open');
+
+    await fake.session.returnToBuild();
+    await fake.run(s, plan, 'ref');
+    assert.equal(calls(fake.log, 'showNarrator').length, 2, 'and twice on the free retake');
+  });
+
+  test('a detour with no stops still gets a narrator — the page says so rather than being blank', async () => {
+    // What the double render was quietly covering for: `goto` used to return early on an empty
+    // stop list, so removing the direct call had to make `goto` render one anyway.
+    const fake = makeFake({ canned: replyOf({ ...GOOD_DETOUR, stops: [] }) });
+    const { plan, step: s } = step();
+
+    const result = await fake.run(s, plan, 'ref');
+
+    // The parser refuses fewer than three stops, so this never opens — but the refusal is the
+    // one AC5 asks for, and `narrator.ts`'s `NO_STOPS_MESSAGE` covers the hand-built state.
+    assert.equal(result.started, false);
+    assert.ok(result.started === false && result.note.includes('narration stops'), 'and it says which rule broke');
+  });
+});
+
+suite('DetourSession — the narrator names what OPENED, not what was parsed (finding 6)', () => {
+  teardown(cleanTempDirs);
+
+  test('a file the writer refused is not on the narrator’s list of opened files', async () => {
+    // Driven in the review: a reply whose second file collides with the directory the first one
+    // made opened one tab, wrote one file, and the narrator listed both — while the panel's own
+    // note one tab over said the second had been refused. The page the learner is reading and
+    // the page telling them what went wrong disagreed.
+    const colliding: Detour = {
+      title: 'A vending machine',
+      domain: 'vending machines',
+      files: [
+        { path: 'a/b.ts', content: 'export const B = 1;\n' },
+        { path: 'a', content: 'this cannot be written — "a" is now a directory\n' },
+      ],
+      stops: [
+        { file: 'a/b.ts', startLine: 1, endLine: 1, text: 'one' },
+        { file: 'a', startLine: 1, endLine: 1, text: 'two — narrated, never opened' },
+        { file: 'a/b.ts', startLine: 1, endLine: 1, text: 'three' },
+      ],
+    };
+    const fake = makeFake({ canned: replyOf(colliding) });
+    const { plan, step: s } = step();
+
+    const result = await fake.run(s, plan, 'ref');
+
+    assert.equal(result.started, true, 'the example still opens — one bad file does not cost the others');
+    const shown = calls(fake.log, 'showNarrator');
+    const state = shown[0];
+    assert.ok(state?.fn === 'showNarrator');
+    assert.deepEqual(
+      state.state.detour.files.map((f) => f.path),
+      ['a/b.ts'],
+      'the narrator listed a file the detour never opened',
+    );
+    assert.equal(calls(fake.log, 'openDetourTab').length, 1, 'and exactly one tab really opened');
+    // The STOPS are deliberately whole: the prose is the point, the narrator still walks it,
+    // and filtering them would shift every index under `current`.
+    assert.equal(state.state.detour.stops.length, 3, 'a stop whose file was refused still has its prose');
+    assert.ok(result.started === true && result.note !== undefined, 'and the refusal is still said out loud');
+  });
+});
+
+suite('DetourSession — the regenerate control forces a miss (finding 9)', () => {
+  teardown(cleanTempDirs);
+
+  test('{ fresh: true } skips the cache and pays for a new example', async () => {
+    // The spec's refinement notes promised "a 'regenerate' button forces a fresh one" and T-7
+    // shipped without it, which left the cache with no escape hatch at all: a learner served an
+    // example that did not help had no way to ask for another one, ever.
+    const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
+    const { plan, step: s } = step();
+
+    await fake.run(s, plan, 'ref');
+    assert.equal(calls(fake.log, 'runLlm').length, 1);
+
+    // The ordinary retake is still free — AC5 is not weakened by the escape hatch existing.
+    await fake.session.returnToBuild();
+    await fake.run(s, plan, 'ref');
+    assert.equal(calls(fake.log, 'runLlm').length, 1, 'a plain retake stopped being free');
+
+    await fake.session.returnToBuild();
+    const again = await fake.session.start(s, plan, 'ref', { fresh: true });
+    await fake.settle();
+
+    assert.equal(again.started, false, 'the press returns before the model does, like any other');
+    assert.equal(calls(fake.log, 'runLlm').length, 2, 'a forced regeneration was still served from the cache');
+    assert.equal(fake.session.activeStepId(), STEP_ID, 'and the new example is open');
+  });
+
+  test('a fresh generation REPLACES the cache entry, so the next free retake is the new one', async () => {
+    const fake = makeFake({ canned: replyOf(GOOD_DETOUR) });
+    const { plan, step: s } = step();
+    await fake.run(s, plan, 'ref');
+    await fake.session.returnToBuild();
+
+    const second = makeFake({
+      canned: replyOf({ ...GOOD_DETOUR, title: 'A DIFFERENT machine' }),
+      storage: fake.storage,
+    });
+    await second.session.start(s, plan, 'ref', { fresh: true });
+    await second.settle();
+
+    assert.equal(readCachedDetour(fake.storage, cacheKeyFor(s, plan))?.title, 'A DIFFERENT machine',
+      'the regenerated example did not become the cached one, so the next retake serves the old');
   });
 });

@@ -607,3 +607,73 @@ suite('Outbound — the one thing that decides what reaches a paid third party',
     assert.ok(diff.includes(`+${forgery}`), 'and the forgery is still shown — as what it is, a `+` line of somebody’s file');
   });
 });
+
+// ── the audit: is MAX_CONTEXT_CHARS the SUM, or does it only claim to be? ────────────────────
+
+/**
+ * **`MAX_CONTEXT_CHARS` says it is "the sum of every budget above". Is that pinned?**
+ *
+ * Partly, before this. The finding-2 test above renders a hostile plan and holds the block to
+ * the ceiling, so a budget raised without raising the total IS caught — provided the hostile
+ * plan happens to fill the field whose budget moved. It fills the ones the reviewer measured:
+ * the question, the why, and fifty thousand options. It does not fill the chapter title, the
+ * subtitle, the file path, or anything a later ticket adds — so **a NEW budgeted field, added
+ * to `buildContextBlock` and not to the total, would pass.** That is the gap this closes.
+ *
+ * The fixture is built by REFLECTION rather than by hand: every string leaf reachable from the
+ * step is replaced with five megabytes. A field added to `StepLike` tomorrow is filled by the
+ * same walk, so the ceiling is asserted against whatever the module actually sends rather than
+ * against whatever somebody remembered to make hostile.
+ *
+ * What it still cannot see, said plainly: a budget that is spent on something NOT reachable
+ * from the step — a new field on `AskContext` sourced elsewhere. The ceiling is a claim about
+ * one function's output, and this holds that output to it on the worst input the step can be.
+ */
+suite('MAX_CONTEXT_CHARS is the sum of the budgets — on a REFLECTIVELY hostile step', () => {
+  const FIVE_MB = 'H'.repeat(5_000_000);
+
+  /** Every string leaf replaced with five megabytes; arrays of objects grown to 50,000. */
+  function maximal(value: unknown, depth = 0): unknown {
+    if (typeof value === 'string') return FIVE_MB;
+    if (Array.isArray(value)) {
+      const one = value[0];
+      if (one === undefined || depth > 3) return value;
+      // One entry becomes fifty thousand of it, each maximal — the shape the reviewer's own
+      // measurement took, applied to every list rather than only to `options`.
+      return Array.from({ length: 50_000 }, () => maximal(one, depth + 1));
+    }
+    if (typeof value === 'object' && value !== null) {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(value)) out[k] = maximal((value as Record<string, unknown>)[k], depth + 1);
+      return out;
+    }
+    return value;
+  }
+
+  test('every string a step can carry, at five megabytes each, still fits under the ceiling', async () => {
+    const honest = stepById('st-4-symbol-render');
+    const hostile = { ...(maximal(honest) as StepLike), kind: honest.kind, target: { ...honest.target, file: FIVE_MB } };
+
+    const started = Date.now();
+    const block = core.buildContextBlock(await tutorContext(hostile, refRoot, target, realGit));
+    const took = Date.now() - started;
+
+    assert.ok(
+      block.length <= MAX_CONTEXT_CHARS,
+      `${block.length} characters were about to be billed to the learner against a stated ceiling of `
+      + `${MAX_CONTEXT_CHARS}. A budgeted field was added to the block and not to the sum — or a budget `
+      + 'was raised and the total was not.',
+    );
+    // The other half of "it is arithmetic, not a runtime cap": it has to be reached QUICKLY, or
+    // the bound is on the bill and not on the button. T-6's measurement was 12 ms.
+    assert.ok(took < 5_000, `building the block took ${took} ms — a press must not hang on a hostile plan`);
+  });
+
+  test('and the ceiling is not slack — an honest step is orders of magnitude under it', async () => {
+    // A ceiling far above anything reachable would pass the test above while bounding nothing.
+    // This is the opposite side of the number: the real gap between honest and the limit.
+    const block = core.buildContextBlock(await tutorContext(stepById('st-4-symbol-render'), refRoot, target, realGit));
+    assert.ok(block.length < MAX_CONTEXT_CHARS / 10,
+      `an honest step already uses ${block.length} of ${MAX_CONTEXT_CHARS} — the ceiling is not headroom any more`);
+  });
+});

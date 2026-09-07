@@ -70,8 +70,23 @@ export const NEXT_LABEL = 'Next';
 /** AC3's control, worded as the spec words it. */
 export const BACK_LABEL = 'Back to my build';
 
-/** Verbatim — a test asserts the exact sentence, never a copy of it. */
-export const DETOUR_ASIDE = 'These files live outside your project. Going back closes them and deletes them.';
+/**
+ * Verbatim — a test asserts the exact sentence, never a copy of it.
+ *
+ * **The second clause is new and it is T-7 security review finding 3.** The sentence used to
+ * end at "deletes them", which was true of the tabs and of the detour directory and NOT of the
+ * copy: `detours/cache/<hash>.json` holds the same model-written bytes, `removeDetourAt`
+ * refuses it by name (correctly), `dispose()` does not touch it, and nothing pruned it — so the
+ * page made a promise the code did not keep, which this repository's honest-controls rule does
+ * not allow. Both halves moved rather than one: the copy is now bounded
+ * (`MAX_CACHE_ENTRIES`, `src/detour/store.ts`) and the page now says it exists.
+ *
+ * It says WHERE and WHY rather than merely admitting to it, because "a copy is kept" with no
+ * reason reads like a leak and the reason is the feature: AC5's free retake IS that copy.
+ */
+export const DETOUR_ASIDE =
+  'These files live outside your project. Going back closes them and deletes them — a copy of the example '
+  + 'stays in this extension\'s own storage, outside your project too, so retaking it is free.';
 
 /** The honest line beside a disabled walk control (conventions.md: never a disabled control
  *  with no explanation). Both are FIXED text — nothing the model wrote reaches them. */

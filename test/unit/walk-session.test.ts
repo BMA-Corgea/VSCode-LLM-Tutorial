@@ -200,6 +200,9 @@ interface FakeOptions {
    *  the default every suite written before this ticket gets, and what `test/dial.test.ts`
    *  gets in production code. The adapter set is optional precisely so that stays possible. */
   detourStorage?: string;
+  /** `closeTabsUnder` reports every tab it was asked about as still open — the unsaved-buffer
+   *  case AC3's honest-controls arm is written for. */
+  stuckTabs?: boolean;
 }
 
 /** What the fake core's `stubFile` hands back: nothing like the reference file, so a test can
@@ -342,6 +345,8 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
   const onDisk = options.target !== undefined;
   const missing = new Set((options.missing ?? []).map((rel) => path.join(target, rel)));
   const saved = new Map<string, Progress>();
+  /** Every detour tab this fake was asked to open — what `stuckTabs` reports back as unclosed. */
+  const stuckPaths = new Set<string>();
   if (options.progress) saved.set(target, options.progress);
   const log: Call[] = [];
   const core = fakeCore(log, options);
@@ -450,6 +455,7 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
             globalStorageRoot: options.detourStorage,
             openDetourTab: (absPath: string) => {
               log.push({ fn: 'openDetourTab', absPath });
+              stuckPaths.add(absPath);
               return Promise.resolve();
             },
             revealDetourStop: (absPath: string, startLine: number, endLine: number) => {
@@ -458,7 +464,11 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
             },
             closeTabsUnder: (prefixes: string[]) => {
               log.push({ fn: 'closeTabsUnder', prefixes });
-              return Promise.resolve([]);
+              // A tab the editor declines to close — an unsaved buffer, or VS Code simply
+              // saying no. The honest-controls rule says the return still happens and the
+              // learner is TOLD which tab is still open, so a fake that can produce one is what
+              // makes that sentence testable.
+              return Promise.resolve(options.stuckTabs === true ? [...stuckPaths] : []);
             },
             showNarrator: () => { log.push({ fn: 'showNarrator' }); },
             closeNarrator: () => { log.push({ fn: 'closeNarrator' }); },
@@ -3289,6 +3299,76 @@ suite('the detour, wired into the walk (T-7)', () => {
     session.dispose();
   });
 
+  test('a refusal is drawn ONCE — the walk routes the sentence, it does not re-store it (finding 5)', async () => {
+    // `DetourSession.refuse` stores the sentence (`DetourView.note` → `#detour-note`) AND
+    // returns it, and `startDetour` used to put the returned copy through `setTutorNote` as
+    // well (`TutorView.note` → `#tutor-note`) — two paragraphs of the same section, one line
+    // apart, holding the identical sentence. Both are reasonable in isolation; together the
+    // learner reads it twice.
+    //
+    // **When a lower layer already stores what it returns, the upper layer's job is to route
+    // it, not to re-store it.**
+    const { fake, session } = walkWithDetour({ tutorReply: 'this is not the JSON that was asked for' });
+    await session.settled();
+
+    fake.clearLog();
+    session.startDetour();
+    await session.settled();
+
+    const view = pick(fake, 'setPanel').at(-1)?.view;
+    const detourNote = view?.detour?.note;
+    assert.ok(detourNote !== undefined && detourNote.length > 0, 'the refusal reaches the panel at all');
+    assert.match(detourNote, /did not answer with the JSON/, 'and it says which rule the model broke');
+    assert.equal(view?.tutor?.note, undefined,
+      'the same sentence is on the page twice — once as the detour’s note and once as the tutor’s');
+
+    session.dispose();
+  });
+
+  test('the return’s "this tab is still open" is drawn once too (finding 5)', async () => {
+    const { fake, session } = walkWithDetour({ stuckTabs: true });
+    await session.settled();
+    session.startDetour();
+    await session.settled();
+
+    fake.clearLog();
+    session.returnFromDetour();
+    await session.settled();
+
+    const view = pick(fake, 'setPanel').at(-1)?.view;
+    assert.ok(view?.detour?.note?.includes('still open'), 'the learner is told which tab did not close');
+    assert.equal(view?.tutor?.note, undefined, 'and told once');
+
+    session.dispose();
+  });
+
+  test('*Write a new example* forces a fresh generation, and the plain retake stays free (finding 9)', async () => {
+    // The spec promised a "regenerate" button and T-7 shipped without one, so nothing could
+    // force a cache miss: `DETOUR_PROMPT_VERSION` is a source constant, and a learner served an
+    // example that did not help had no way to ask for another, ever.
+    const { fake, session } = walkWithDetour();
+    await session.settled();
+
+    session.startDetour();
+    await session.settled();
+    assert.equal(pick(fake, 'runLlm').length, 1, 'the first press pays');
+
+    session.returnFromDetour();
+    await session.settled();
+    session.startDetour();
+    await session.settled();
+    assert.equal(pick(fake, 'runLlm').length, 1, 'AC5: the retake is still free');
+
+    session.regenerateDetour();
+    await session.settled();
+
+    assert.equal(pick(fake, 'runLlm').length, 2, 'the regenerate control was served out of the cache');
+    const view = pick(fake, 'setPanel').at(-1)?.view;
+    assert.equal(view?.detour?.open?.stepId, 'st-1-shape-src', 'and the new example is what is open');
+
+    session.dispose();
+  });
+
   test('disposing the walk takes the detour with it', async () => {
     const { fake, session } = walkWithDetour();
     await session.settled();
@@ -3303,5 +3383,288 @@ suite('the detour, wired into the walk (T-7)', () => {
 
     assert.equal(pick(fake, 'closeTabsUnder').length, 1, 'its tabs are closed');
     assert.equal(pick(fake, 'closeNarrator').length, 1, 'and its narrator disposed');
+  });
+});
+
+// ── the invariant T-6 paid for, and T-7 broke without failing a single test ──────────────────
+
+/**
+ * **While a model call is in flight, the walk's other controls stay live.**
+ *
+ * That sentence is the property. It is deliberately not a sentence about `enqueue`, about
+ * `this.work`, or about which method awaits which — because *a test written against the
+ * mechanism can be satisfied by a new mechanism that reintroduces the bug*, and that is exactly
+ * what happened here:
+ *
+ *   - T-6 found that a press was not visible until three awaits had gone by, and paid real
+ *     design cost to fix it: `ledger.open()` and `this.asking` moved to the top of `beginAsk`,
+ *     and the model call was deliberately kept OFF the walk's serialised chain, with only its
+ *     DELIVERY enqueued. `WalkSession.settled()` exists because of that split.
+ *   - T-7 then put a whole model call — up to `tutorTimeoutSeconds`, capped at 3,600 — back
+ *     ON the chain, in front of everything else the panel can do. Driven by the reviewer:
+ *     `session.ask(…)` during a detour generation produced **zero pushes, zero probes, no note,
+ *     `thinking === false`, no ticket**, and `step:check`, `dial:set`, `tutor:clear`,
+ *     `reproduce:run` and `detour:back` queued behind it identically.
+ *   - **Every test stayed green.** Nothing about `beginAsk` had regressed; it simply never got
+ *     to run, and no test asked whether it did.
+ *
+ * So the invariant was never pinned by anything the next ticket would trip:
+ *
+ *   > **An invariant that is not pinned by a test the next ticket would break is not an
+ *   > invariant. It is a coincidence that held once.**
+ *
+ * These are the reviewer's reproduction with the signs flipped. Each one puts a real request in
+ * flight behind a runner that never answers, then drives another control and asserts it
+ * produced its own effect — a push, a probe, a ticket, a write. A future edit that parks a long
+ * call on the chain again fails them whatever it is called and however it is spelled.
+ *
+ * They are also the reason `tutorRunner` here never resolves: the property is about what
+ * happens WHILE the call is in flight, and a runner that answered would be testing the tail.
+ *
+ * **What each of these actually detects, measured rather than assumed.** The regression was
+ * reintroduced by hand (one line: await the generation inside the chain job) and the suite
+ * re-run: **seven of the nine fail.** The two that do not are named here so nobody later reads
+ * them as stronger than they are — *a detour press while an ASK is in flight* passes either
+ * way, because T-6's own fix is what keeps the ask off the chain and it still holds; and
+ * *Cancel* passes either way, because it is synchronous by design and was never on the chain
+ * (its assertion earns its place for finding 4 — the SENTENCE — not for finding 3). The seven
+ * that fail are the pins.
+ */
+suite('a model call in flight does not freeze the walk (T-7 code review finding 3)', () => {
+  const DETOUR_JSON = JSON.stringify({
+    title: 'A vending machine',
+    domain: 'vending machines',
+    files: [{ path: 'coins.ts', content: 'export const VALUES = [5, 10, 25];\n' }],
+    stops: [
+      { file: 'coins.ts', startLine: 1, endLine: 1, text: 'one' },
+      { file: 'coins.ts', startLine: 1, endLine: 1, text: 'two' },
+      { file: 'coins.ts', startLine: 1, endLine: 1, text: 'three' },
+    ],
+  });
+
+  const storages: string[] = [];
+
+  function storage(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-frozen-'));
+    storages.push(dir);
+    return dir;
+  }
+
+  teardown(() => {
+    for (const dir of storages.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A walk whose model NEVER answers, with the detour wired. */
+  function walkWithStuckModel() {
+    const fake = fakeAdapters({
+      request: { idea: '', recreate: true, repo: '/fixture/reference', referenceRoot: '/fixture/reference', target: TARGET, dial: 'manual' },
+      tutorRunner: () => new Promise<LlmReply>(() => { /* the model never answers */ }),
+      detourStorage: storage(),
+    });
+    return { fake, session: WalkSession.open(TARGET, fake.adapters) };
+  }
+
+  /**
+   * Wait for the walk to have reacted, WITHOUT using `settled()`.
+   *
+   * `settled()` deliberately waits for a request in flight, so it would hang here — and using
+   * it would also make this suite a test about `settled()`. What is wanted is "give the host
+   * every chance to do the work, then look", which is what a learner's next press really has.
+   */
+  async function letItReact(): Promise<void> {
+    for (let i = 0; i < 20; i += 1) await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+  }
+
+  /** A generation really in flight: the request has reached the runner and is still there. */
+  async function withDetourInFlight() {
+    const { fake, session } = walkWithStuckModel();
+    await session.settled();
+    session.startDetour();
+    await letItReact();
+    assert.equal(pick(fake, 'runLlm').length, 1, 'the detour’s request is with the model');
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.detour?.generating, true, 'and the panel is drawing the wait');
+    fake.clearLog();
+    return { fake, session };
+  }
+
+  test('ask() while a detour is being written still opens a ticket, probes and pushes', async () => {
+    // The reviewer's exact reproduction, inverted. Measured then: zero pushes, zero probes, no
+    // note, `thinking === false`, no ticket.
+    const { fake, session } = await withDetourInFlight();
+
+    session.ask('why is this its own module?');
+    await letItReact();
+
+    const pushes = pick(fake, 'setPanel');
+    assert.ok(pushes.length > 0, 'the press produced no push at all — the panel is frozen');
+    assert.equal(pushes.at(-1)?.view?.tutor?.thinking, true, 'and the spinner never went up');
+    assert.ok(pick(fake, 'availability').length > 0, 'the availability probe never ran');
+    // TWO in flight, and that is the point: the detour's request and the question's, both in
+    // one ledger, both counted. One would mean the question never got a ticket at all.
+    assert.equal(pushes.at(-1)?.view?.tutor?.spend?.sending, 2, 'no ticket was opened for the question');
+
+    session.dispose();
+  });
+
+  test('the same, with the roles reversed: a detour press while an ASK is in flight', async () => {
+    // The property is symmetric, and asserting it both ways is what stops the fix being "the
+    // detour is special". Either request in flight, the other control still works.
+    const { fake, session } = walkWithStuckModel();
+    await session.settled();
+    session.ask('what is this file for?');
+    await letItReact();
+    assert.equal(pick(fake, 'runLlm').length, 1, 'the ask is with the model');
+    fake.clearLog();
+
+    session.startDetour();
+    await letItReact();
+
+    const pushes = pick(fake, 'setPanel');
+    assert.ok(pushes.length > 0, 'the detour press produced no push — the panel is frozen');
+    assert.equal(pushes.at(-1)?.view?.detour?.generating, true, 'and the detour’s own wait never went up');
+    assert.equal(pick(fake, 'runLlm').length, 1, 'a second request really was started');
+
+    session.dispose();
+  });
+
+  test('step:check still runs and still records its verdict', async () => {
+    const { fake, session } = await withDetourInFlight();
+    session.goTo('st-2-file-parse');
+    await letItReact();
+    fake.clearLog();
+
+    session.runCheck();
+    await letItReact();
+
+    // This fake's target is not on disk, so the check's answer is about a file that is not
+    // there rather than a parse. What is asserted is therefore what the reviewer measured as
+    // ZERO: the job RAN — it reached for repo-tour's core, and it pushed.
+    assert.ok(pick(fake, 'core').length > 0, 'the check never ran — it never even reached for the core');
+    assert.ok(pick(fake, 'setPanel').length > 0, 'and produced no push, so the panel is frozen');
+
+    session.dispose();
+  });
+
+  test('dial:set still applies, and its ENTRY PASS still runs', async () => {
+    // Two halves, and only the second was ever at risk. `setDial` itself is synchronous — it
+    // mutates, commits and pushes on the caller's own turn — so the radio moves whatever the
+    // chain is doing. What it then ENQUEUES is `enterCurrentStep`, which is the half that
+    // writes the learner's file, and that is what queued behind the model call. Both are
+    // asserted, and the second is the one that fails if a long call goes back on the chain.
+    const { fake, session } = await withDetourInFlight();
+    // A `file` step, because only a file step has anything for an entry pass to write — a
+    // `shape` step's entry pass is a no-op and would prove nothing either way.
+    session.goTo('st-2-file-parse');
+    await letItReact();
+    fake.clearLog();
+
+    session.setDial('st-2-file-parse', 'automated');
+    await letItReact();
+
+    assert.ok(pick(fake, 'saveProgress').length > 0, 'the dial change was never written');
+    assert.equal(fake.stored()?.steps['st-2-file-parse']?.dial, 'automated', 'and never took effect');
+    assert.ok(pick(fake, 'core').length > 0, 'the entry pass never ran — the dial moved on the page and nowhere else');
+
+    session.dispose();
+  });
+
+  test('reproduce:run still runs', async () => {
+    const { fake, session } = await withDetourInFlight();
+
+    session.reproduce();
+    await letItReact();
+
+    const view = pick(fake, 'setPanel').at(-1)?.view;
+    assert.ok(pick(fake, 'setPanel').length > 0, 'the press produced no push — the control is frozen');
+    assert.ok(view?.reproduce !== undefined || (view?.writeNote ?? '').length > 0,
+      'and the copy never reported anything back');
+
+    session.dispose();
+  });
+
+  test('tutor:clear still empties the conversation', async () => {
+    const { fake, session } = await withDetourInFlight();
+
+    session.clearConversation();
+    await letItReact();
+
+    const note = pick(fake, 'setPanel').at(-1)?.view?.tutor?.note;
+    assert.ok(note !== undefined && note.length > 0, 'the control said nothing — it never ran');
+
+    session.dispose();
+  });
+
+  test('navigation still moves the learner, and still enters the step it moved to', async () => {
+    // Same two halves as the dial: the push is synchronous and the entry pass is enqueued.
+    const { fake, session } = await withDetourInFlight();
+
+    session.next();
+    await letItReact();
+
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.step?.id, 'st-2-file-parse', 'the walk would not move');
+    // The entry pass's own visible product on a manual dial: the file's SHAPE, which is what
+    // the panel draws instead of the answer. It arrives on a second push, from the chain.
+    assert.ok(pick(fake, 'setPanel').at(-1)?.view?.shape !== undefined,
+      'the step it moved to was never entered — the panel is showing a step with nothing in it');
+
+    session.dispose();
+  });
+
+  test('detour:back still comes back while a SECOND example is being written', async () => {
+    // The sharpest of them: with the model call on the chain, the way OUT of a detour queued
+    // behind a detour being written. A learner who pressed *Write a new example* and changed
+    // their mind had to wait the model out to undo it.
+    //
+    // The setup is a detour that finished, then a regeneration that never will — which is the
+    // only way to have something to come back FROM and something in flight at the same time.
+    const dir = storage();
+    let answer: ((reply: LlmReply) => void) | undefined;
+    const fake = fakeAdapters({
+      request: { idea: '', recreate: true, repo: '/fixture/reference', referenceRoot: '/fixture/reference', target: TARGET, dial: 'manual' },
+      tutorRunner: () => new Promise<LlmReply>((resolve) => { answer = resolve; }),
+      detourStorage: dir,
+    });
+    const session = WalkSession.open(TARGET, fake.adapters);
+    await session.settled();
+
+    session.startDetour();
+    await letItReact();
+    answer?.({ text: DETOUR_JSON, inputTokens: 1, outputTokens: 1, usd: 0, metered: false });
+    await session.settled();
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.detour?.open?.stepId, 'st-1-shape-src', 'a detour is open');
+
+    // …and now one that never answers.
+    session.regenerateDetour();
+    await letItReact();
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.detour?.generating, true, 'a second example is being written');
+    fake.clearLog();
+
+    session.returnFromDetour();
+    await letItReact();
+
+    assert.ok(pick(fake, 'closeTabsUnder').length > 0, 'the way out never ran — it queued behind the model');
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.detour?.open, undefined, 'and the learner is still inside the example');
+
+    session.dispose();
+  });
+
+  test('Cancel stops it, and says what stopping did (finding 4)', async () => {
+    // *Cancel* is synchronous and was never on the chain, so it kept working throughout — what
+    // it did NOT do was say anything. Driven: `spend() = {sending: 1, unwatched: 1}` with both
+    // notes `undefined`. A press that stops a paid request and reports nothing is the shape
+    // this file's own `cancelAsk` calls "the dishonest version of the same mechanism".
+    const { fake, session } = await withDetourInFlight();
+
+    session.cancelAsk();
+    await letItReact();
+
+    const view = pick(fake, 'setPanel').at(-1)?.view;
+    const note = view?.detour?.note;
+    assert.ok(note !== undefined && note.length > 0, 'Cancel stopped a paid request and said nothing');
+    assert.match(note, /still be billed/, 'and it is honest that the request goes on costing money');
+    assert.equal(view?.detour?.generating, false, 'while the wait really does come off the button');
+    assert.equal(view?.tutor?.spend?.unwatched, 1, 'which is what `unwatched` is for');
+
+    session.dispose();
   });
 });

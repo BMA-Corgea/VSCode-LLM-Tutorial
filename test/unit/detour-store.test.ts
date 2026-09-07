@@ -36,9 +36,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  detourCachePath, detourDir, detoursRoot, MAX_CACHE_BYTES, readCachedDetour, removeDetour,
-  removeDetourAt, sanitizeDetour, writeCachedDetour, writeDetourFiles,
-  type DetourRemoval,
+  detourCachePath, detourDir, detoursRoot, isDetourWriteRefused, MAX_CACHE_BYTES,
+  MAX_CACHE_ENTRIES, pruneDetourCache, readCachedDetour, removeDetour, removeDetourAt,
+  sanitizeDetour, tutorialId, writeCachedDetour, writeDetourFiles,
+  type DetourCacheKey, type DetourKey, type DetourRemoval, type DetourWriteRefused,
+  type DetourWriteResult,
 } from '../../src/detour/store.js';
 import { DETOUR_LIMITS, type Detour } from '../../src/detour/types.js';
 
@@ -107,6 +109,45 @@ function treeFiles(dir: string): string[] {
 
 const STEP = 'st-3-decision-schema';
 
+/**
+ * The other half of every key (T-7 code review findings 1, 2 and 9). `globalStorageUri` is
+ * per-EXTENSION, and repo-tour mints a step id with no repository in it, so a suite that only
+ * ever drove ONE tutorial could not see either merge-blocking finding. `OTHER_TUTORIAL` exists
+ * so that the collision tests below are two inputs sharing a key rather than one input twice.
+ */
+const TUTORIAL = 'tutorial-a-0000000000000000000000';
+const OTHER_TUTORIAL = 'tutorial-b-1111111111111111111111';
+
+/** One step of one tutorial. */
+function key(stepId: string, tutorial: string = TUTORIAL): DetourKey {
+  return { tutorial, stepId };
+}
+
+/** One step of one tutorial, at one prompt version, for one prompt. `prompt` defaults to a
+ *  fixed string so a test that is not about invalidation does not have to name one. */
+function cacheKey(
+  stepId: string,
+  promptVersion: number = 1,
+  prompt: string = 'THE PROMPT',
+  tutorial: string = TUTORIAL,
+): DetourCacheKey {
+  return { tutorial, stepId, promptVersion, prompt };
+}
+
+/** `writeDetourFiles`'s happy answer, or a failure that quotes the refusal it got instead. */
+function wrote(result: DetourWriteResult | DetourWriteRefused): DetourWriteResult {
+  assert.ok(!isDetourWriteRefused(result), `expected a write, got: ${isDetourWriteRefused(result) ? result.problem : ''}`);
+  return result;
+}
+
+/** `writeDetourFiles`'s refusal sentence, or a failure. The two are told apart everywhere
+ *  because "none of the files could be written" and "the folder could not be proved, so
+ *  nothing was attempted" are different facts. */
+function refusedWrite(result: DetourWriteResult | DetourWriteRefused): string {
+  assert.ok(isDetourWriteRefused(result), 'expected a refusal, got a write');
+  return isDetourWriteRefused(result) ? result.problem : '';
+}
+
 /** A well-formed detour, exactly as `parseDetourReply` would hand one over. */
 function detour(over: Partial<Detour> = {}): Detour {
   return {
@@ -144,7 +185,7 @@ function refusalOf(result: DetourRemoval): string {
 suite('detourDir — the step id is hashed, and the hash is the safety property', () => {
   test('a detour lives under <globalStorageRoot>/detours/, one hashed segment deep', () => {
     const root = storage();
-    const dir = detourDir(root, STEP);
+    const dir = detourDir(root, key(STEP));
 
     assert.equal(path.dirname(dir), detoursRoot(root));
     assert.equal(detoursRoot(root), path.join(root, 'detours'));
@@ -153,13 +194,13 @@ suite('detourDir — the step id is hashed, and the hash is the safety property'
 
   test('the same step id always gives the same directory — a retake finds its own files', () => {
     const root = storage();
-    assert.equal(detourDir(root, STEP), detourDir(root, STEP));
+    assert.equal(detourDir(root, key(STEP)), detourDir(root, key(STEP)));
   });
 
   test('asking creates nothing — detourDir is a pure function of its two arguments', () => {
     const root = storage();
-    detourDir(root, STEP);
-    detourCachePath(root, STEP, 1);
+    detourDir(root, key(STEP));
+    detourCachePath(root, cacheKey(STEP, 1));
 
     assert.deepEqual(fs.readdirSync(root), [], 'asking where a detour would go created something');
   });
@@ -184,7 +225,7 @@ suite('detourDir — the step id is hashed, and the hash is the safety property'
     ];
 
     for (const id of hostile) {
-      const dir = detourDir(root, id);
+      const dir = detourDir(root, key(id));
       assert.match(path.basename(dir), /^[0-9a-f]{32}$/, `step id ${JSON.stringify(id)} produced an unsafe segment`);
       assert.equal(path.dirname(dir), detoursRoot(root), `step id ${JSON.stringify(id)} escaped the store`);
     }
@@ -203,18 +244,18 @@ suite('detourDir — the step id is hashed, and the hash is the safety property'
     ];
 
     for (const [left, right] of pairs) {
-      assert.notEqual(detourDir(root, left), detourDir(root, right),
+      assert.notEqual(detourDir(root, key(left)), detourDir(root, key(right)),
         `${JSON.stringify(left)} and ${JSON.stringify(right)} share a detour directory`);
     }
   });
 
   test('the cache lives beside the detours, never inside one', () => {
     const root = storage();
-    const cache = detourCachePath(root, STEP, 1);
+    const cache = detourCachePath(root, cacheKey(STEP, 1));
 
     assert.equal(path.dirname(cache), path.join(detoursRoot(root), 'cache'));
     assert.match(path.basename(cache), /^[0-9a-f]{32}\.json$/);
-    assert.equal(cache.startsWith(detourDir(root, STEP)), false);
+    assert.equal(cache.startsWith(detourDir(root, key(STEP))), false);
   });
 });
 
@@ -225,14 +266,14 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     const root = storage();
     const d = detour();
 
-    const result = writeDetourFiles(root, STEP, d);
+    const result = wrote(writeDetourFiles(root, key(STEP), d));
 
     assert.deepEqual(result.problems, []);
-    assert.equal(result.dir, detourDir(root, STEP));
+    assert.equal(result.dir, detourDir(root, key(STEP)));
     assert.deepEqual(result.written, [
-      path.join(result.dir, 'machine.ts'),
-      path.join(result.dir, 'lib', 'change.ts'),
-    ]);
+      { path: 'machine.ts', abs: path.join(result.dir, 'machine.ts') },
+      { path: 'lib/change.ts', abs: path.join(result.dir, 'lib', 'change.ts') },
+    ], 'the model’s own relative path travels with the absolute one — the narrator needs both');
     for (const file of d.files) {
       assert.equal(fs.readFileSync(path.join(result.dir, file.path), 'utf8'), file.content);
     }
@@ -240,10 +281,10 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
 
   test('nested paths get their parent directories made for them', () => {
     const root = storage();
-    const result = writeDetourFiles(root, STEP, detour({
+    const result = wrote(writeDetourFiles(root, key(STEP), detour({
       files: [{ path: 'a/b/c/deep.ts', content: 'export const D = 4;\n' }],
       stops: detour().stops.map((s) => ({ ...s, file: 'a/b/c/deep.ts' })),
-    }));
+    })));
 
     assert.deepEqual(result.problems, []);
     assert.equal(fs.readFileSync(path.join(result.dir, 'a', 'b', 'c', 'deep.ts'), 'utf8'), 'export const D = 4;\n');
@@ -257,10 +298,10 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     const { store, workspace } = sandbox();
     const before = treeHash(workspace);
 
-    writeDetourFiles(store, STEP, detour());
-    writeCachedDetour(store, STEP, 1, detour());
-    readCachedDetour(store, STEP, 1);
-    removeDetour(store, STEP);
+    writeDetourFiles(store, key(STEP), detour());
+    writeCachedDetour(store, cacheKey(STEP, 1), detour());
+    readCachedDetour(store, cacheKey(STEP, 1));
+    removeDetour(store, key(STEP));
 
     assert.equal(treeHash(workspace), before, 'a detour touched the learner’s workspace');
     assert.deepEqual(treeFiles(workspace).sort(), ['package.json', 'src/index.ts']);
@@ -274,21 +315,27 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     const outsideName = path.join(root, 'stolen.ts');
     fs.writeFileSync(outsideName, 'someone else’s file\n');
 
-    const result = writeDetourFiles(root, STEP, detour({
+    const result = wrote(writeDetourFiles(root, key(STEP), detour({
       files: [
         { path: '../../stolen.ts', content: 'pwned\n' },
         { path: '/etc/passwd', content: 'pwned\n' },
         { path: 'ok.ts', content: 'export const OK = 1;\n' },
       ],
       stops: detour().stops.map((s) => ({ ...s, file: 'ok.ts' })),
-    }));
+    })));
 
     assert.equal(result.problems.length, 2, `expected two refusals, got ${JSON.stringify(result.problems)}`);
-    for (const problem of result.problems) assert.match(problem, /refused/);
+    // The sentence is `refusalSentence`'s now — the one the panel shows — rather than a second
+    // wording invented here, and it NAMES the rule that was broken. That is the point of the
+    // union in `types.ts`, and asserting the rule rather than the word "refused" is what stops
+    // this test passing on a refusal for the wrong reason.
+    assert.match(result.problems[0] ?? '', /a "\.\." segment/);
+    assert.match(result.problems[1] ?? '', /is an absolute path/);
+    for (const problem of result.problems) assert.match(problem, /Nothing was written/);
     assert.equal(fs.readFileSync(outsideName, 'utf8'), 'someone else’s file\n');
     // Not all-or-nothing: the good file beside the bad one is still written, the way
     // `reproduceFiles` reports one entry without dropping the rest.
-    assert.deepEqual(result.written, [path.join(result.dir, 'ok.ts')]);
+    assert.deepEqual(result.written, [{ path: 'ok.ts', abs: path.join(result.dir, 'ok.ts') }]);
   });
 
   test('a symlink planted at a destination FILE is never written through', () => {
@@ -301,15 +348,15 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     const root = storage();
     const outside = path.join(root, 'bashrc');
     fs.writeFileSync(outside, 'export PATH=$PATH\n');
-    const dir = detourDir(root, STEP);
+    const dir = detourDir(root, key(STEP));
     fs.mkdirSync(dir, { recursive: true });
     const dest = path.join(dir, 'machine.ts');
     fs.symlinkSync(outside, dest);
 
-    const result = writeDetourFiles(root, STEP, detour({
+    const result = wrote(writeDetourFiles(root, key(STEP), detour({
       files: [{ path: 'machine.ts', content: 'export const COINS = [25];\n' }],
       stops: detour().stops.map((s) => ({ ...s, file: 'machine.ts', startLine: 1, endLine: 1 })),
-    }));
+    })));
 
     assert.deepEqual(result.problems, []);
     assert.equal(fs.readFileSync(outside, 'utf8'), 'export PATH=$PATH\n', 'the write followed a symlink out of the store');
@@ -328,14 +375,13 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     fs.mkdirSync(outside);
     const canary = path.join(outside, 'machine.ts');
     fs.writeFileSync(canary, 'someone else’s file\n');
-    const dir = detourDir(root, STEP);
+    const dir = detourDir(root, key(STEP));
     fs.mkdirSync(detoursRoot(root), { recursive: true });
     fs.symlinkSync(outside, dir);
 
-    const result = writeDetourFiles(root, STEP, detour());
+    const problem = refusedWrite(writeDetourFiles(root, key(STEP), detour()));
 
-    assert.ok(result.problems.length > 0, 'a detour wrote through a symlinked directory');
-    assert.deepEqual(result.written, []);
+    assert.ok(problem.length > 0, 'a detour wrote through a symlinked directory');
     assert.equal(fs.readFileSync(canary, 'utf8'), 'someone else’s file\n');
     assert.deepEqual(fs.readdirSync(outside), ['machine.ts'], 'a refused write still created files outside the store');
   });
@@ -350,10 +396,9 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     fs.mkdirSync(outside);
     fs.symlinkSync(outside, detoursRoot(root));
 
-    const result = writeDetourFiles(root, STEP, detour());
+    const problem = refusedWrite(writeDetourFiles(root, key(STEP), detour()));
 
-    assert.ok(result.problems.length > 0, 'a detour wrote through a symlinked store root');
-    assert.deepEqual(result.written, []);
+    assert.ok(problem.length > 0, 'a detour wrote through a symlinked store root');
     assert.deepEqual(fs.readdirSync(outside), [], 'files landed through the planted store link');
   });
 
@@ -362,12 +407,12 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     // leftovers in place, and step 4 opens *the directory's* files as tabs — so the learner
     // would get a tab from a detour they never asked for, and `stops` would not match it.
     const root = storage();
-    writeDetourFiles(root, STEP, detour({
+    writeDetourFiles(root, key(STEP), detour({
       files: [{ path: 'stale.ts', content: 'export const OLD = 1;\n' }],
       stops: detour().stops.map((s) => ({ ...s, file: 'stale.ts', startLine: 1, endLine: 1 })),
     }));
 
-    const result = writeDetourFiles(root, STEP, detour());
+    const result = wrote(writeDetourFiles(root, key(STEP), detour()));
 
     assert.deepEqual(result.problems, []);
     assert.equal(fs.existsSync(path.join(result.dir, 'stale.ts')), false, 'a stale file survived a rewrite');
@@ -384,7 +429,7 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
     const root = path.join(box, 'storage');
     fs.symlinkSync(real, root);
 
-    const result = writeDetourFiles(root, STEP, detour());
+    const result = wrote(writeDetourFiles(root, key(STEP), detour()));
 
     assert.deepEqual(result.problems, []);
     assert.equal(fs.readFileSync(path.join(real, 'detours', path.basename(result.dir), 'machine.ts'), 'utf8'),
@@ -392,16 +437,16 @@ suite('writeDetourFiles — the bytes land in global storage and nowhere else (A
   });
 
   test('a relative storage root is refused rather than resolved against the cwd', () => {
-    const result = writeDetourFiles('detours-relative', STEP, detour());
+    const problem = refusedWrite(writeDetourFiles('detours-relative', key(STEP), detour()));
 
-    assert.ok(result.problems.length > 0);
+    assert.ok(problem.length > 0);
     assert.equal(fs.existsSync(path.join(process.cwd(), 'detours-relative')), false,
       'a relative storage root created a directory in the cwd');
   });
 
   test('no .tmp file is left behind — the write is temp-plus-rename', () => {
     const root = storage();
-    const result = writeDetourFiles(root, STEP, detour());
+    const result = wrote(writeDetourFiles(root, key(STEP), detour()));
 
     assert.deepEqual(treeFiles(result.dir).filter((f) => f.includes('.tmp')), []);
   });
@@ -414,41 +459,41 @@ suite('the cache — a retake is free, and a hand-edited entry is a MISS (AC5)',
     const root = storage();
     const d = detour();
 
-    assert.equal(writeCachedDetour(root, STEP, 1, d), true);
-    assert.deepEqual(readCachedDetour(root, STEP, 1), d);
-    assert.ok(fs.existsSync(detourCachePath(root, STEP, 1)));
+    assert.equal(writeCachedDetour(root, cacheKey(STEP, 1), d), true);
+    assert.deepEqual(readCachedDetour(root, cacheKey(STEP, 1)), d);
+    assert.ok(fs.existsSync(detourCachePath(root, cacheKey(STEP, 1))));
   });
 
   test('the key is the step id AND the prompt version — either one changing is a miss', () => {
     const root = storage();
-    writeCachedDetour(root, STEP, 1, detour());
+    writeCachedDetour(root, cacheKey(STEP, 1), detour());
 
-    assert.notEqual(readCachedDetour(root, STEP, 1), null, 'the same key must hit');
-    assert.equal(readCachedDetour(root, STEP, 2), null, 'a new prompt version served a stale detour');
-    assert.equal(readCachedDetour(root, 'st-9-other', 1), null, 'another step served this step’s detour');
-    assert.notEqual(detourCachePath(root, STEP, 1), detourCachePath(root, STEP, 2));
+    assert.notEqual(readCachedDetour(root, cacheKey(STEP, 1)), null, 'the same key must hit');
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 2)), null, 'a new prompt version served a stale detour');
+    assert.equal(readCachedDetour(root, cacheKey('st-9-other', 1)), null, 'another step served this step’s detour');
+    assert.notEqual(detourCachePath(root, cacheKey(STEP, 1)), detourCachePath(root, cacheKey(STEP, 2)));
   });
 
   test('two versions of one step coexist — bumping the version does not destroy the old entry', () => {
     const root = storage();
-    writeCachedDetour(root, STEP, 1, detour({ title: 'v1' }));
-    writeCachedDetour(root, STEP, 2, detour({ title: 'v2' }));
+    writeCachedDetour(root, cacheKey(STEP, 1), detour({ title: 'v1' }));
+    writeCachedDetour(root, cacheKey(STEP, 2), detour({ title: 'v2' }));
 
-    assert.equal(readCachedDetour(root, STEP, 1)?.title, 'v1');
-    assert.equal(readCachedDetour(root, STEP, 2)?.title, 'v2');
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 1))?.title, 'v1');
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 2))?.title, 'v2');
   });
 
   test('a missing entry is a miss, not a throw', () => {
-    assert.equal(readCachedDetour(storage(), STEP, 1), null);
+    assert.equal(readCachedDetour(storage(), cacheKey(STEP, 1)), null);
   });
 
   test('an unparseable entry is a miss, not a throw', () => {
     const root = storage();
-    const file = detourCachePath(root, STEP, 1);
+    const file = detourCachePath(root, cacheKey(STEP, 1));
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, '{ this is not json');
 
-    assert.equal(readCachedDetour(root, STEP, 1), null);
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 1)), null);
   });
 
   test('an entry that is a SYMLINK is a miss — a cache read never follows a planted link', () => {
@@ -458,11 +503,11 @@ suite('the cache — a retake is free, and a hand-edited entry is a MISS (AC5)',
     const root = storage();
     const outside = path.join(root, 'secret.json');
     fs.writeFileSync(outside, JSON.stringify(detour()));
-    const file = detourCachePath(root, STEP, 1);
+    const file = detourCachePath(root, cacheKey(STEP, 1));
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.symlinkSync(outside, file);
 
-    assert.equal(readCachedDetour(root, STEP, 1), null);
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 1)), null);
   });
 
   test('an entry through a symlinked store root is a miss, and a write there is refused', () => {
@@ -471,8 +516,8 @@ suite('the cache — a retake is free, and a hand-edited entry is a MISS (AC5)',
     fs.mkdirSync(outside);
     fs.symlinkSync(outside, detoursRoot(root));
 
-    assert.equal(writeCachedDetour(root, STEP, 1, detour()), false);
-    assert.equal(readCachedDetour(root, STEP, 1), null);
+    assert.equal(writeCachedDetour(root, cacheKey(STEP, 1), detour()), false);
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 1)), null);
     assert.deepEqual(fs.readdirSync(outside), []);
   });
 
@@ -481,7 +526,7 @@ suite('the cache — a retake is free, and a hand-edited entry is a MISS (AC5)',
     // bounds how many files and how many LINES; nothing in it bounds how long a line is, so a
     // hand-edited entry can be arbitrarily large and still shaped exactly right.
     const root = storage();
-    const file = detourCachePath(root, STEP, 1);
+    const file = detourCachePath(root, cacheKey(STEP, 1));
     fs.mkdirSync(path.dirname(file), { recursive: true });
     // Perfectly SHAPED and perfectly within `DETOUR_LIMITS` — one file, one line, three stops
     // that all name it. Nothing but the size is wrong with it, so nothing but the size can be
@@ -495,7 +540,7 @@ suite('the cache — a retake is free, and a hand-edited entry is a MISS (AC5)',
     assert.ok(fs.statSync(file).size > MAX_CACHE_BYTES);
     assert.notEqual(sanitizeDetour(huge), null, 'the fixture must fail on its size alone');
 
-    assert.equal(readCachedDetour(root, STEP, 1), null);
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 1)), null);
   });
 
   test('a legitimately large entry, just under the ceiling, still hits', () => {
@@ -507,13 +552,13 @@ suite('the cache — a retake is free, and a hand-edited entry is a MISS (AC5)',
       stops: detour().stops.map((s) => ({ ...s, file: 'machine.ts', startLine: 1, endLine: 10 })),
     });
 
-    assert.equal(writeCachedDetour(root, STEP, 1, big), true);
-    assert.deepEqual(readCachedDetour(root, STEP, 1), big);
+    assert.equal(writeCachedDetour(root, cacheKey(STEP, 1), big), true);
+    assert.deepEqual(readCachedDetour(root, cacheKey(STEP, 1)), big);
   });
 
   test('the cache write is atomic and leaves no .tmp behind', () => {
     const root = storage();
-    writeCachedDetour(root, STEP, 1, detour());
+    writeCachedDetour(root, cacheKey(STEP, 1), detour());
 
     assert.deepEqual(fs.readdirSync(path.join(detoursRoot(root), 'cache')).filter((f) => f.includes('.tmp')), []);
   });
@@ -522,12 +567,12 @@ suite('the cache — a retake is free, and a hand-edited entry is a MISS (AC5)',
     // AC3 says the directory is gone; AC5 says the retake is free. Both, at once: the cache
     // holds the ANSWER, not the files, so a hit after a return still has to write them again.
     const root = storage();
-    writeDetourFiles(root, STEP, detour());
-    writeCachedDetour(root, STEP, 1, detour());
-    removeDetour(root, STEP);
+    writeDetourFiles(root, key(STEP), detour());
+    writeCachedDetour(root, cacheKey(STEP, 1), detour());
+    removeDetour(root, key(STEP));
 
-    assert.equal(fs.existsSync(detourDir(root, STEP)), false);
-    assert.notEqual(readCachedDetour(root, STEP, 1), null, 'the return deleted the cache along with the files');
+    assert.equal(fs.existsSync(detourDir(root, key(STEP))), false);
+    assert.notEqual(readCachedDetour(root, cacheKey(STEP, 1)), null, 'the return deleted the cache along with the files');
   });
 });
 
@@ -664,14 +709,14 @@ suite('sanitizeDetour — drop, never coerce, and never a half-trusted object', 
 
   test('a hand-edited cache entry that fails the shape is a MISS on disk too', () => {
     const root = storage();
-    const file = detourCachePath(root, STEP, 1);
+    const file = detourCachePath(root, cacheKey(STEP, 1));
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ ...detour(), files: [{ path: '../../../etc/passwd', content: 'x' }] }));
 
     // A path this module would refuse to write is still a well-SHAPED entry, so it comes back
     // — and the refusal that matters happens at the write, which the suite above pins. What
     // must not happen is a crash on the read path.
-    const back = readCachedDetour(root, STEP, 1);
+    const back = readCachedDetour(root, cacheKey(STEP, 1));
     assert.ok(back === null || back.files.length === 1);
   });
 });
@@ -686,10 +731,10 @@ suite('sanitizeDetour — drop, never coerce, and never a half-trusted object', 
 suite('removeDetour — a recursive delete that refuses everything it cannot prove (AC3)', () => {
   test('the happy path: the directory and everything under it is gone', () => {
     const root = storage();
-    const { dir } = writeDetourFiles(root, STEP, detour());
+    const { dir } = wrote(writeDetourFiles(root, key(STEP), detour()));
     assert.ok(fs.existsSync(path.join(dir, 'lib', 'change.ts')));
 
-    const result = removeDetour(root, STEP);
+    const result = removeDetour(root, key(STEP));
 
     assert.equal(result.removed, true);
     assert.equal(fs.existsSync(dir), false);
@@ -697,15 +742,15 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
 
   test('it deletes EXACTLY one detour — a sibling step and the cache both survive', () => {
     const root = storage();
-    writeDetourFiles(root, STEP, detour());
-    const other = writeDetourFiles(root, 'st-9-other', detour()).dir;
-    writeCachedDetour(root, STEP, 1, detour());
+    writeDetourFiles(root, key(STEP), detour());
+    const other = wrote(writeDetourFiles(root, key('st-9-other'), detour())).dir;
+    writeCachedDetour(root, cacheKey(STEP, 1), detour());
 
-    removeDetour(root, STEP);
+    removeDetour(root, key(STEP));
 
-    assert.equal(fs.existsSync(detourDir(root, STEP)), false);
+    assert.equal(fs.existsSync(detourDir(root, key(STEP))), false);
     assert.ok(fs.existsSync(other), 'removing one detour took another step’s with it');
-    assert.ok(fs.existsSync(detourCachePath(root, STEP, 1)), 'the return deleted the cache');
+    assert.ok(fs.existsSync(detourCachePath(root, cacheKey(STEP, 1))), 'the return deleted the cache');
     assert.ok(fs.existsSync(detoursRoot(root)), 'the return deleted the whole store');
   });
 
@@ -713,31 +758,31 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     const root = storage();
     // A store with another step's detour in it, so "absent" is about THIS step rather than
     // about a machine that has never taken a detour — those are different answers below.
-    writeDetourFiles(root, 'st-9-other', detour());
+    writeDetourFiles(root, key('st-9-other'), detour());
 
-    const result = removeDetour(root, STEP);
+    const result = removeDetour(root, key(STEP));
 
     assert.equal(refusalOf(result), 'absent');
   });
 
   test('it is idempotent — the second return is `absent`, not an error', () => {
     const root = storage();
-    writeDetourFiles(root, STEP, detour());
+    writeDetourFiles(root, key(STEP), detour());
 
-    assert.equal(removeDetour(root, STEP).removed, true);
-    assert.equal(refusalOf(removeDetour(root, STEP)), 'absent');
+    assert.equal(removeDetour(root, key(STEP)).removed, true);
+    assert.equal(refusalOf(removeDetour(root, key(STEP))), 'absent');
   });
 
   test('no store at all is `no-store`, and nothing is created by asking', () => {
     const root = storage();
 
-    assert.equal(refusalOf(removeDetour(root, STEP)), 'no-store');
+    assert.equal(refusalOf(removeDetour(root, key(STEP))), 'no-store');
     assert.deepEqual(fs.readdirSync(root), [], 'a refused removal created the store it was looking for');
   });
 
   test('a relative storage root is `bad-root` — never resolved against the cwd', () => {
-    assert.equal(refusalOf(removeDetour('detours-relative', STEP)), 'bad-root');
-    assert.equal(refusalOf(removeDetour('', STEP)), 'bad-root');
+    assert.equal(refusalOf(removeDetour('detours-relative', key(STEP))), 'bad-root');
+    assert.equal(refusalOf(removeDetour('', key(STEP))), 'bad-root');
     assert.equal(refusalOf(removeDetourAt('relative/root', '/tmp')), 'bad-root');
   });
 
@@ -746,12 +791,12 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     // Driven through `removeDetourAt` for exactly that reason: a guard nothing can reach is a
     // guard nothing can test, and this is the one whose failure deletes every detour at once.
     const root = storage();
-    writeDetourFiles(root, STEP, detour());
+    writeDetourFiles(root, key(STEP), detour());
 
     assert.equal(refusalOf(removeDetourAt(root, detoursRoot(root))), 'is-the-store-root');
     assert.equal(refusalOf(removeDetourAt(root, `${detoursRoot(root)}${path.sep}`)), 'is-the-store-root');
     assert.equal(refusalOf(removeDetourAt(root, path.join(detoursRoot(root), '.'))), 'is-the-store-root');
-    assert.ok(fs.existsSync(detourDir(root, STEP)), 'the store root was deleted with its contents');
+    assert.ok(fs.existsSync(detourDir(root, key(STEP))), 'the store root was deleted with its contents');
   });
 
   test('the filesystem root, the storage root and the home directory are all refused', () => {
@@ -759,19 +804,19 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     // `/`. None of these is reachable from a hashed step id either; all three are one bad
     // caller away, and the reason each is refused is that it does not resolve UNDER the store.
     const root = storage();
-    writeDetourFiles(root, STEP, detour());
+    writeDetourFiles(root, key(STEP), detour());
     const targets = [path.parse(process.cwd()).root, root, os.homedir(), os.tmpdir()];
 
     for (const target of targets) {
       assert.equal(refusalOf(removeDetourAt(root, target)), 'escaped', `${target} was not refused`);
       assert.ok(fs.existsSync(target), `${target} was deleted`);
     }
-    assert.ok(fs.existsSync(detourDir(root, STEP)));
+    assert.ok(fs.existsSync(detourDir(root, key(STEP))));
   });
 
   test('a path outside the store is `escaped`, and the victim survives', () => {
     const root = storage();
-    writeDetourFiles(root, STEP, detour());
+    writeDetourFiles(root, key(STEP), detour());
     const victimDir = tmpDir('detour-victim-');
     fs.writeFileSync(path.join(victimDir, 'important.txt'), 'keep me\n');
 
@@ -781,7 +826,7 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
 
   test('a path built out of the store with `..` is `escaped`', () => {
     const root = storage();
-    writeDetourFiles(root, STEP, detour());
+    writeDetourFiles(root, key(STEP), detour());
     const victimDir = tmpDir('detour-victim-');
     fs.writeFileSync(path.join(victimDir, 'important.txt'), 'keep me\n');
     const traversal = path.join(detoursRoot(root), '..', '..', path.basename(victimDir));
@@ -795,11 +840,11 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     // every cached generation on the machine (AC5 quietly stops holding). The name rule is what
     // keeps it out of reach: only a 32-hex directory is ever this command's to remove.
     const root = storage();
-    writeCachedDetour(root, STEP, 1, detour());
-    const cacheDir = path.dirname(detourCachePath(root, STEP, 1));
+    writeCachedDetour(root, cacheKey(STEP, 1), detour());
+    const cacheDir = path.dirname(detourCachePath(root, cacheKey(STEP, 1)));
 
     assert.equal(refusalOf(removeDetourAt(root, cacheDir)), 'not-a-detour');
-    assert.ok(fs.existsSync(detourCachePath(root, STEP, 1)));
+    assert.ok(fs.existsSync(detourCachePath(root, cacheKey(STEP, 1))));
   });
 
   test('a SYMLINKED DIRECTORY COMPONENT is refused — T-5 finding 1, on the delete path', () => {
@@ -831,10 +876,10 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     fs.mkdirSync(outside);
     fs.writeFileSync(path.join(outside, 'important.txt'), 'keep me\n');
     fs.mkdirSync(detoursRoot(root), { recursive: true });
-    const dir = detourDir(root, STEP);
+    const dir = detourDir(root, key(STEP));
     fs.symlinkSync(outside, dir);
 
-    assert.equal(refusalOf(removeDetour(root, STEP)), 'not-a-directory');
+    assert.equal(refusalOf(removeDetour(root, key(STEP))), 'not-a-directory');
     assert.equal(fs.readFileSync(path.join(outside, 'important.txt'), 'utf8'), 'keep me\n');
     assert.equal(fs.lstatSync(dir).isSymbolicLink(), true, 'a refused removal still unlinked the planted link');
   });
@@ -842,22 +887,22 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
   test('a regular FILE where the detour directory should be is `not-a-directory`', () => {
     const root = storage();
     fs.mkdirSync(detoursRoot(root), { recursive: true });
-    fs.writeFileSync(detourDir(root, STEP), 'not a directory\n');
+    fs.writeFileSync(detourDir(root, key(STEP)), 'not a directory\n');
 
-    assert.equal(refusalOf(removeDetour(root, STEP)), 'not-a-directory');
-    assert.ok(fs.existsSync(detourDir(root, STEP)));
+    assert.equal(refusalOf(removeDetour(root, key(STEP))), 'not-a-directory');
+    assert.ok(fs.existsSync(detourDir(root, key(STEP))));
   });
 
   test('a SYMLINKED STORE ROOT is `escaped-store`, and nothing under it is touched', () => {
     const root = storage();
     const outside = path.join(root, 'elsewhere');
     fs.mkdirSync(outside);
-    const planted = path.join(outside, path.basename(detourDir(root, STEP)));
+    const planted = path.join(outside, path.basename(detourDir(root, key(STEP))));
     fs.mkdirSync(planted);
     fs.writeFileSync(path.join(planted, 'important.txt'), 'keep me\n');
     fs.symlinkSync(outside, detoursRoot(root));
 
-    assert.equal(refusalOf(removeDetour(root, STEP)), 'escaped-store');
+    assert.equal(refusalOf(removeDetour(root, key(STEP))), 'escaped-store');
     assert.equal(fs.readFileSync(path.join(planted, 'important.txt'), 'utf8'), 'keep me\n');
   });
 
@@ -870,11 +915,11 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     const outside = path.join(root, 'outside');
     fs.mkdirSync(outside);
     fs.writeFileSync(path.join(outside, 'important.txt'), 'keep me\n');
-    const { dir } = writeDetourFiles(root, STEP, detour());
+    const { dir } = wrote(writeDetourFiles(root, key(STEP), detour()));
     fs.symlinkSync(outside, path.join(dir, 'escape'));
     fs.symlinkSync(path.join(outside, 'important.txt'), path.join(dir, 'lib', 'escape-file'));
 
-    const result = removeDetour(root, STEP);
+    const result = removeDetour(root, key(STEP));
 
     assert.equal(result.removed, true);
     assert.equal(fs.existsSync(dir), false);
@@ -888,10 +933,10 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     fs.mkdirSync(real);
     const root = path.join(box, 'storage');
     fs.symlinkSync(real, root);
-    const { dir } = writeDetourFiles(root, STEP, detour());
+    const { dir } = wrote(writeDetourFiles(root, key(STEP), detour()));
     assert.ok(fs.existsSync(dir));
 
-    assert.equal(removeDetour(root, STEP).removed, true);
+    assert.equal(removeDetour(root, key(STEP)).removed, true);
     assert.equal(fs.existsSync(dir), false);
     assert.deepEqual(fs.readdirSync(path.join(real, 'detours')), [], 'the removal did not reach through the linked root');
   });
@@ -901,11 +946,11 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     // as a value: this runs on the return path, where a throw would strand the learner in a
     // detour with no way out and no sentence explaining why.
     const root = storage();
-    const { dir } = writeDetourFiles(root, STEP, detour());
+    const { dir } = wrote(writeDetourFiles(root, key(STEP), detour()));
     const parent = detoursRoot(root);
     fs.chmodSync(parent, 0o500);
     try {
-      const result = removeDetour(root, STEP);
+      const result = removeDetour(root, key(STEP));
       // Running as root defeats the permission bits entirely; the removal then simply succeeds
       // and there is nothing to assert about a failure that cannot be provoked.
       if (!result.removed) {
@@ -924,17 +969,17 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     // that only asserts `false` passes for the wrong reason.
     const empty = storage();
     const root = storage();
-    writeCachedDetour(root, STEP, 1, detour());
+    writeCachedDetour(root, cacheKey(STEP, 1), detour());
     const results: DetourRemoval[] = [
-      removeDetour('relative', STEP),                                       // bad-root
-      removeDetour(empty, STEP),                                            // no-store
-      removeDetour(root, STEP),                                             // absent
+      removeDetour('relative', key(STEP)),                                       // bad-root
+      removeDetour(empty, key(STEP)),                                            // no-store
+      removeDetour(root, key(STEP)),                                             // absent
       removeDetourAt(root, os.tmpdir()),                                    // escaped
       removeDetourAt(root, detoursRoot(root)),                              // is-the-store-root
-      removeDetourAt(root, path.dirname(detourCachePath(root, STEP, 1))),   // not-a-detour
+      removeDetourAt(root, path.dirname(detourCachePath(root, cacheKey(STEP, 1)))),   // not-a-detour
     ];
-    fs.writeFileSync(detourDir(root, STEP), 'x');
-    results.push(removeDetour(root, STEP));                                 // not-a-directory
+    fs.writeFileSync(detourDir(root, key(STEP)), 'x');
+    results.push(removeDetour(root, key(STEP)));                                 // not-a-directory
 
     const reasons = new Set<string>();
     for (const result of results) {
@@ -962,11 +1007,408 @@ suite('removeDetour — a recursive delete that refuses everything it cannot pro
     fs.mkdirSync(detoursRoot(root), { recursive: true });
 
     for (const id of ['..', '../..', `../../${path.basename(victimDir)}`, '/', victimDir, '.']) {
-      const result = removeDetour(root, id);
+      const result = removeDetour(root, key(id));
       assert.equal(result.removed, false, `step id ${JSON.stringify(id)} removed something`);
       assert.equal(refusalOf(result), 'absent', `step id ${JSON.stringify(id)} was refused for the wrong reason`);
     }
     assert.equal(fs.readFileSync(path.join(victimDir, 'important.txt'), 'utf8'), 'keep me\n');
     assert.ok(fs.existsSync(os.tmpdir()));
+  });
+});
+
+// ── the key: two tutorials, one global store ────────────────────────────────────────────────
+
+/**
+ * **T-7 code review findings 1 and 2, and the lesson they left.**
+ *
+ *   > An identifier is only a key inside the space it was minted for. Moving state into a
+ *   > global store requires re-deriving every key in it.
+ *
+ * repo-tour mints a step id as `sha256(file + ' ' + kind + ' ' + symbolName)` — no repository in
+ * it at all — and T-7 moved per-step state from the learner's own `.repo-tour/` into
+ * `globalStorageUri`, which is one directory for every tutorial this extension will ever open.
+ * Two projects with a `src/index.ts` therefore shared a detour directory and a cache entry by
+ * construction, and the suite could not see it because every test drove one tutorial.
+ *
+ * So every test below is **two inputs that share a key**, which is the shape this class of bug
+ * needs. A suite that only ever passes one `tutorial` would pass with the old code.
+ */
+suite('the key — two tutorials in one global store do not collide', () => {
+
+  test('the same step id in two tutorials is two directories and two cache entries', () => {
+    const root = storage();
+
+    assert.notEqual(
+      detourDir(root, key(STEP)),
+      detourDir(root, key(STEP, OTHER_TUTORIAL)),
+      'two tutorials shared one detour directory — one tutorial’s return deletes the other’s open tabs',
+    );
+    assert.notEqual(
+      detourCachePath(root, cacheKey(STEP)),
+      detourCachePath(root, cacheKey(STEP, 1, 'THE PROMPT', OTHER_TUTORIAL)),
+      'two tutorials shared one cache entry — one repository’s worked example served as another’s',
+    );
+  });
+
+  test('one tutorial’s remove leaves the other’s detour standing', () => {
+    // Driven in the review as a live session losing its files: a session being disposed awaited
+    // `closeTabsUnder`, and deleted whatever was at the path when the await returned.
+    const root = storage();
+    const mine = wrote(writeDetourFiles(root, key(STEP), detour()));
+    const theirs = wrote(writeDetourFiles(root, key(STEP, OTHER_TUTORIAL), detour()));
+    assert.notEqual(mine.dir, theirs.dir);
+
+    assert.equal(removeDetour(root, key(STEP)).removed, true);
+
+    assert.equal(fs.existsSync(mine.dir), false, 'the one that was asked for is gone');
+    assert.deepEqual(treeFiles(theirs.dir), ['lib/change.ts', 'machine.ts'],
+      'and the other tutorial’s live detour is untouched');
+  });
+
+  test('a cache entry answers only for the tutorial that wrote it', () => {
+    const root = storage();
+    writeCachedDetour(root, cacheKey(STEP), detour({ title: 'A’s example' }));
+
+    assert.equal(readCachedDetour(root, cacheKey(STEP))?.title, 'A’s example', 'its own tutorial hits');
+    assert.equal(
+      readCachedDetour(root, cacheKey(STEP, 1, 'THE PROMPT', OTHER_TUTORIAL)),
+      null,
+      'another tutorial was served this tutorial’s example, free and unannounced',
+    );
+  });
+
+  test('the cache key is the PROMPT — a plan rebuilt with a new question is a miss (finding 9)', () => {
+    // The half a key alone cannot fix. `DETOUR_PROMPT_VERSION` is a source constant, so before
+    // this a plan regenerated with a different `decision.question` served yesterday's example
+    // forever and nothing a learner could press changed that.
+    const root = storage();
+    writeCachedDetour(root, cacheKey(STEP, 1, 'ask about parsing'), detour({ title: 'about parsing' }));
+
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 1, 'ask about parsing'))?.title, 'about parsing');
+    assert.equal(readCachedDetour(root, cacheKey(STEP, 1, 'ask about something else entirely')), null,
+      'a changed question was answered out of the cache');
+  });
+
+  test('tutorialId separates by target folder AND by the plan’s source commit', () => {
+    // Both halves, because each covers a case the other does not: the folder separates two
+    // tutorials open at once, the commit separates one folder rebuilt against a newer reference.
+    const planA = { source: { head: 'aaaaaaaa' } };
+    const planB = { source: { head: 'bbbbbbbb' } };
+
+    assert.notEqual(tutorialId('/one/project', planA), tutorialId('/another/project', planA),
+      'two folders on one machine shared a tutorial identity');
+    assert.notEqual(tutorialId('/one/project', planA), tutorialId('/one/project', planB),
+      'a plan rebuilt against a new reference commit kept the old identity');
+    assert.equal(tutorialId('/one/project', planA), tutorialId('/one/project', planA),
+      'and it is stable — a key that moved between calls would orphan every detour');
+    assert.equal(tutorialId('/one/project/', planA), tutorialId('/one/project', planA),
+      'a trailing separator is the same folder');
+  });
+
+  test('tutorialId is total — a plan with no source, and no target at all, still key', () => {
+    // It runs on the path where a learner pressed a button. A plan that arrived without a
+    // `source` is an ordinary shape, not an error, and a throw here would be a dead button.
+    for (const [target, plan] of [
+      [undefined, undefined], ['/p', undefined], [undefined, { source: { head: 'x' } }],
+      ['/p', {}], ['/p', { source: 'not an object' }], ['/p', { source: { head: 42 } }], ['', {}],
+    ] as Array<[unknown, unknown]>) {
+      assert.match(tutorialId(target, plan), /^[0-9a-f]{32}$/, `tutorialId(${String(target)}) should still be a name`);
+    }
+  });
+});
+
+// ── the cache is bounded, because the page says it is not forever ───────────────────────────
+
+/**
+ * **T-7 security review finding 3.** Nothing pruned `detours/cache/`: `removeDetourAt` refuses
+ * it by name (correctly), `dispose()` does not touch it, and no other code referenced it — so
+ * model-written file contents survived *Back to my build*, the window closing and everything
+ * else, at up to `MAX_CACHE_BYTES` per step of every plan, while the narrator said on screen
+ * that going back deletes them.
+ *
+ * Both halves were fixed, and both are pinned: the sentence is honest now
+ * (`detour-narrator.test.ts`) and the copy is bounded here.
+ */
+suite('pruneDetourCache — the copy the narrator promises is bounded', () => {
+
+  test('writing past the ceiling keeps the ceiling, and keeps what was just paid for', () => {
+    const root = storage();
+    const written: string[] = [];
+    for (let i = 0; i < MAX_CACHE_ENTRIES + 5; i += 1) {
+      // A distinct prompt per entry is a distinct key, which is what a plan of many steps is.
+      assert.equal(writeCachedDetour(root, cacheKey(`st-${i}`, 1, `prompt ${i}`), detour({ title: `d${i}` })), true);
+      written.push(detourCachePath(root, cacheKey(`st-${i}`, 1, `prompt ${i}`)));
+    }
+
+    const cacheDir = path.join(detoursRoot(root), 'cache');
+    assert.equal(fs.readdirSync(cacheDir).length, MAX_CACHE_ENTRIES,
+      'the cache grew past its stated ceiling — the aside on the narrator is a promise again');
+    // The one guarantee a learner can feel: the answer they just paid for is still there, and
+    // is still theirs, whatever the filesystem thinks a timestamp is.
+    const last = written[written.length - 1] ?? '';
+    assert.ok(fs.existsSync(last), 'the entry just written was evicted by its own write');
+    assert.equal(readCachedDetour(root, cacheKey(`st-${MAX_CACHE_ENTRIES + 4}`, 1, `prompt ${MAX_CACHE_ENTRIES + 4}`))?.title,
+      `d${MAX_CACHE_ENTRIES + 4}`, 'and it still reads back — AC5 holds across the sweep');
+  });
+
+  test('eviction is oldest-first', () => {
+    // Driven with the timestamps set by hand, because `mtime` resolution is a filesystem's
+    // business and this property is not about the clock.
+    const root = storage();
+    const files: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      writeCachedDetour(root, cacheKey(`st-${i}`, 1, `prompt ${i}`), detour({ title: `d${i}` }));
+      const file = detourCachePath(root, cacheKey(`st-${i}`, 1, `prompt ${i}`));
+      const when = new Date(Date.now() + i * 2000);
+      fs.utimesSync(file, when, when);
+      files.push(file);
+    }
+
+    assert.equal(pruneDetourCache(root, 2), 3);
+
+    assert.deepEqual(files.map((f) => fs.existsSync(f)), [false, false, false, true, true],
+      'the sweep took the newest rather than the oldest');
+  });
+
+  test('it removes only 32-hex .json REGULAR files — never a symlink, never anything else', () => {
+    // `removeDetourAt`'s allow-list, for the cache: a sweep that deleted what it did not
+    // recognise would be a recursive delete with a wildcard in it.
+    const root = storage();
+    writeCachedDetour(root, cacheKey(STEP), detour());
+    const cacheDir = path.join(detoursRoot(root), 'cache');
+    const outside = path.join(root, 'precious.txt');
+    fs.writeFileSync(outside, 'keep me\n');
+    fs.writeFileSync(path.join(cacheDir, 'notes.md'), 'somebody else’s file\n');
+    fs.symlinkSync(outside, path.join(cacheDir, 'ffffffffffffffffffffffffffffffff.json'));
+
+    const removed = pruneDetourCache(root, 0);
+
+    assert.equal(removed, 1, 'exactly the one real entry went');
+    assert.ok(fs.existsSync(path.join(cacheDir, 'notes.md')), 'a file it did not write was deleted');
+    assert.ok(fs.existsSync(path.join(cacheDir, 'ffffffffffffffffffffffffffffffff.json')), 'a symlink was followed or unlinked');
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'keep me\n', 'and the thing it pointed at was touched');
+  });
+
+  test('it never throws — no store, no cache folder, a bad root', () => {
+    // It runs on the path where a learner pressed a button; a cache that cannot be tidied is
+    // not a detour that failed.
+    assert.equal(pruneDetourCache(storage()), 0, 'a store with no cache folder yet');
+    assert.equal(pruneDetourCache('relative'), 0, 'a root that is not absolute');
+    assert.equal(pruneDetourCache(path.join(storage(), 'nope')), 0, 'a root that is not there');
+  });
+
+  test('a detour’s own directory is never in reach of the sweep', () => {
+    const root = storage();
+    const { dir } = wrote(writeDetourFiles(root, key(STEP), detour()));
+    writeCachedDetour(root, cacheKey(STEP), detour());
+
+    pruneDetourCache(root, 0);
+
+    assert.deepEqual(treeFiles(dir), ['lib/change.ts', 'machine.ts'], 'the sweep reached a live detour');
+  });
+});
+
+// ── the cache is a SECOND door, and it gets the same bounds as the first ────────────────────
+
+/**
+ * **T-7 security review finding 2, and code review finding 7.**
+ *
+ * `store.ts`'s header said, and had said since it was written, that *"the cache is a SECOND
+ * door into the same data and gets the same bounds as the first"*. It got the same COUNT
+ * bounds. It did not get the path bound — the one this whole ticket exists for — nor the
+ * stop-range bound, nor the parser's handling of a lone `\r`, nor its case-folded duplicate
+ * rule. A hand-edited `cache/<hash>.json`, or one written by a future version of this extension
+ * with a looser parser, produced a `Detour` whose `files[].path` was `../../…` and it went
+ * straight to the writer without ever meeting `parseDetourReply`.
+ *
+ * Nothing escaped, because `prepareDetourWrite` re-runs the lexical half at the write. But the
+ * whole defence rested on one function while this module's header read as though two
+ * independent doors were each checking, and:
+ *
+ *   > If a validator's header says "the same bounds as the first", the bounds it means have to
+ *   > be a value both of them IMPORT — not a property both of them are supposed to have
+ *   > implemented.
+ *
+ * So the rules are `unsafeDetourPathReason` and `detourLineCount` from `./prompt.ts`, and the
+ * tests below are the parser's own cases pointed at this door. Each one is CONFIRMED-accepted
+ * text from the review.
+ */
+suite('sanitizeDetour — the same bounds as the parser, because they are the same functions', () => {
+  /** A detour whose one file sits at `where`, otherwise well-formed. */
+  function at(where: string): Record<string, unknown> {
+    return {
+      title: 'x',
+      domain: 'y',
+      files: [{ path: where, content: 'export const A = 1;\n' }],
+      stops: [
+        { file: where, startLine: 1, endLine: 1, text: 'a' },
+        { file: where, startLine: 1, endLine: 1, text: 'b' },
+        { file: where, startLine: 1, endLine: 1, text: 'c' },
+      ],
+    };
+  }
+
+  test('a relative escape and an absolute path are both refused — the path bound (security 2)', () => {
+    // Both of these were driven through the real session off a poisoned cache file and were
+    // ACCEPTED here, then caught downstream. Caught here now, at the door.
+    assert.equal(sanitizeDetour(at('../../../../../../../tmp/pwned.ts')), null);
+    assert.equal(sanitizeDetour(at('/tmp/T7-PWNED-ABS.txt')), null);
+    assert.equal(sanitizeDetour(at('a/../../b.ts')), null);
+    assert.equal(sanitizeDetour(at('C:\\evil.ts')), null);
+    assert.equal(sanitizeDetour(at('.ssh/authorized_keys')), null);
+    assert.equal(sanitizeDetour(at('con.ts')), null);
+    assert.notEqual(sanitizeDetour(at('lib/coins.ts')), null, 'and an honest path still reads back');
+  });
+
+  test('a stop whose range runs past its file is refused — the stop-range bound (code 7)', () => {
+    // `{startLine: 1, endLine: 9007199254740991}` over a two-line file survived a full
+    // write→read round trip here while `parseDetourReply` refused it by name, and the narrator
+    // drew `lines 1–9007199254740991` off the back of it.
+    const two = {
+      title: 'x',
+      domain: 'y',
+      files: [{ path: 'a.ts', content: 'one\ntwo\n' }],
+      stops: [
+        { file: 'a.ts', startLine: 1, endLine: Number.MAX_SAFE_INTEGER, text: 'a' },
+        { file: 'a.ts', startLine: 1, endLine: 1, text: 'b' },
+        { file: 'a.ts', startLine: 1, endLine: 1, text: 'c' },
+      ],
+    };
+    assert.equal(sanitizeDetour(two), null);
+    assert.notEqual(sanitizeDetour({ ...two, stops: two.stops.map((s) => ({ ...s, endLine: 2 })) }), null,
+      'and a range that fits still reads back');
+  });
+
+  test('a lone CR ends a line here too — the line count is one function (security 4)', () => {
+    // Measured: 200 lines separated by lone CRs were `file-too-long` to the parser and perfectly
+    // acceptable to the cache, because one normalised `\r` and the other split on `\n` alone.
+    const long = 'x\r'.repeat(DETOUR_LIMITS.maxLinesPerFile + 140);
+    assert.equal(sanitizeDetour({
+      title: 'x',
+      domain: 'y',
+      files: [{ path: 'a.ts', content: long }],
+      stops: [
+        { file: 'a.ts', startLine: 1, endLine: 1, text: 'a' },
+        { file: 'a.ts', startLine: 1, endLine: 1, text: 'b' },
+        { file: 'a.ts', startLine: 1, endLine: 1, text: 'c' },
+      ],
+    }), null, 'a lone-CR file walked past the ≤ 60-line bound the spec sets');
+  });
+
+  test('two paths differing only in case are refused — one filesystem in three would merge them', () => {
+    // The parser's rule, with a comment explaining exactly this; the cache refused only exact
+    // duplicates, so a cached `Coins.ts`/`coins.ts` pair was one tab holding whichever content
+    // won the race to be written.
+    assert.equal(sanitizeDetour({
+      title: 'x',
+      domain: 'y',
+      files: [
+        { path: 'Coins.ts', content: 'export const A = 1;\n' },
+        { path: 'coins.ts', content: 'export const B = 2;\n' },
+      ],
+      stops: [
+        { file: 'Coins.ts', startLine: 1, endLine: 1, text: 'a' },
+        { file: 'coins.ts', startLine: 1, endLine: 1, text: 'b' },
+        { file: 'Coins.ts', startLine: 1, endLine: 1, text: 'c' },
+      ],
+    }), null);
+  });
+
+  test('everything the PARSER accepts, this still accepts — or the cache never hits', () => {
+    // The direction that matters for AC5, and it is why the rules above were imported rather
+    // than re-implemented one notch tighter. `writeCachedDetour` sanitises on the way OUT, so a
+    // rule stricter here than in the parser would make every write refuse silently, the cache
+    // never hit, and "a second run makes no LLM call" fail with every test green.
+    const root = storage();
+    const good = detour();
+    assert.equal(writeCachedDetour(root, cacheKey(STEP), good), true, 'a well-formed detour is cacheable');
+    assert.deepEqual(readCachedDetour(root, cacheKey(STEP)), good, 'and reads back unchanged');
+
+    // The exact edges the parser allows: a file at the line limit, and a stop on its last line.
+    const atLimit = detour({
+      files: [{ path: 'edge.ts', content: 'x\n'.repeat(DETOUR_LIMITS.maxLinesPerFile) }],
+      stops: [
+        { file: 'edge.ts', startLine: 1, endLine: DETOUR_LIMITS.maxLinesPerFile, text: 'a' },
+        { file: 'edge.ts', startLine: DETOUR_LIMITS.maxLinesPerFile, endLine: DETOUR_LIMITS.maxLinesPerFile, text: 'b' },
+        { file: 'edge.ts', startLine: 1, endLine: 1, text: 'c' },
+      ],
+    });
+    assert.notEqual(sanitizeDetour(atLimit), null, 'a detour exactly at the limits became uncacheable');
+  });
+});
+
+// ── one writer, and the assertion that a second one cannot appear quietly ────────────────────
+
+/**
+ * **T-7 code review finding 8, and security review findings 1 and 5.**
+ *
+ * `writeDetourFiles` shipped exported, with most of this file's suite behind it — including
+ * the test that plants `detours -> /elsewhere` and asserts the far end stays empty — and **no
+ * caller in `src/`**. The code that actually ran was a second writer in `session.ts` which
+ * handed `writeTextAtomic` the COMPOSED detour directory instead of the proven store, and the
+ * security reviewer swapped a symlink in between the check and the write and watched the file
+ * land outside with nothing thrown.
+ *
+ *   > **The store's 972-line suite proved the "root must be the proven store" property against
+ *   > the function nothing called.** A paragraph in the right file about the wrong function is
+ *   > a defence that documents itself into a place the code never goes.
+ *
+ * The behavioural half of the fix is pinned by every write test above, which now runs against
+ * the function `DetourSession` really calls. This is the OTHER half — the one that catches a
+ * second writer appearing again — and it is a source-level scan, which is a weaker instrument
+ * and is used here for the same reason `detour-narrator.test.ts` scans its own client script:
+ * the property is "no other module does this", and no behavioural test can say "no other".
+ *
+ * **What it cannot prove**, stated rather than implied: it reads two files by path, so a third
+ * module that started writing detour files would be invisible to it. It is a guard against the
+ * regression that actually happened, not a proof of the general claim.
+ */
+suite('the ONE writer — no second write path in the detour', () => {
+  function sourceOf(rel: string): string {
+    const abs = path.join(process.cwd(), rel);
+    assert.ok(fs.existsSync(abs), `${rel} should be readable from the repository root, not ${process.cwd()}`);
+    return fs.readFileSync(abs, 'utf8');
+  }
+
+  /** Comments stripped, so a sentence ABOUT a sink is not mistaken for the sink — the same
+   *  care `detour-narrator.test.ts` takes with `innerHTML`, and for the same reason: a scan
+   *  that cannot tell those apart teaches the next reader to delete the explanation. */
+  function code(source: string): string {
+    const stripped = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    assert.ok(stripped.length < source.length, 'the comment strip did not run');
+    return stripped;
+  }
+
+  test('src/detour/session.ts writes nothing itself — it routes through the store', () => {
+    const session = code(sourceOf('src/detour/session.ts'));
+    for (const sink of ['writeTextAtomic', 'writeFileSync', 'mkdirSync', 'renameSync']) {
+      assert.ok(
+        !session.includes(sink),
+        `src/detour/session.ts calls \`${sink}\` — that is a second write path, and the last one `
+        + 'disagreed with `store.ts` about which root contains a write. Route it through `writeDetourFiles`.',
+      );
+    }
+  });
+
+  test('the store\'s writer is the one the session calls, and it is called', () => {
+    const session = code(sourceOf('src/detour/session.ts'));
+    assert.ok(session.includes('writeDetourFiles('), 'the session does not call the store\'s writer at all');
+    // The counterpart of the finding: an exported writer with no caller in `src/` is what let
+    // the disagreement ship. If this ever fails, one of the two has been orphaned again.
+    assert.ok(code(sourceOf('src/detour/store.ts')).includes('export function writeDetourFiles('),
+      'the writer has moved or been renamed — check that the caller moved with it');
+  });
+
+  test('and it hands writeTextAtomic the PROVEN store, never the composed detour directory', () => {
+    // Security finding 1, as a line of source rather than as a race. The behavioural half —
+    // that a planted link is refused — is driven above; this catches the one-token edit that
+    // reopens it, which is the edit that shipped.
+    const store = code(sourceOf('src/detour/store.ts'));
+    const call = /writeTextAtomic\(target, file\.content, ([A-Za-z.]+)\)/.exec(store);
+    assert.ok(call, 'the detour write no longer looks like `writeTextAtomic(target, file.content, <root>)`');
+    assert.equal(call?.[1], 'proof.store',
+      'the containment root is not the proven store — a planted `detours/<hash> -> /outside` would '
+      + 'make the attacker\'s folder the root of the containment question and every write "contained" in it',
+    );
   });
 });

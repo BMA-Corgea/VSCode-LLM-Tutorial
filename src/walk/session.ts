@@ -201,6 +201,7 @@ import {
   type AskTicket,
 } from '../tutor/ask.js';
 import { DetourSession, type DetourAdapters, type DetourView } from '../detour/session.js';
+import { tutorialId } from '../detour/store.js';
 import { tutorContext } from '../tutor/context.js';
 import type { AskMessage, TutorCore } from '../tutor/core.js';
 import { appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
@@ -1001,9 +1002,20 @@ export class WalkSession {
    * as well (its `seq`), because serialising is not the same as superseding — a second press
    * that waits its turn still has to know it is the second.
    *
-   * The refusals it can answer with are the detour's, not this file's: every one of them
-   * arrives as a sentence already (`refusalSentence`), and it is put in the step's own note so
-   * it lands where the eye is, beside the button that was pressed.
+   * **What is on the chain is the PRESS, not the model call** (code review finding 3). The job
+   * below returns as soon as the request is sent; the wait runs beside the chain and comes back
+   * on it through `DetourDeps.resume`. T-7 shipped with the whole generation awaited here, so a
+   * detour being written made every other control on the panel — `ask`, `step:check`,
+   * `dial:set`, `tutor:clear`, `reproduce:run`, `detour:back` — go silent for up to an hour.
+   * T-6 moved `ledger.open()` to the top of `beginAsk` precisely so a press is visible in one
+   * chain hop, and then this held the hop.
+   *
+   * **The sentence is not recorded here.** `DetourSession` stores every note it returns
+   * (`DetourView.note` → `#detour-note`), and this method used to put the same string through
+   * `setTutorNote` as well — so every refusal was drawn twice, verbatim, in adjacent paragraphs
+   * of the same section (code review finding 5). When a lower layer already stores what it
+   * returns, the upper layer's job is to route it. The one sentence still composed here is the
+   * one only this object can know: that no detour adapters were wired at all.
    */
   startDetour(): void {
     const step = currentStep(this.plan, this.progress);
@@ -1022,16 +1034,40 @@ export class WalkSession {
       // it the way `tutorContext` does for `AskContext.repo`, so the tutor and the detour name
       // the learner's project identically — and the raw `repo` field, which can be a URL with
       // a token in it, never leaves this machine.
-      const result = await detour.start(step, this.plan, this.request?.referenceRoot);
+      await detour.start(step, this.plan, this.request?.referenceRoot);
       if (this.disposed) return;
-      // `note: ''` is a supersede — something newer is already on screen and there is nothing
-      // true to say about the detour that was overtaken.
-      if (!result.started) {
-        if (result.note !== '') this.setTutorNote(stepId, result.note);
+      this.refresh(false);
+    });
+  }
+
+  /**
+   * *Write a new example* — the spec's "regenerate" control (refinement notes; code review
+   * finding 9).
+   *
+   * The spec promised it and T-7 shipped without it, which left the cache with **no escape
+   * hatch at all**: `DETOUR_PROMPT_VERSION` was the only invalidator and it is a source
+   * constant, so a learner served an example that did not help had no way to ask for another
+   * one, ever. The key now carries the prompt, so a plan rebuilt with a different question is
+   * already a miss; this is the other half — the same question, a different answer, on request.
+   *
+   * It is on the panel only while a detour is OPEN on this step, which is the state a learner
+   * is in when they decide the example is not helping. That is a pure function of state
+   * `stepRenderKey` already carries (`step.id`, and `detour.open.stepId`), so it adds no field
+   * to the key and no mutation to its sweep.
+   */
+  regenerateDetour(): void {
+    const step = currentStep(this.plan, this.progress);
+    if (this.disposed || !step) return;
+    const stepId = step.id;
+    this.enqueue(async () => {
+      const detour = this.detour();
+      if (!detour) {
+        this.setTutorNote(stepId, 'Unrelated examples are not available in this window.');
         this.refresh(false);
         return;
       }
-      if (result.note !== undefined) this.setTutorNote(stepId, result.note);
+      await detour.start(step, this.plan, this.request?.referenceRoot, { fresh: true });
+      if (this.disposed) return;
       this.refresh(false);
     });
   }
@@ -1064,7 +1100,10 @@ export class WalkSession {
       const result = await detour.returnToBuild();
       if (this.disposed) return;
       if (!result.returned) {
-        this.setTutorNote(currentStep(this.plan, this.progress)?.id ?? '', result.note);
+        // Nothing composed here and nothing re-stored: `DetourSession.refuseReturn` has already
+        // put the sentence where the panel draws it (code review finding 5). This also retires
+        // the `currentStep(…)?.id ?? ''` that used to file the note under an id `tutorView`
+        // could never match on a plan with no current step (finding 12).
         this.refresh(false);
         return;
       }
@@ -1073,7 +1112,6 @@ export class WalkSession {
         content: `detour taken: ${result.title}`,
         kind: 'note',
       });
-      if (result.note !== undefined) this.setTutorNote(result.stepId, result.note);
       // `commit(true)`: persist, push to every surface, and REVEAL — the learner is coming
       // back to their own file and should land in it, at the step they left. The one place in
       // this file where a non-navigating action reveals, and it is a navigation in every sense
@@ -1114,6 +1152,14 @@ export class WalkSession {
       settings: () => this.tutorSettingsNow(),
       refresh: () => { this.refresh(false); },
       reportUnreachable: (detail) => { this.unreachable = detail; },
+      // Which TUTORIAL, not which step — the component `globalStorageUri` does not carry and a
+      // repo-tour step id does not either. Computed once: `target` and `plan` are both assigned
+      // in the constructor and neither is ever reassigned, so a detour opened now and removed
+      // twenty minutes later is aimed at the same directory. See `store.ts`'s header, section 0.
+      tutorial: tutorialId(this.target, this.plan),
+      // The detour's answer comes back onto THIS chain, and the wait does not sit on it —
+      // `beginAsk`/`deliverAsk`'s split, for the second control that spends money.
+      resume: (job) => { this.enqueue(job); },
     });
     return this.detourSession;
   }
@@ -1466,12 +1512,22 @@ export class WalkSession {
    */
   settled(): Promise<void> {
     return this.work.then(async () => {
+      // TWO things can be in flight beside the chain now, not one. T-7's detour has exactly
+      // the shape T-6's ask has — the model call runs off the chain and only its DELIVERY is
+      // enqueued (code review finding 3) — so this method has to know about both, or a test
+      // that drains the chain after pressing the detour button reads a walk that has not
+      // finished reacting. Both are awaited before the chain is drained a second time, because
+      // either one's delivery job lands on the end of it.
+      const waits: Array<Promise<unknown>> = [];
       const asking = this.asking;
-      if (!asking) return;
-      await asking.ticket.delivered;
+      if (asking) waits.push(asking.ticket.delivered);
+      const detouring = this.detourSession?.pending();
+      if (detouring) waits.push(detouring);
+      if (waits.length === 0) return;
+      await Promise.all(waits);
       // Re-read rather than captured: the delivery job was appended by the `.then` that
-      // `beginAsk` registered on this very promise, which runs before this continuation does,
-      // so `this.work` is by now the chain WITH that job on the end of it.
+      // `beginAsk` (or `DetourSession.start`) registered on that promise, which runs before
+      // this continuation does, so `this.work` is by now the chain WITH that job on the end.
       await this.work;
     });
   }

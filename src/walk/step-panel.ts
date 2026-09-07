@@ -161,6 +161,7 @@ export interface WalkSessionLike {
    *  writes files and opens tabs, and a rejected promise raised inside a webview message
    *  listener has nobody listening for it. */
   startDetour(): void;
+  regenerateDetour(): void;
   returnFromDetour(): void;
 }
 
@@ -275,6 +276,7 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       cancelAsk: () => { this.deps.session()?.cancelAsk(); },
       clearConversation: () => { this.deps.session()?.clearConversation(); },
       startDetour: () => { this.deps.session()?.startDetour(); },
+      regenerateDetour: () => { this.deps.session()?.regenerateDetour(); },
       returnFromDetour: () => { this.deps.session()?.returnFromDetour(); },
       persistDial: (stepId: string, dial: Dial) => { this.deps.session()?.setDial(stepId, dial); },
       persistSkin: (name: string) => {

@@ -62,6 +62,7 @@ import {
   isDetourRefusal,
   parseDetourReply,
   prepareDetourWrite,
+  refusalSentence,
 } from '../../src/detour/prompt.js';
 import { DETOUR_LIMITS, type Detour, type DetourRefusal } from '../../src/detour/types.js';
 import { MAX_OPTION_TEXT, MAX_PROMPT_TEXT, NOT_TEXT_MESSAGE, textCutNote } from '../../src/tutor/context.js';
@@ -964,5 +965,70 @@ suite('detourLineCount — one definition, so the limit and the ranges cannot di
     assert.equal(detourLineCount('a\r\nb\r\n'), 2);
     assert.equal(detourLineCount('a\rb\r'), 2);
     assert.equal(detourLineCount('a\r\nb'), 2);
+  });
+});
+
+// ── the panel's sentence quotes the rules the parser enforces, not a copy of them ────────────
+
+/**
+ * **T-7 code review finding 11.** `refusalSentence` lived in `src/detour/session.ts` and wrote
+ * `at most 5`, `at most 60` and `between 3 and 6` out as English, while `detourPrompt` and
+ * `parseDetourReply` — one file over — interpolated `DETOUR_LIMITS` for the same three numbers.
+ * A limit changed in `types.ts` would have moved what the model is ASKED for and what the parser
+ * ENFORCES, and left the panel telling the learner a rule nothing was applying.
+ *
+ * It lives here now, beside the constant, and the tests are the ones that fail if it stops
+ * reading it: each asserts the sentence against `DETOUR_LIMITS` rather than against a literal.
+ */
+suite('refusalSentence — the numbers come from DETOUR_LIMITS, like everything else', () => {
+  const { maxFiles, maxLinesPerFile, minStops, maxStops } = DETOUR_LIMITS;
+
+  test('the three counted rules quote the shared constant', () => {
+    assert.match(refusalSentence({ reason: 'too-many-files', found: 9 }), new RegExp(`at most ${maxFiles}\\b`));
+    assert.match(refusalSentence({ reason: 'file-too-long', path: 'a.ts', lines: 99 }), new RegExp(`at most ${maxLinesPerFile}\\b`));
+    assert.match(refusalSentence({ reason: 'bad-stop-count', found: 0 }), new RegExp(`between ${minStops} and ${maxStops}\\b`));
+  });
+
+  test('the ASK, the CHECK and the SENTENCE all state the same three numbers', () => {
+    // The property the move is for, driven end to end: what the model is told, what the parser
+    // applies and what the learner reads cannot disagree, because all three read one constant.
+    const { plan, step } = planAndStep();
+    const prompt = detourPrompt(step, plan, 'the-authors-repo');
+    for (const n of [maxFiles, maxLinesPerFile, minStops, maxStops]) {
+      assert.ok(prompt.includes(String(n)), `the prompt does not state the limit ${n}`);
+    }
+
+    // …and the parser really refuses at exactly those numbers, with those numbers in the
+    // refusal, so the sentence the panel draws is a rendering of what happened.
+    const tooMany = parseDetourReply(JSON.stringify({
+      title: 't', domain: 'd',
+      files: Array.from({ length: maxFiles + 1 }, (_, i) => ({ path: `f${i}.ts`, content: 'x\n' })),
+      stops: [],
+    }));
+    assert.ok(isDetourRefusal(tooMany) && tooMany.reason === 'too-many-files');
+    assert.equal(isDetourRefusal(tooMany) && tooMany.reason === 'too-many-files' ? tooMany.found : 0, maxFiles + 1);
+    assert.match(refusalSentence(tooMany), new RegExp(`sent ${maxFiles + 1} files`));
+  });
+
+  test('every arm of the union produces a sentence — no reason can refuse in silence', () => {
+    // The reason `DetourRefusal` is a union rather than a string, restated where the rendering
+    // lives: both T-6 reviews found "refused with no sentence" to be the failure mode that
+    // hides bugs, so every arm has to say something a learner could act on.
+    const all: DetourRefusal[] = [
+      { reason: 'not-json', detail: 'the reply was empty' },
+      { reason: 'bad-shape', detail: '"title" is missing' },
+      { reason: 'too-many-files', found: 9 },
+      { reason: 'file-too-long', path: 'a.ts', lines: 99 },
+      { reason: 'bad-stop-count', found: 0 },
+      { reason: 'stop-file-unknown', file: 'ghost.ts' },
+      { reason: 'bad-range', file: 'a.ts', detail: 'endLine is 90 but that file has 2 lines' },
+      { reason: 'unsafe-path', path: '../x', detail: 'climbs out of the detour folder' },
+    ];
+    for (const refusal of all) {
+      const sentence = refusalSentence(refusal);
+      assert.ok(sentence.length > 20, `${refusal.reason} produced nothing worth reading`);
+      assert.ok(/Nothing was written/.test(sentence), `${refusal.reason} does not say that nothing was written`);
+    }
+    assert.equal(new Set(all.map(refusalSentence)).size, all.length, 'two reasons share one sentence');
   });
 });

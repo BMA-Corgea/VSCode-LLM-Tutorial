@@ -49,7 +49,7 @@ import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import type { LlmReply, TutorCore } from '../src/tutor/core.js';
 import { getTranscript } from '../src/tutor/transcript.js';
-import { detourDir, detoursRoot } from '../src/detour/store.js';
+import { detourDir, detoursRoot, tutorialId, type DetourKey } from '../src/detour/store.js';
 import type { WalkSession } from '../src/walk/session.js';
 import { loadPlan, loadProgress } from '../src/walk/store.js';
 import { writeFixtureTarget } from './unit/walk-fixtures.js';
@@ -58,6 +58,16 @@ const EXTENSION_ID = 'bma-corgea.build-tutorials';
 
 /** The step every test here takes its detour from. */
 const STEP_ID = 'st-1-shape-src';
+
+/**
+ * The key the running session really uses. A detour is keyed by the TUTORIAL as well as the
+ * step (T-7 code review findings 1 and 2) — `globalStorageUri` is per-extension and a repo-tour
+ * step id carries no repository identity — so a test that named a directory by step id alone
+ * would be naming a path this extension no longer writes to.
+ */
+function detourKey(target: string, stepId: string = STEP_ID): DetourKey {
+  return { tutorial: tutorialId(target, loadPlan(target)), stepId };
+}
 
 /** What a runner nobody replaced says. If this reaches an assertion, a test forgot to answer
  *  for itself and would otherwise have dialled a real provider. */
@@ -308,7 +318,7 @@ suite('AC2 — the example opens as real editor tabs, and the workspace is UNCHA
     assert.equal(sent.length, 1, 'one press, one request');
 
     // On disk: under the extension's own storage, at the model's own relative paths.
-    const dir = detourDir(storage, STEP_ID);
+    const dir = detourDir(storage, detourKey(target));
     for (const file of CANNED.files) {
       const abs = path.join(fs.realpathSync(dir), ...file.path.split('/'));
       assert.ok(fs.existsSync(abs), `${file.path} should be written under globalStorageUri/detours/`);
@@ -420,7 +430,7 @@ suite('AC3 — Back to my build closes, deletes, restores; AC4 — and writes th
 
     assert.equal(detourTabPaths(storage).length, 0, "AC3: the detour's tabs are closed");
     assert.equal(webviewTabs().length, 0, 'AC3: and the narrator with them');
-    assert.equal(fs.existsSync(detourDir(storage, STEP_ID)), false, 'AC3: the directory is ABSENT');
+    assert.equal(fs.existsSync(detourDir(storage, detourKey(target))), false, 'AC3: the directory is ABSENT');
 
     // "only those" — the learner's own tab is untouched, and so is its content.
     assert.ok(openTabPaths().includes(own), "AC3: the learner's own tab is still open — only the detour's were closed");
@@ -474,7 +484,7 @@ suite('AC3 — Back to my build closes, deletes, restores; AC4 — and writes th
   });
 
   test('closing the narrator by hand is the same gesture as pressing Back to my build', async () => {
-    const { storage, session } = await inADetour();
+    const { storage, session, target } = await inADetour();
 
     // A narrator closed with the example's files still open would leave the learner five tabs
     // of something with nothing to explain them — a control that stopped working rather than
@@ -485,7 +495,7 @@ suite('AC3 — Back to my build closes, deletes, restores; AC4 — and writes th
     await session.settled();
     await waitFor('the return the closed narrator asked for', () => detourTabPaths(storage).length === 0);
 
-    assert.equal(fs.existsSync(detourDir(storage, STEP_ID)), false, 'and the directory goes with it');
+    assert.equal(fs.existsSync(detourDir(storage, detourKey(target))), false, 'and the directory goes with it');
   });
 });
 
@@ -524,7 +534,7 @@ suite('AC5 — a second detour on the same step makes NO model call', () => {
       'and the learner gets the same example back rather than an empty panel',
     );
     for (const file of CANNED.files) {
-      const abs = path.join(fs.realpathSync(detourDir(storage, STEP_ID)), ...file.path.split('/'));
+      const abs = path.join(fs.realpathSync(detourDir(storage, detourKey(target))), ...file.path.split('/'));
       assert.equal(fs.readFileSync(abs, 'utf8'), file.content, `${file.path} is rewritten from the cache, byte for byte`);
     }
     assert.equal(treeHash(target), hashBefore, 'and the workspace is still untouched after both round trips');
@@ -551,5 +561,114 @@ suite('AC5 — a second detour on the same step makes NO model call', () => {
     await waitFor('the second step\'s detour', () => detourTabPaths(storage).length >= 3);
 
     assert.equal(sent.length, 2, 'two steps, two answers — a cache that served across steps would show one');
+  });
+});
+
+// ── the merge bar, in a real extension host: two tutorials, one global storage ───────────────
+
+/**
+ * **T-7 code review findings 1 and 2.** `globalStorageUri` is per-EXTENSION, and repo-tour mints
+ * a step id as `sha256(file + ' ' + kind + ' ' + symbolName)` with no repository identity in it
+ * — so two tutorials built from two different repositories that share a file path collide **by
+ * construction**. Every test above drives ONE tutorial, and a suite that only ever drives one
+ * cannot see either finding.
+ *
+ * This is the same pair of tutorials the reviewer drove, in the real extension host, against the
+ * one global storage folder VS Code really hands this extension. Two `newTutorial()` folders
+ * carry the same fixture plan, so the step ids are identical — which is exactly the situation
+ * the key has to survive rather than a contrivance.
+ */
+suite('two tutorials in ONE global storage do not serve each other’s examples', () => {
+  teardown(teardownDetour);
+
+  test('tutorial B pays for its own example rather than opening tutorial A’s', async () => {
+    const storage = await storageRoot();
+
+    // Tutorial A: generate and cache an example.
+    const a = newTutorial();
+    const walkA = await openWalk(a);
+    const first = await countingCore(CANNED_JSON);
+    await useCore(first.core);
+    await goTo(walkA.session, STEP_ID);
+    walkA.panel.dispatchForTest({ type: 'detour:start' });
+    await walkA.session.settled();
+    await waitFor('tutorial A’s detour', () => detourTabPaths(storage).length >= 3);
+    assert.equal(first.sent.length, 1, 'A paid for one answer');
+    walkA.panel.dispatchForTest({ type: 'detour:back' });
+    await walkA.session.settled();
+    await waitFor('A’s detour to close', () => detourTabPaths(storage).length === 0);
+
+    // Tutorial B: a different folder, the same step id, the same extension storage.
+    const b = newTutorial();
+    assert.notEqual(a, b, 'the two tutorials must be different folders');
+    const walkB = await openWalk(b);
+    const second = await countingCore(CANNED_JSON);
+    await useCore(second.core);
+    await goTo(walkB.session, STEP_ID);
+    walkB.panel.dispatchForTest({ type: 'detour:start' });
+    await walkB.session.settled();
+    await waitFor('tutorial B’s detour', () => detourTabPaths(storage).length >= 3);
+
+    assert.equal(
+      second.sent.length, 1,
+      'tutorial B was served tutorial A’s worked example out of the cache, free and unannounced — '
+      + 'the step id was the whole key, and a step id carries no repository in it',
+    );
+    assert.notEqual(
+      detourDir(storage, detourKey(a)), detourDir(storage, detourKey(b)),
+      'and the two tutorials would have written into ONE directory, so one’s return deletes the other’s files',
+    );
+
+    walkB.panel.dispatchForTest({ type: 'detour:back' });
+    await walkB.session.settled();
+  });
+});
+
+// ── the regenerate control, end to end ───────────────────────────────────────────────────────
+
+/**
+ * The spec's refinement notes: *"cached by `stepId` + prompt version so retaking is free; a
+ * 'regenerate' button forces a fresh one."* T-7 shipped the cache and not the button, so
+ * nothing could force a miss — `DETOUR_PROMPT_VERSION` is a source constant (code review
+ * finding 9). Driven here through the real panel's real message handler, so what is proved is
+ * the wiring that ships.
+ */
+suite('Write a new example — the learner can force a fresh one (code review finding 9)', () => {
+  teardown(teardownDetour);
+
+  test('it pays for a new answer while the ordinary retake stays free', async () => {
+    const target = newTutorial();
+    const hashBefore = treeHash(target);
+    const storage = await storageRoot();
+    const { session, panel } = await openWalk(target);
+    const { core, sent } = await countingCore(CANNED_JSON);
+    await useCore(core);
+    await goTo(session, STEP_ID);
+
+    panel.dispatchForTest({ type: 'detour:start' });
+    await session.settled();
+    await waitFor('the first detour', () => detourTabPaths(storage).length >= 3);
+    assert.equal(sent.length, 1, 'the first press pays');
+
+    // AC5 is not weakened by the escape hatch existing: the plain retake is still free.
+    panel.dispatchForTest({ type: 'detour:back' });
+    await session.settled();
+    await waitFor('it to close', () => detourTabPaths(storage).length === 0);
+    panel.dispatchForTest({ type: 'detour:start' });
+    await session.settled();
+    await waitFor('the free retake', () => detourTabPaths(storage).length >= 3);
+    assert.equal(sent.length, 1, 'AC5: the retake made a model call');
+
+    // …and this one is not free, which is the whole point of it.
+    panel.dispatchForTest({ type: 'detour:regenerate' });
+    await session.settled();
+    await waitFor('the regenerated example', () => detourTabPaths(storage).length >= 3);
+
+    assert.equal(sent.length, 2, 'the regenerate control was served out of the cache');
+    assert.equal(panel.getStateForTest()?.detour?.open?.stepId, STEP_ID, 'and the new example is what is open');
+    assert.equal(treeHash(target), hashBefore, 'AC2 still holds across a regeneration');
+
+    panel.dispatchForTest({ type: 'detour:back' });
+    await session.settled();
   });
 });

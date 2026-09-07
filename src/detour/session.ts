@@ -16,25 +16,29 @@
  *
  * ── The four rules this file is built on, and what breaks if one is dropped ──────────────────
  *
- * **1. `prepareDetourWrite` before EVERY write, and its RETURNED path is the one used.**
- * `parseDetourReply` does the LEXICAL half of path safety and says so; it is a pure function
- * and lexical is all a pure function can do. `prepareDetourWrite` (`./prompt.ts`) is the
- * filesystem half: it re-runs the lexical check, resolves the deepest existing ancestor BEFORE
- * anything is created, creates the parent, resolves it AGAIN, `lstat`s the final component, and
- * hands back the path under the RESOLVED root. Writing a lexically-checked path without it is
- * T-5's merge-blocking HIGH verbatim — `up -> ../outside` is contained as a string and
- * elsewhere on the disk, and only `realpath` can tell the two apart. So `writeDetour` below
- * writes nothing it did not receive back from that function.
+ * **1. There is ONE writer, and it is `writeDetourFiles`** (`./store.ts`).
  *
- * *Why not `writeDetourFiles`* (`./store.ts`), which writes a whole `Detour` and is tested: the
- * two cannot compose. `writeDetourFiles` CLEARS the detour directory as its first act, and
- * `prepareDetourWrite` requires that directory to exist in order to resolve it — so "gate, then
- * write" is impossible through it and "write, then gate" is a check that has already had its
- * side effect. What is borrowed from that module instead is every piece the gate does not
- * cover: `removeDetour` for the clearing (which also PROVES `<storage>/detours` is really that
- * directory rather than a link standing where it should be — the one containment question one
- * level above anything model-derived, and the one `prepareDetourWrite` cannot ask), and the
- * cache pair for AC5.
+ * This file used to carry a second one. `store.ts` spent a paragraph arguing that the root
+ * handed to `writeTextAtomic` must be the PROVEN store rather than the composed detour
+ * directory — because a planted `detours/<hash> -> /somewhere` makes the attacker's folder the
+ * root of the containment question and every write through it is perfectly "contained" — and
+ * `writeDetourFiles` obeyed it, and had no caller. The code that shipped was this file's own
+ * `writeDetour`, which passed the composed directory. Driven: swap the directory for a link
+ * between the check and the write and the file lands outside with nothing thrown. The suite
+ * could not see it, because the tests that prove the rule were attached to the function that
+ * obeys it and nobody runs.
+ *
+ * The reason given for the split was real — `writeDetourFiles` CLEARS the directory as its
+ * first act and `prepareDetourWrite` needs it to exist, so "gate, then write" could not
+ * compose through it — and the answer was to move the clearing inside the one writer, which is
+ * where it is now. **Two write paths that disagree about a security-critical argument is not a
+ * design; it is a defence and a bug shipped side by side.**
+ *
+ * What that one writer guarantees, and this file therefore does not re-implement:
+ * `prepareDetourWrite` before every write with its RETURNED path used (the lexical half is
+ * re-run inside it, the parent is resolved before and after creation, the final component is
+ * `lstat`ed); the detour directory resolved AND compared against the proven store; and
+ * `writeTextAtomic` rooted at that proven store.
  *
  * **2. The generation is a paid request and goes through `AskLedger`** (plan R2). Not through
  * `askTutor`, not through `startAsk`, and not through `core.runLlm`: `ledger.open(stepId)` and
@@ -57,6 +61,29 @@
  * superseded generation that has already written files removes them again, so a detour that
  * was cancelled has left nothing anywhere — no directory, no tabs, no narrator, no note.
  *
+ * **5. The model call does not hold the walk's chain** (T-7 code review, finding 3).
+ *
+ * `start` is two halves with a wait between them, and the split is T-6's `beginAsk`/
+ * `deliverAsk` verbatim. The first half runs on the walk's serialised chain and returns as
+ * soon as the request is SENT: the ticket is open, `generating` is set, the panel has been
+ * pushed to, so the press is visible in one chain hop. The wait then runs beside the chain,
+ * and what comes back is put BACK on it (`deps.resume`) — because parsing, writing files and
+ * opening tabs are exactly the things that belong on one serialised chain, and waiting is
+ * exactly the thing that does not.
+ *
+ * T-7 shipped with the whole model call awaited inside the chain job, for up to
+ * `tutorTimeoutSeconds` — capped at 3,600. Driven, with a generation in flight: `session.ask(…)`
+ * produced zero pushes, zero probes, no note, `thinking === false` and no ticket, and
+ * `step:check`, `dial:set`, `tutor:clear`, `reproduce:run` and `detour:back` all queued behind
+ * it identically. Nothing about `beginAsk` had regressed; it simply never got to run.
+ *
+ * **A queue makes a control correct and says nothing about whether it is responsive**, and
+ * "is this press visible yet" has to be re-asked every time something new is allowed to occupy
+ * the queue. `test/unit/walk-session.test.ts` pins the property in the form that survives a
+ * change of mechanism — *while a model call is in flight, the walk's other controls stay
+ * live* — rather than in terms of `enqueue`, because a test written against the mechanism can
+ * be satisfied by a new mechanism that reintroduces the bug.
+ *
  * ── Honest controls (`.autodev/conventions.md`) ──────────────────────────────────────────────
  *
  * Every refusal this file can produce carries a SENTENCE, because both T-6 reviews found
@@ -72,10 +99,8 @@
  * mechanism.
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
-import { writeTextAtomic } from '../dial/writer.js';
-import { checkReachable, type AskLedger, type AskOutcome, type AskSettings } from '../tutor/ask.js';
+import { checkReachable, type AskLedger, type AskOutcome, type AskSettings, type AskTicket } from '../tutor/ask.js';
 import type { PlanLike, StepLike } from '../walk/model.js';
 import type { NarratorViewState } from './narrator.js';
 import {
@@ -83,10 +108,29 @@ import {
   detourPrompt,
   isDetourRefusal,
   parseDetourReply,
-  prepareDetourWrite,
+  refusalSentence,
 } from './prompt.js';
-import { detourDir, readCachedDetour, removeDetour, writeCachedDetour } from './store.js';
-import type { Detour, DetourRefusal } from './types.js';
+import {
+  isDetourWriteRefused,
+  readCachedDetour,
+  removeDetour,
+  writeCachedDetour,
+  writeDetourFiles,
+  type DetourCacheKey,
+  type DetourKey,
+} from './store.js';
+import type { Detour } from './types.js';
+
+/**
+ * `refusalSentence` lives in `./prompt.ts` now — beside the `DETOUR_LIMITS` it quotes (code
+ * review finding 11: it hard-coded `at most 5`, `at most 60` and `between 3 and 6` while the
+ * prompt and the parser both interpolated the constant, so a changed limit would have left the
+ * panel stating a rule nothing enforced) and out of the way of the import `store.ts` needs in
+ * order to be the one writer. Re-exported rather than moved out of reach: drawing a refusal is
+ * still this layer's vocabulary, and a caller holding a `DetourRefusal` looks here for its
+ * sentence.
+ */
+export { refusalSentence } from './prompt.js';
 
 // ── what this file cannot do by itself ──────────────────────────────────────────────────────
 
@@ -149,6 +193,30 @@ export interface DetourDeps {
   /** The provider could not be reached, in ITS words — carried up so the walk can keep the
    *  standing line beside the input that T-6 already draws (`TutorView.unreachable`). */
   reportUnreachable(detail: string): void;
+  /**
+   * Which TUTORIAL this session's detours belong to — `tutorialId(target, plan)`
+   * (`./store.ts`), computed once by the walk.
+   *
+   * **Every path this session touches is keyed by it**, and that is T-7's two merge-blocking
+   * findings in one field: `globalStorageUri` is per-EXTENSION, a repo-tour step id carries no
+   * repository identity, and so two tutorials sharing a file path shared a detour directory and
+   * a cache entry by construction. See `store.ts`'s header, section 0.
+   *
+   * A string rather than the target and the plan, because this file must not have an opinion
+   * about what identifies a tutorial — it has one key and it uses it everywhere.
+   */
+  tutorial: string;
+  /**
+   * Put a job back on the walk's serialised chain (rule 5).
+   *
+   * This is the whole of the fix to code review finding 3. `WalkSession.startDetour` enqueues
+   * the FIRST half of `start`, which returns as soon as the request is sent; the wait then runs
+   * beside the chain and hands the outcome back through here, so that parsing, writing and
+   * opening tabs still happen serialised with everything else the walk does, and no other
+   * control waits on a model. `WalkSession` passes its own `enqueue`; a unit harness passes
+   * something that runs the job.
+   */
+  resume(job: () => Promise<void>): void;
 }
 
 /** What the panel draws about the detour. Every field here joins `stepRenderKey` (plan R4) —
@@ -163,9 +231,23 @@ export interface DetourView {
   note?: string;
 }
 
-/** What `start` did, for the walk to record and say. `note` is a sentence for the panel in
- *  both arms: a refusal has to explain itself, and a detour that opened with one file refused
- *  has to say that too rather than presenting four files as though five had been asked for. */
+/**
+ * What `start` did. `note` is a sentence for the panel in both arms: a refusal has to explain
+ * itself, and a detour that opened with one file refused has to say that too rather than
+ * presenting four files as though five had been asked for.
+ *
+ * **`note: ''` means "nothing to say", and there are exactly two ways to get it**: the press
+ * was superseded (something newer is already on the learner's screen, and a stale fact stated
+ * confidently under a live one is worse than silence), or — since rule 5 — the request is
+ * still IN FLIGHT and its answer will arrive through `deps.resume`. The two are told apart by
+ * `view(stepId).generating`, which is what the panel draws and therefore what a test about the
+ * press being visible should be asserting anyway.
+ *
+ * The sentence itself is NOT the walk's to store. `DetourSession` records every note it
+ * returns (`this.note` → `DetourView.note` → `#detour-note`), so a caller that also put it
+ * through `setTutorNote` drew it twice, verbatim, one line apart — code review finding 5. When
+ * a lower layer already stores what it returns, the upper layer's job is to route it.
+ */
 export type DetourStartResult =
   | { started: true; title: string; note?: string }
   | { started: false; note: string };
@@ -179,6 +261,10 @@ export type DetourReturnResult =
  *  resolved one; both are kept because both are prefix-matched against a tab's URI. See
  *  `tabPrefixes`. */
 interface OpenDetour {
+  /** the whole key, carried rather than recomposed: `closeOpen` runs on paths where the
+   *  session may already have moved on, and a delete aimed at a key rebuilt from current state
+   *  is how one detour removes another's files (see `store.ts`'s header, section 0) */
+  key: DetourKey;
   stepId: string;
   detour: Detour;
   dir: string;
@@ -189,36 +275,6 @@ interface OpenDetour {
 }
 
 // ── saying why ──────────────────────────────────────────────────────────────────────────────
-
-/**
- * A `DetourRefusal` as a sentence for the panel (AC5: "a failed generation says why").
- *
- * `./types.ts` made the refusal a discriminated union rather than a string for exactly this:
- * every arm carries the specific fact a learner would want, so this is a rendering of
- * information that already exists rather than a second guess at what went wrong. The wording
- * blames the model, because the model is what got it wrong — a learner who pressed a button
- * has nothing to fix and should not be handed a sentence that implies they have.
- */
-export function refusalSentence(refusal: DetourRefusal): string {
-  switch (refusal.reason) {
-    case 'not-json':
-      return `The model did not answer with the JSON this asks for — ${refusal.detail}. Nothing was written. Try again.`;
-    case 'bad-shape':
-      return `The model's example did not have the shape this asks for — ${refusal.detail}. Nothing was written. Try again.`;
-    case 'too-many-files':
-      return `The model sent ${refusal.found} files and a worked example may have at most 5. Nothing was written. Try again.`;
-    case 'file-too-long':
-      return `The model's ${refusal.path} is ${refusal.lines} lines and a worked example's file may have at most 60. Nothing was written. Try again.`;
-    case 'bad-stop-count':
-      return `The model sent ${refusal.found} narration stops and this asks for between 3 and 6. Nothing was written. Try again.`;
-    case 'stop-file-unknown':
-      return `The model narrated a file it never sent (${refusal.file}). Nothing was written. Try again.`;
-    case 'bad-range':
-      return `The model pointed at lines that are not in ${refusal.file} — ${refusal.detail}. Nothing was written. Try again.`;
-    case 'unsafe-path':
-      return `The model asked for a file at a path this will not write (${refusal.path}): it ${refusal.detail}. Nothing was written.`;
-  }
-}
 
 /** One sentence out of several, or nothing at all. `undefined` rather than `''` so the view's
  *  optional `note` really is absent when there is nothing to say — `stepRenderKey` treats
@@ -271,7 +327,7 @@ export class DetourSession {
   /** Which step a generation is running for, and the ticket behind it — the pair `TutorView`
    *  keeps for the same reason: `generating` is derived from it rather than tracked beside it,
    *  so there is no second flag anybody can forget to clear. */
-  private generating: { stepId: string; abandon: () => void } | undefined;
+  private generating: { stepId: string; ticket: AskTicket } | undefined;
 
   /**
    * Bumped at the top of every `start` and every `returnToBuild` — `StepDecorator.revealSeq`,
@@ -307,104 +363,179 @@ export class DetourSession {
   }
 
   /**
+   * The generation in flight, as something to wait on — or `undefined`.
+   *
+   * `WalkSession.settled()`'s counterpart for the detour, and it exists for exactly the reason
+   * that method exists: since rule 5 the model call is NOT on the walk's chain, so draining the
+   * chain is no longer draining everything. `settled()` waits for this, and then drains the
+   * chain again for the job `resume` put on the end of it.
+   *
+   * It cannot wait forever — `AskLedger` bounds every deadline and `askWithPrompt` races it, so
+   * a request always terminates in an outcome. That is a property of the ledger, and it is what
+   * makes this safe to await in a test rather than a way to hang one.
+   */
+  pending(): Promise<unknown> | undefined {
+    return this.generating?.ticket.delivered;
+  }
+
+  /**
    * The whole of AC2, in the order the plan sets out: cache or ask, parse, write, tabs,
-   * narrator, first stop.
+   * narrator, first stop — **and the model call does not hold the caller's chain** (rule 5).
+   *
+   * This method is the half that runs ON the chain, and it returns at one of four places: a
+   * cache hit that is already on screen, a refusal, a pre-flight that stopped, or the moment
+   * the request is SENT. In that last case the answer arrives later, through `deps.resume`,
+   * and what this returns is the empty note — the press is visible as `view().generating`,
+   * which is what the panel draws.
    *
    * **The cache is asked FIRST** — see this file's header, rule 3. A hit is free in every
    * sense: no probe, no ticket, no model call, and it works on a machine where the provider
-   * has since been uninstalled.
+   * has since been uninstalled. `fresh` is the one thing that skips it: *Write a new example*
+   * is the spec's promised “regenerate” control, and a cache with no way to force a miss is
+   * what made a stale entry permanent (code review finding 9).
    *
    * Every `await` below is followed by `stopped()`, which is rule 4's whole implementation:
    * the walk being disposed, the learner cancelling, and a SECOND detour having been started
    * all move the same counter. Only the last can leave a directory behind, which is why the
    * abandoned path in `present` removes what it wrote.
    */
-  async start(step: StepLike, plan: PlanLike, refRoot: unknown): Promise<DetourStartResult> {
+  async start(step: StepLike, plan: PlanLike, refRoot: unknown, opts: { fresh?: boolean } = {}): Promise<DetourStartResult> {
     if (this.disposed) return { started: false, note: 'This tutorial is no longer open.' };
 
     const stepId = step.id;
     if (this.generating) {
-      // Not a silent no-op: the button is drawn as un-pressable while a generation runs, but
-      // the page is a repaint behind the host by construction, so a press can still arrive.
-      // The same window `WalkSession.beginAsk` keeps its "one question already with the tutor"
-      // branch open for, and answered the same way.
-      return { started: false, note: 'An example is already being written. Wait for it, or press Cancel.' };
+      // **Reachable, and that is the fix rather than an accident.** It used to be unreachable
+      // through the panel: `WalkSession.startDetour` awaited the whole model call inside its
+      // chain job, so a second press waited its turn, found `generating` already cleared, hit
+      // the cache and tore the finished detour down to rebuild it — three tabs closed, a
+      // narrator closed, three tabs opened, and no sentence anywhere (code review finding 10).
+      // Now the first press returns as soon as the request is sent, so the second press
+      // genuinely arrives while one is in flight and is answered.
+      return this.refuse('An example is already being written. Wait for it, or press Cancel.');
     }
 
     const seq = ++this.seq;
     const root = this.deps.adapters.globalStorageRoot;
+    const key: DetourKey = { tutorial: this.deps.tutorial, stepId };
+    // Built BEFORE the cache is consulted, because the prompt IS the cache key (code review
+    // finding 9): a cache is a memo of `prompt -> reply`, so a plan rebuilt with a different
+    // question is a miss rather than yesterday's example served silently and forever.
+    let prompt: string;
+    try {
+      prompt = detourPrompt(step, plan, referenceName(refRoot));
+    } catch (err) {
+      // A prompt builder that throws is a bug in `./prompt.ts`. It is caught here rather than
+      // left to escape into a webview message listener with nobody to hear it.
+      return this.refuse(`The example could not be asked for — ${messageOf(err)}.`);
+    }
+    const cacheKey: DetourCacheKey = { ...key, promptVersion: DETOUR_PROMPT_VERSION, prompt };
 
     // ── AC5: the cache, before anything that costs money or needs a provider ───────────────
-    const cached = readCachedDetour(root, stepId, DETOUR_PROMPT_VERSION);
-    if (cached !== null) return this.present(stepId, cached, seq);
+    if (opts.fresh !== true) {
+      const cached = readCachedDetour(root, cacheKey);
+      if (cached !== null) return this.present(key, cached, seq);
+    }
 
     const settings = await this.deps.settings();
     if (this.stopped(seq)) return this.abandonedResult();
     if (!settings) {
-      return { started: false, note: 'repo-tour could not be loaded, so there is nobody to ask for an example. Nothing was written.' };
+      return this.refuse('repo-tour could not be loaded, so there is nobody to ask for an example. Nothing was written.');
     }
 
-    // AC4's honesty rule, applied to this button: the probe runs BEFORE a prompt is built and
-    // before a ticket is sent, so a machine with no provider gets the honest answer in the
-    // time it takes to `access()` a file rather than after a wait that reads like the model's
-    // fault. The same probe `WalkSession.beginAsk` runs, so the same sentence reaches the
-    // same standing line beside the input.
+    // AC4's honesty rule, applied to this button: the probe runs BEFORE a ticket is sent, so a
+    // machine with no provider gets the honest answer in the time it takes to `access()` a file
+    // rather than after a wait that reads like the model's fault. The same probe
+    // `WalkSession.beginAsk` runs, so the same sentence reaches the same standing line beside
+    // the input.
     const availability = await checkReachable(settings);
     if (this.stopped(seq)) return this.abandonedResult();
     if (!availability.ok) {
       this.deps.reportUnreachable(availability.detail);
-      return { started: false, note: `The model could not be reached, so no example was written and nothing was charged — ${availability.detail}.` };
+      return this.refuse(`The model could not be reached, so no example was written and nothing was charged — ${availability.detail}.`);
     }
 
-    // ── R2: the ONLY way a paid request starts ─────────────────────────────────────────────
+    // ── R2: the ONLY way a paid request starts ────────────────────────────────────
     const ticket = this.deps.ledger.open(stepId);
-    this.generating = { stepId, abandon: () => { ticket.abandon(); } };
+    this.generating = { stepId, ticket };
+    ticket.sendPrompt(settings, prompt);
+    // The push that draws the wait and the *Cancel* beside it. Made with the request already
+    // live, so there is no window in which the page says an example is coming and none is —
+    // `beginAsk`'s ordering, for `beginAsk`'s reason.
     this.deps.refresh();
 
-    let outcome: AskOutcome | null;
-    try {
-      ticket.sendPrompt(settings, detourPrompt(step, plan, referenceName(refRoot)));
-      outcome = await ticket.delivered;
-    } catch (err) {
-      // A prompt builder that throws is a bug in `./prompt.ts`, not a reason to leave a
-      // ticket live and a button dead. `sendPrompt` itself is contracted not to throw, so
-      // this covers `detourPrompt` and nothing else.
-      ticket.abandon();
-      if (this.generating?.stepId === stepId) this.generating = undefined;
-      return this.refuse(`The example could not be asked for — ${messageOf(err)}.`);
+    // **The wait runs beside the chain, and the answer goes back ON it.** `delivered` only ever
+    // resolves (`src/tutor/ask.ts` builds it by hand); the rejection arm exists so a future edit
+    // to that file cannot turn this into an unhandled rejection nobody is listening for.
+    void ticket.delivered.then(
+      (outcome) => { this.deps.resume(() => this.deliver(cacheKey, ticket, outcome, seq)); },
+      () => { this.deps.resume(() => this.deliver(cacheKey, ticket, null, seq)); },
+    );
+    return { started: false, note: '' };
+  }
+
+  /**
+   * What came back, on the walk's chain again — T-6's `deliverAsk`, for the detour.
+   *
+   * `generating` is cleared BEFORE anything is decided about the outcome, exactly as
+   * `deliverAsk` clears `this.asking` first: nothing may leave the button drawn un-pressable
+   * with no request behind it, which is AC4's rule wearing a different button.
+   *
+   * The identity check on the ticket is what makes a cancel safe, and it is the same second
+   * lock `deliverAsk` keeps: a late outcome from a request the learner walked away from finds
+   * a generation that is no longer this one and lands nowhere.
+   */
+  private async deliver(
+    key: DetourCacheKey,
+    ticket: AskTicket,
+    outcome: AskOutcome | null,
+    seq: number,
+  ): Promise<void> {
+    if (this.generating?.ticket === ticket) this.generating = undefined;
+    if (this.stopped(seq)) {
+      // Cancelled, superseded or disposed. `cancel()` has already said what stopping cost and
+      // the walk has already repainted; there is nothing here to add and a second sentence
+      // would be a second vocabulary for one event.
+      return;
     }
-    // Cleared BEFORE anything is decided about the outcome, exactly as `deliverAsk` clears
-    // `this.asking` before it chooses a sentence: nothing may leave `generating` true with no
-    // request behind it, which is AC4's rule wearing a different button.
-    if (this.generating?.stepId === stepId) this.generating = undefined;
-    if (this.stopped(seq)) return this.abandonedResult();
 
     if (outcome === null) {
-      // The learner cancelled. `AskTicket.abandon` already said what that costs; there is
-      // nothing for this to add and a second sentence would be a second vocabulary for it.
-      return { started: false, note: 'You stopped before the example arrived.' };
+      // **Reachable, and no longer only in theory.** `cancel()` says its own sentence at the
+      // press, so this is the OTHER way a ticket ends with nothing delivered: `abandonAll()`
+      // reached it from somewhere else — *Cancel* pressed on a tutor question, or
+      // `clearConversation` on a step with an ask in flight — which detaches every live
+      // request including this one without moving this session's `seq`. It used to carry a
+      // sentence that could never be shown, because `cancel()` bumps `seq` and `stopped(seq)`
+      // is checked first (code review finding 4).
+      this.refuse('That example was stopped before it arrived, so nothing was written.');
+      return;
     }
     switch (outcome.kind) {
       case 'unreachable':
         this.deps.reportUnreachable(outcome.detail);
-        return this.refuse(`The model could not be reached, so no example was written — ${outcome.detail}.`);
+        this.refuse(`The model could not be reached, so no example was written — ${outcome.detail}.`);
+        return;
       case 'timedOut':
-        return this.refuse('The model did not send an example in time. Nothing was written — try again, or raise `buildTutorials.tutorTimeoutSeconds`.');
+        this.refuse('The model did not send an example in time. Nothing was written — try again, or raise `buildTutorials.tutorTimeoutSeconds`.');
+        return;
       case 'failed':
-        return this.refuse(`The model could not write an example — ${outcome.detail}. Nothing was written.`);
+        this.refuse(`The model could not write an example — ${outcome.detail}. Nothing was written.`);
+        return;
       case 'reply':
         break;
     }
 
     const parsed = parseDetourReply(outcome.text);
-    if (isDetourRefusal(parsed)) return this.refuse(refusalSentence(parsed));
+    if (isDetourRefusal(parsed)) {
+      this.refuse(refusalSentence(parsed));
+      return;
+    }
 
     // Cached BEFORE the files are written, so a detour that is superseded halfway through its
     // tabs is still free to retake. `writeCachedDetour` never throws and answers `false` when
     // it declined — a miss costs one regeneration, which is not worth a sentence at somebody
     // who is about to be shown their example.
-    writeCachedDetour(root, stepId, DETOUR_PROMPT_VERSION, parsed);
-    return this.present(stepId, parsed, seq);
+    writeCachedDetour(this.deps.adapters.globalStorageRoot, key, parsed);
+    await this.present({ tutorial: key.tutorial, stepId: key.stepId }, parsed, seq);
   }
 
   /**
@@ -416,7 +547,8 @@ export class DetourSession {
    * the screen would be a second implementation of "open a detour", and the day the two
    * disagreed would be the day a free retake stopped looking like the paid original.
    */
-  private async present(stepId: string, detour: Detour, seq: number): Promise<DetourStartResult> {
+  private async present(key: DetourKey, detour: Detour, seq: number): Promise<DetourStartResult> {
+    const stepId = key.stepId;
     // A detour already open is closed first, and it is the PREVIOUS one's tabs and files that
     // go — never this one's. Doing it here rather than at the top of `start` means a
     // generation that fails leaves the detour the learner is reading exactly where it was.
@@ -433,28 +565,39 @@ export class DetourSession {
       if (closed !== undefined) carried.push(closed);
     }
 
-    const written = this.writeDetour(stepId, detour);
-    if ('problem' in written) return this.refuse(joined([...carried, written.problem]) ?? written.problem);
+    // **The one writer** (rule 1). Everything the old private `writeDetour` did — the clearing,
+    // the store proof, the per-file gate — is inside it, with the containment root this file
+    // used to get wrong.
+    const written = writeDetourFiles(this.deps.adapters.globalStorageRoot, key, detour);
+    if (isDetourWriteRefused(written)) return this.refuse(joined([...carried, written.problem]) ?? written.problem);
     if (this.stopped(seq)) {
       // Superseded between the reply and the tabs. What was written is removed rather than
       // left for the next `start` to inherit: "a detour that is cancelled lands nowhere" is
       // not true of one that left five files in global storage.
-      removeDetour(this.deps.adapters.globalStorageRoot, stepId);
+      removeDetour(this.deps.adapters.globalStorageRoot, key);
       return this.abandonedResult();
     }
 
     const notes = [...carried, ...written.problems];
-    if (written.files.length === 0) {
-      removeDetour(this.deps.adapters.globalStorageRoot, stepId);
-      return { started: false, note: joined([...notes, 'None of the example\'s files could be written, so there is nothing to show.']) ?? 'None of the example\'s files could be written.' };
+    if (written.written.length === 0) {
+      removeDetour(this.deps.adapters.globalStorageRoot, key);
+      return this.refuse(joined([...notes, 'None of the example\'s files could be written, so there is nothing to show.']) ?? 'None of the example\'s files could be written.');
     }
 
-    const live: OpenDetour = { stepId, detour, ...written.dirs, files: written.files, current: 0 };
+    const live: OpenDetour = {
+      key,
+      stepId,
+      detour,
+      dir: written.dir,
+      realDir: written.realDir,
+      files: written.written,
+      current: 0,
+    };
     // Claimed BEFORE the first await below. A tab that opens after a supersede has to be
     // reachable by the cleanup that supersede runs, and the only handle on it is this object.
     this.open = live;
 
-    for (const file of written.files) {
+    for (const file of written.written) {
       try {
         await this.deps.adapters.openDetourTab(file.abs);
       } catch (err) {
@@ -471,91 +614,17 @@ export class DetourSession {
     }
 
     this.note = joined(notes);
-    this.deps.adapters.showNarrator(this.narratorState(live));
+    // ONE render, not two. `present` used to raise the narrator here and then again inside
+    // `goto(0)`, so `webview.html` was rebuilt twice on every open and every cached retake
+    // (code review finding 12). `goto` is the one that knows which stop is being drawn, so it
+    // is the one that renders — and it now renders a stop-less detour too, which is what the
+    // direct call was quietly covering for.
     await this.goto(0);
     if (this.stopped(seq) || this.open !== live) return this.abandonedResult();
 
     this.deps.refresh();
     const note = joined(notes);
     return { started: true, title: detour.title, ...(note !== undefined ? { note } : {}) };
-  }
-
-  /**
-   * The detour on disk — **the file this whole ticket's risk lives in** (AC2).
-   *
-   * The order is the design, and each step is doing a job the next one cannot:
-   *
-   *   1. **`removeDetour` first.** It clears any leftover from a session that crashed mid-
-   *      detour — step 4 opens *the directory's* files, so a stale file would become a tab in
-   *      an example the narration does not describe. It also does something the rest of this
-   *      method cannot: `provenStoreRoot` checks that `<storage>/detours` is really that
-   *      directory and not a link standing where it should be. That is the one containment
-   *      question a level ABOVE anything model-derived, and `prepareDetourWrite` — which
-   *      resolves the detour directory it is handed — cannot ask it. A refusal for any reason
-   *      other than "there was nothing there" stops everything: a folder we could not prove
-   *      enough about to empty is not a folder to fill.
-   *   2. **Create the detour directory.** `prepareDetourWrite` resolves it with `realpath`,
-   *      which can only answer about a path that exists. Safe HERE and nowhere earlier: step 1
-   *      has just established that the store is a real directory and that this detour's own
-   *      folder is gone, so there is no planted link left for `mkdir -p` to follow down.
-   *   3. **`prepareDetourWrite` per file, and its ANSWER is the path written.** The lexical
-   *      half is re-run inside it (`./prompt.ts` re-runs it rather than trusting that the
-   *      parser ran — one forgotten call site is how this class of bug returns), the parent is
-   *      resolved before and after creation, and the final component is `lstat`ed so a symlink
-   *      standing at `coins.ts` is refused rather than written through. **The composed path is
-   *      never used**; what comes back sits under the RESOLVED root, which on macOS — where
-   *      `os.tmpdir()` is under a symlink — is a genuinely different string for every honest
-   *      detour, and the difference is exactly what containment is about.
-   *   4. **`writeTextAtomic` with the detour directory as its root.** Temp-file-and-rename, so
-   *      a symlink appearing at the destination between step 3's `lstat` and the write is
-   *      REPLACED rather than followed. A stat is a moment, not a lock, and this is what makes
-   *      the residue between them not matter.
-   *
-   * One bad file does not cost the learner the others: a refusal becomes a sentence and the
-   * rest are written, the same way `writeDetourFiles` and `reproduceFiles` report one entry
-   * without dropping the rest.
-   */
-  private writeDetour(
-    stepId: string,
-    detour: Detour,
-  ): { problem: string } | { dirs: { dir: string; realDir: string }; files: Array<{ path: string; abs: string }>; problems: string[] } {
-    const root = this.deps.adapters.globalStorageRoot;
-    const dir = detourDir(root, stepId);
-
-    const cleared = removeDetour(root, stepId);
-    if (!cleared.removed && cleared.reason !== 'absent' && cleared.reason !== 'no-store') {
-      return { problem: `The example's folder could not be cleared, so nothing was written — ${cleared.detail}.` };
-    }
-
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch (err) {
-      return { problem: `The example's folder could not be created, so nothing was written — ${messageOf(err)}.` };
-    }
-    let realDir: string;
-    try {
-      realDir = fs.realpathSync(dir);
-    } catch (err) {
-      return { problem: `Where the example would be written could not be established, so nothing was — ${messageOf(err)}.` };
-    }
-
-    const files: Array<{ path: string; abs: string }> = [];
-    const problems: string[] = [];
-    for (const file of detour.files) {
-      // ── The contract. Nothing below writes a path this did not hand back. ───────────────
-      const target = prepareDetourWrite(dir, file.path);
-      if (isDetourRefusal(target)) {
-        problems.push(refusalSentence(target));
-        continue;
-      }
-      try {
-        writeTextAtomic(target, file.content, dir);
-        files.push({ path: file.path, abs: target });
-      } catch (err) {
-        problems.push(`${file.path} could not be written — ${messageOf(err)}.`);
-      }
-    }
-    return { dirs: { dir, realDir }, files, problems };
   }
 
   /**
@@ -576,7 +645,11 @@ export class DetourSession {
   async returnToBuild(): Promise<DetourReturnResult> {
     if (this.disposed) return { returned: false, note: 'This tutorial is no longer open.' };
     const live = this.open;
-    if (!live) return { returned: false, note: 'There is no example open to come back from.' };
+    // Stored, not only returned — the same rule `refuse` follows and the reason the walk no
+    // longer re-records what this hands back (code review finding 5). It also retires the
+    // walk's `currentStep(…)?.id ?? ''` fallback, which on a plan with no current step filed
+    // the sentence under an id `tutorView` could never match (finding 12).
+    if (!live) return this.refuseReturn('There is no example open to come back from.');
 
     // Supersedes any generation in flight: a learner pressing *Back to my build* while a
     // second example is being written wants to be out of the detour, not deeper into it.
@@ -587,8 +660,10 @@ export class DetourSession {
     if (this.disposed) return { returned: false, note: 'This tutorial is no longer open.' };
     if (this.seq !== seq) {
       // Something newer started while the tabs were closing. It owns the screen now, and this
-      // return has already done the only thing it still could — the old detour is gone.
-      return { returned: false, note: 'A newer example replaced that one.' };
+      // return has already done the only thing it still could — the old detour is gone. No
+      // sentence: a stale fact stated confidently under a live one is worse than silence, and
+      // the newer detour's own note is what the learner is reading.
+      return { returned: false, note: '' };
     }
 
     this.note = problem;
@@ -642,7 +717,7 @@ export class DetourSession {
 
     // Deleted whatever the tabs did (see `returnToBuild`). `removeDetour` is the only path by
     // which a step id becomes a recursive delete, and it refuses far more than it needs to.
-    const removed = removeDetour(this.deps.adapters.globalStorageRoot, live.stepId);
+    const removed = removeDetour(this.deps.adapters.globalStorageRoot, live.key);
     if (!removed.removed && removed.reason !== 'absent' && removed.reason !== 'no-store') {
       notes.push(`The example's files could not be deleted — ${removed.detail}.`);
     }
@@ -668,10 +743,13 @@ export class DetourSession {
     const live = this.open;
     if (this.disposed || !live) return;
     const stops = live.detour.stops;
-    if (stops.length === 0) return;
 
-    const at = Number.isInteger(n) ? Math.min(Math.max(n, 0), stops.length - 1) : 0;
+    const at = stops.length === 0 ? 0 : Number.isInteger(n) ? Math.min(Math.max(n, 0), stops.length - 1) : 0;
     live.current = at;
+    // The ONE place the narrator is rendered from (code review finding 12). A detour with no
+    // stops is still drawn — `narrator.ts` has `NO_STOPS_MESSAGE` and the way out for exactly
+    // this case, and a blank screen would be the silent failure this codebase tests for
+    // everywhere else.
     this.deps.adapters.showNarrator(this.narratorState(live));
 
     const stop = stops[at];
@@ -696,34 +774,67 @@ export class DetourSession {
     if (this.open) await this.goto(this.open.current - 1);
   }
 
-  /** What the narrator draws. `skin` is asked for at the moment of the render rather than
-   *  captured, so a learner who changes skin mid-detour is obeyed on the next stop. */
+  /**
+   * What the narrator draws. `skin` is asked for at the moment of the render rather than
+   * captured, so a learner who changes skin mid-detour is obeyed on the next stop.
+   *
+   * **`files` is what was WRITTEN, not what was parsed** (code review finding 6). The narrator
+   * heads that list "The files this detour opened", and it used to be handed the parsed reply —
+   * so a file `prepareDetourWrite` refused was named on the page as one that opened, while the
+   * step panel's note one tab over said it had been refused. Driven, a reply whose second file
+   * collided with the directory the first one made opened one tab and listed two.
+   *
+   * The STOPS are deliberately left whole. A stop whose file was refused still has prose worth
+   * reading and the narrator still moves through it — that is the documented behaviour in
+   * `goto` — and filtering here would shift every index under `live.current`.
+   */
   private narratorState(live: OpenDetour): NarratorViewState {
-    return { detour: live.detour, current: live.current, skin: this.deps.adapters.skin() };
+    const written = new Set(live.files.map((file) => file.path));
+    const files = live.detour.files.filter((file) => written.has(file.path));
+    return {
+      detour: { ...live.detour, files },
+      current: live.current,
+      skin: this.deps.adapters.skin(),
+    };
   }
 
   // ── the lifecycle ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Stop a generation in flight (the walk's *Cancel* reaches this alongside the tutor's).
+   * Stop a generation in flight (the walk's *Cancel* reaches this alongside the tutor's), and
+   * **say what stopping did** — code review finding 4.
+   *
+   * It used to say nothing at all. `cancelAsk`'s `!asking` arm refreshed and returned, the
+   * sentence written for the cancelled case lived in the delivery path and could never run
+   * (`cancel()` bumps `seq`, and `stopped(seq)` is checked first), and driven, a *Cancel* on a
+   * detour left `spend() = {sending: 1, unwatched: 1}` with both notes `undefined`. A press
+   * that stops a paid request and reports nothing is exactly the shape this file's own
+   * neighbouring method calls "the dishonest version of the same mechanism".
+   *
+   * The two sentences are `cancelAsk`'s, for the detour's button, and the split is the same
+   * one: what a cancel MEANS depends on which half of the wait it lands in. Read BEFORE the
+   * abandon, because the ticket has moved on by the time the sentence is written. `preparing`
+   * is a real cancellation — nothing was sent, so nothing is charged. Only `sending` is still
+   * costing money, and `AskSpend.unwatched` is where that goes on being counted.
    *
    * The ticket is abandoned through the LEDGER's own mechanism, so this is the same
-   * cancellation the tutor gets and it is counted the same way: a request already sending goes
-   * on running and goes on billing, and `AskSpend.unwatched` is where that is said. Nothing
-   * here pretends otherwise.
+   * cancellation the tutor gets and it is counted the same way.
    */
   cancel(): boolean {
     const running = this.generating;
     // Answers whether anything was actually stopped, and the caller needs that rather than a
     // `void`: T-6 proved that *Cancel* with nothing in flight is a no-op — no note, no push —
     // because the answer landed while the press was in the air and the reply now on screen
-    // says more than any sentence about it could. A detour that was cancelled DOES have to
-    // repaint (the button is drawn un-pressable until it does), so the two cases are told
-    // apart here rather than by a refresh the walk fires either way.
+    // says more than any sentence about it could.
     if (!running) return false;
     this.generating = undefined;
-    running.abandon();
+    const wasSending = running.ticket.phase === 'sending';
+    running.ticket.abandon();
     this.seq += 1;
+    this.note = wasSending
+      ? 'You stopped waiting for the example. The model is still finishing it and you will still be billed for it — '
+        + 'the example will not appear here.'
+      : 'You stopped before the example was asked for, so nothing was sent and nothing was charged.';
     return true;
   }
 
@@ -747,12 +858,26 @@ export class DetourSession {
     return { started: false, note: '' };
   }
 
-  /** A refusal that is worth saying: recorded for the panel AND returned, because the walk
-   *  puts it in the step's own note and the panel draws it from the view. */
+  /**
+   * A refusal that is worth saying: recorded for the panel AND returned.
+   *
+   * Recorded is the load-bearing half. `DetourView.note` is what `#detour-note` draws, so this
+   * one store is the whole of how a refusal reaches the learner — and the walk deliberately
+   * does NOT put the returned string through `setTutorNote` any more, which drew every refusal
+   * twice, verbatim, in adjacent paragraphs (code review finding 5). It is still returned so a
+   * caller can act on the fact of a refusal and a test can read the sentence directly.
+   */
   private refuse(note: string): DetourStartResult {
     this.note = note;
     this.deps.refresh();
     return { started: false, note };
+  }
+
+  /** `refuse` for the return path — the same one store, a different result shape. */
+  private refuseReturn(note: string): DetourReturnResult {
+    this.note = note;
+    this.deps.refresh();
+    return { returned: false, note };
   }
 
   /** Clear the sentence — the walk calls this when it navigates, for the reason `writeNote`
@@ -793,7 +918,7 @@ export class DetourSession {
   private cancelOnDispose(): void {
     const running = this.generating;
     this.generating = undefined;
-    running?.abandon();
+    running?.ticket.abandon();
   }
 }
 

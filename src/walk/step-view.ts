@@ -420,6 +420,17 @@ export const NOTE_TURN_LABEL = 'This tutorial';
 export const DETOUR_BUTTON_LABEL = 'Show me an unrelated example';
 export const DETOUR_WAITING_MESSAGE = 'writing an example…';
 export const DETOUR_BACK_LABEL = 'Back to my build';
+/**
+ * The spec's "regenerate" control (refinement notes; T-7 code review finding 9). Worded as
+ * what it DOES rather than as a verb from this codebase's own vocabulary: a learner reading an
+ * example that is not landing wants a different one, and "regenerate" is a word about a cache.
+ */
+export const DETOUR_REGENERATE_LABEL = 'Write a new example';
+/** What the second button costs, said where it is offered. `Show me an unrelated example` is
+ *  free on a retake and this one never is, and a control that spends money without saying so
+ *  is the shape T-6's AC4 rules out by name. */
+export const DETOUR_REGENERATE_HINT =
+  'Not happy with this example? Writing a new one asks the model again, so it is not free.';
 
 /** Why the button cannot act, when it cannot (conventions.md: never a disabled control with no
  *  explanation). The provider's own sentence is drawn beside it by `tutor.unreachable`; this
@@ -1243,11 +1254,22 @@ function detourHtml(state: StepViewState): string {
     const where = here
       ? ''
       : `<p class="detour-hint">${escapeHtml(detourElsewhereMessage(index >= 0 ? index + 1 : undefined))}</p>`;
+    // *Write a new example* is offered only where the learner is standing in the example it
+    // would replace — on THIS step, with a detour open. Its presence is a pure function of
+    // `state.step.id` and `open.stepId`, both already in `stepRenderKey`, so it adds no field
+    // to the key and no mutation to its sweep.
+    const regenerate = here
+      ? `<button type="button" class="btn btn-quiet" id="btn-detour-regenerate">${escapeHtml(DETOUR_REGENERATE_LABEL)}</button>`
+      : '';
+    const cost = here ? `<p class="detour-hint">${escapeHtml(DETOUR_REGENERATE_HINT)}</p>` : '';
     return '<div class="detour">'
       + note
       + where
       + `<p class="detour-open">${escapeHtml(planText(open.title, MAX_CHECK_TEXT))}</p>`
-      + `<div class="tutor-controls"><button type="button" class="btn" id="btn-detour-back">${escapeHtml(DETOUR_BACK_LABEL)}</button></div>`
+      + `<div class="tutor-controls"><button type="button" class="btn" id="btn-detour-back">${escapeHtml(DETOUR_BACK_LABEL)}</button>`
+      + regenerate
+      + '</div>'
+      + cost
       + '</div>';
   }
 
@@ -1555,6 +1577,7 @@ const CLIENT_SCRIPT = `
   // null-safe, so the rest of the time these lines hook nothing rather than needing a
   // condition of their own — the same shape \`btn-reproduce\` above uses.
   on('btn-detour-start', 'click', function () { post('detour:start', {}); });
+  on('btn-detour-regenerate', 'click', function () { post('detour:regenerate', {}); });
   on('btn-detour-back', 'click', function () { post('detour:back', {}); });
   // The same \`tutor:cancel\` the ask uses: the host's cancel goes through the ledger and stops
   // every live request, and a detour being written is one of them. One message is the whole

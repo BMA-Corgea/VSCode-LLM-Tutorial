@@ -56,13 +56,14 @@ interface Calls {
   clearConversation: number;
   /** T-7: the two the detour adds — the ask that writes an example, and the way back. */
   startDetour: number;
+  regenerateDetour: number;
   returnFromDetour: number;
 }
 
 function noCalls(): Calls {
   return {
     goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [],
-    cancelAsk: 0, clearConversation: 0, startDetour: 0, returnFromDetour: 0,
+    cancelAsk: 0, clearConversation: 0, startDetour: 0, regenerateDetour: 0, returnFromDetour: 0,
   };
 }
 
@@ -83,6 +84,7 @@ function fakeEffects(): { effects: StepEffects; calls: Calls } {
     cancelAsk: () => { calls.cancelAsk += 1; },
     clearConversation: () => { calls.clearConversation += 1; },
     startDetour: () => { calls.startDetour += 1; },
+    regenerateDetour: () => { calls.regenerateDetour += 1; },
     returnFromDetour: () => { calls.returnFromDetour += 1; },
   };
   return { effects, calls };
@@ -585,6 +587,22 @@ suite('handleStepMessage — the detour (T-7)', () => {
     assert.deepEqual({ ...calls, returnFromDetour: 0 }, NOTHING);
   });
 
+  test('detour:regenerate routes to the session and changes no state here (finding 9)', () => {
+    // The spec's "regenerate" control, which T-7 shipped without — so the cache had no escape
+    // hatch at all. Routed exactly as `detour:start` is, and for the same reason: whether there
+    // is a cache entry to bypass is the session's question, and the answer takes a model call.
+    const { effects, calls } = fakeEffects();
+    const before = stateAt('st-2-file-parse');
+
+    const { state, post } = handleStepMessage(before, { type: 'detour:regenerate' }, effects);
+
+    assert.equal(calls.regenerateDetour, 1, 'the session is asked');
+    assert.equal(state, before, 'and this file decides nothing');
+    assert.equal(post, undefined);
+    assert.deepEqual({ ...calls, regenerateDetour: 0 }, NOTHING, 'and nothing else happened');
+    assert.equal(calls.startDetour, 0, 'in particular it is NOT the same message as detour:start — it forces a miss');
+  });
+
   test('a press with no detour open is ROUTED, not second-guessed here', () => {
     // Whether there is anything to come back from is the session's question: this panel is one
     // push out of date by construction, and a protocol that refused on its own stale picture
@@ -595,9 +613,9 @@ suite('handleStepMessage — the detour (T-7)', () => {
   });
 });
 
-suite('parseStepMessage — the detour\'s two messages (T-7)', () => {
-  test('both are accepted, and rebuilt rather than passed through', () => {
-    for (const type of ['detour:start', 'detour:back'] as const) {
+suite('parseStepMessage — the detour\'s three messages (T-7)', () => {
+  test('all three are accepted, and rebuilt rather than passed through', () => {
+    for (const type of ['detour:start', 'detour:regenerate', 'detour:back'] as const) {
       assert.deepEqual(parseStepMessage({ type }), { type }, `${type} is a message this panel speaks`);
       // A payload smuggled alongside a known type is left on the floor — `sanitizeTranscript`'s
       // rebuild-don't-copy rule (T-6 security review), applied here. It matters more for these
@@ -614,6 +632,7 @@ suite('parseStepMessage — the detour\'s two messages (T-7)', () => {
   test('a near miss is not a message', () => {
     for (const raw of [
       { type: 'detour:starts' },
+      { type: 'detour:regenerates' },
       { type: 'detour' },
       { type: 'detour:prev' }, // the NARRATOR's message, not this panel's — different surface
       { type: 'detour:next' },

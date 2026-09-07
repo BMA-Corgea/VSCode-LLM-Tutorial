@@ -726,3 +726,43 @@ suite('AC5 for the narrator — 21 payloads across four model-authored fields', 
     assert.ok(tagSequence(attrBroken).some((tag) => /\son[a-z]+\s*=/i.test(tag)), 'and so does the handler probe');
   });
 });
+
+// ── the aside is a PROMISE, and the code has to keep it ──────────────────────────────────────
+
+/**
+ * **T-7 security review finding 3.** The aside used to read *"These files live outside your
+ * project. Going back closes them and deletes them."* — true of the tabs, true of the detour
+ * directory, and **not true of the copy**: `detours/cache/<hash>.json` holds the same
+ * model-written bytes, `removeDetourAt` refuses that folder by name (correctly), `dispose()`
+ * does not touch it, and nothing pruned it. A 61-step plan fully detoured was ~16 MB of model
+ * output sitting in global storage permanently, under a sentence saying it had been deleted.
+ *
+ * This repository's honest-controls rule does not allow a page to state something the code does
+ * not do, so both halves moved: the sentence now says the copy exists and why, and the copy is
+ * bounded (`MAX_CACHE_ENTRIES`, pinned in `detour-store.test.ts`).
+ *
+ * The test is about the CLAIM, not about the wording: a rewrite that dropped the second clause
+ * would put the promise back.
+ */
+suite('DETOUR_ASIDE — the sentence on the page is one the code keeps', () => {
+  test('it still says the files are outside the project and that going back removes them', () => {
+    assert.match(DETOUR_ASIDE, /outside your project/, 'AC2 is the reason the detour exists; the page has to say it');
+    assert.match(DETOUR_ASIDE, /deletes them/, 'AC3 is what the way out promises');
+  });
+
+  test('and it no longer claims that NOTHING is kept, because something is', () => {
+    // The half that was untrue. What is asserted is that the page admits to the copy — a
+    // rewrite that says "closes them and deletes them" and stops there fails here.
+    assert.match(DETOUR_ASIDE, /copy/i, 'the page does not mention the cached copy that survives the return');
+    assert.match(DETOUR_ASIDE, /free|retak/i, 'and does not say WHY it is kept, so it reads like a leak rather than AC5');
+    assert.ok(
+      /outside your project/.test(DETOUR_ASIDE.slice(DETOUR_ASIDE.indexOf('copy'))) || /extension/i.test(DETOUR_ASIDE),
+      'and does not say WHERE it is kept, which is the thing a learner would want to know',
+    );
+  });
+
+  test('the page draws it, verbatim, once', () => {
+    const html = renderNarratorHtml(stateAt(0), FAKE_SKINS);
+    assert.equal(textOfClass(html, 'detour-aside'), DETOUR_ASIDE);
+  });
+});

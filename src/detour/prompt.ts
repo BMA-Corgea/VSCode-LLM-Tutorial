@@ -342,8 +342,15 @@ const SEGMENT_ALLOWED = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
  * The named attacks are checked before the allowlist so the sentence the panel shows names
  * what was actually wrong. The allowlist is the backstop and would refuse every one of them
  * on its own.
+ *
+ * **Exported because the cache is a second door into the same data** (T-7 security review,
+ * finding 2). `sanitizeDetour` (`./store.ts`) re-enters a `Detour` from a file on the
+ * learner's own disk without ever meeting `parseDetourReply`, and a `Detour` carries no
+ * "paths already checked" mark in its type — so the read path has to re-apply this rule
+ * itself. One rule, one function, two callers; a second implementation of it in `store.ts`
+ * is exactly the drift the review found and this export is what makes it unnecessary.
  */
-function unsafePathReason(value: unknown): string | null {
+export function unsafeDetourPathReason(value: unknown): string | null {
   if (typeof value !== 'string') return `is ${describe(value)}, not a string`;
   if (value.length === 0) return 'is empty';
   if (value.trim().length === 0) return 'is only whitespace';
@@ -436,7 +443,7 @@ function deepestExisting(dir: string): string {
  * the check is where the value is, and the residue is named rather than implied.
  */
 export function prepareDetourWrite(detourDir: string, relPath: unknown): string | DetourRefusal {
-  const lexical = unsafePathReason(relPath);
+  const lexical = unsafeDetourPathReason(relPath);
   if (lexical !== null) return unsafePath(relPath, lexical);
   const rel = relPath as string;
 
@@ -472,6 +479,52 @@ export function prepareDetourWrite(detourDir: string, relPath: unknown): string 
   if (entry.isSymbolicLink()) return unsafePath(rel, 'is already a symlink, and a write would follow it out of the detour folder');
   if (!entry.isFile()) return unsafePath(rel, 'already exists and is not an ordinary file');
   return target;
+}
+
+// ── saying why ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A `DetourRefusal` as a sentence for the panel (AC5: "a failed generation says why").
+ *
+ * `./types.ts` made the refusal a discriminated union rather than a string for exactly this:
+ * every arm carries the specific fact a learner would want, so this is a rendering of
+ * information that already exists rather than a second guess at what went wrong. The wording
+ * blames the model, because the model is what got it wrong — a learner who pressed a button
+ * has nothing to fix and should not be handed a sentence that implies they have.
+ *
+ * **It lives here, beside the rules it quotes** (T-7 code review, finding 11). It used to sit
+ * in `./session.ts` with `at most 5`, `at most 60` and `between 3 and 6` written out as
+ * English, while `detourPrompt` and `parseDetourReply` — one file over — interpolated
+ * `DETOUR_LIMITS` for the same three numbers. A limit changed in `types.ts` would then have
+ * moved what the parser enforces and what the model is asked for, and left the panel stating
+ * a rule nothing was applying. The numbers are read from the same constant as the ask and the
+ * check, so the three cannot disagree.
+ *
+ * A second reason for the move, and it is structural rather than tidy: `./store.ts` is now the
+ * one writer (code review finding 8) and needs to turn a refusal into a sentence, and
+ * `store.ts` importing `session.ts` would be a cycle. A rendering of `DetourRefusal` belongs
+ * with the module that produces `DetourRefusal`.
+ */
+export function refusalSentence(refusal: DetourRefusal): string {
+  const { maxFiles, maxLinesPerFile, minStops, maxStops } = DETOUR_LIMITS;
+  switch (refusal.reason) {
+    case 'not-json':
+      return `The model did not answer with the JSON this asks for — ${refusal.detail}. Nothing was written. Try again.`;
+    case 'bad-shape':
+      return `The model's example did not have the shape this asks for — ${refusal.detail}. Nothing was written. Try again.`;
+    case 'too-many-files':
+      return `The model sent ${refusal.found} files and a worked example may have at most ${maxFiles}. Nothing was written. Try again.`;
+    case 'file-too-long':
+      return `The model's ${refusal.path} is ${refusal.lines} lines and a worked example's file may have at most ${maxLinesPerFile}. Nothing was written. Try again.`;
+    case 'bad-stop-count':
+      return `The model sent ${refusal.found} narration stops and this asks for between ${minStops} and ${maxStops}. Nothing was written. Try again.`;
+    case 'stop-file-unknown':
+      return `The model narrated a file it never sent (${refusal.file}). Nothing was written. Try again.`;
+    case 'bad-range':
+      return `The model pointed at lines that are not in ${refusal.file} — ${refusal.detail}. Nothing was written. Try again.`;
+    case 'unsafe-path':
+      return `The model asked for a file at a path this will not write (${refusal.path}): it ${refusal.detail}. Nothing was written.`;
+  }
 }
 
 // ── the reply ───────────────────────────────────────────────────────────────────────────────
@@ -580,7 +633,7 @@ export function parseDetourReply(raw: unknown): Detour | DetourRefusal {
     const content = stringOf(entry, 'content');
     if (content === null) return badShape(`files[${i}].content is ${describe(entry['content'])}, not a string`);
 
-    const unsafe = unsafePathReason(filePath);
+    const unsafe = unsafeDetourPathReason(filePath);
     if (unsafe !== null) return unsafePath(filePath, unsafe);
     // A repeated path means the second write silently replaces the first, and a stop naming it
     // addresses whichever won. Folded case too: one filesystem in three would merge them.
