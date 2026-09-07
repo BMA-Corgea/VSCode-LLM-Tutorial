@@ -9,6 +9,49 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A risk class scored from diff shape is scored from the wrong thing (T-6)
+
+T-6 carried `risk: low`, and the dispatcher spends that: a low-risk ticket's review seats drop
+a model tier and the package tells the reviewer to run a "light, proportional pass". On a
+5,945-line diff that shells out to an LLM CLI, reads the learner's *and* a reference repo's
+files into a prompt, and renders model output into a webview, that is the wrong instruction —
+AC5 of the same ticket is an escaping requirement, which is to say the ticket's own spec
+already said "untrusted output reaches a page".
+
+The label was not wrong by a notch; it was computed from the wrong input. Size and file count
+describe the *shape* of a diff. Risk comes from what the code **touches**: untrusted input,
+a rendering surface, a subprocess, a filesystem boundary, someone else's credentials or files.
+Score those, not the line count.
+
+Two operational notes that cost time here:
+
+- **`risk` is immutable after creation.** It is validated and set only in `tracker.mjs`'s
+  `create()`; no verb changes it later, and the ledger fence blocks editing the ticket file by
+  hand. Get it right at `new --risk`, because the only later remedy is to override the sizing
+  by hand at dispatch and record why.
+- **Overriding it by hand works but leaves no trace on the ticket.** The reviewers ran a full
+  pass because they were told to, not because the record said to. That instruction lives in the
+  review documents and here — not on T-6, which still reads `low`.
+
+## A rule people remember is not a guard (T-11, incident 2026-09-07)
+
+T-11 shipped the owner's-name scrub on 2026-09-05: `.autodev/` and `kb/days/` untracked and
+ignored, tracked docs reworded to "the owner", and `autodev/instructions/public-repo.md`
+written "for future sessions". Every part of that is a **convention** — it works exactly as
+long as whoever is typing remembers it.
+
+On 2026-09-07 a session wrote the owner's name into `kb/CURRENT-WORK.md`, a tracked file in the
+public repo, while recording an unrelated note. It was caught at commit time by the session
+re-reading its own diff against the convention. Nothing mechanical would have stopped it: no
+pre-commit hook, no CI check, no lint rule — the name would have been pushed.
+
+The lesson is about the shape of the fix, not the slip: **a scrub is a one-time state, a guard
+is a standing property.** T-11 delivered the state and documented the intent, which is why the
+repo is clean today; it did not deliver anything that keeps it clean tomorrow. Any rule whose
+enforcement is "a future session will remember" should be read as unenforced, and the cheap
+mechanical version — a pre-commit grep over tracked paths — is worth more than the document
+that asks for it.
+
 ## `git add <paths>` does not scope a commit (T-5)
 
 `git commit -m <subject>` with no pathspec commits **the whole index**, not the paths you just
