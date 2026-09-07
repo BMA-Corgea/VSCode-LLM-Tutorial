@@ -89,6 +89,7 @@ import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
+import { NOT_ONE_FILE } from '../src/tutor/context.js';
 import type { LlmChoice, LlmReply, TutorCore } from '../src/tutor/core.js';
 import { getTranscript } from '../src/tutor/transcript.js';
 import type { WalkSession } from '../src/walk/session.js';
@@ -108,6 +109,9 @@ const STEPS = {
   file: 'st-2-file-parse',
   /** `symbol`, target `src/api/routes.ts` — a different step with a different conversation. */
   handle: 'st-3-symbol-handle',
+  /** `shape`, target `src` — a DIRECTORY, exactly as repo-tour's real plans open every
+   *  chapter. The step the security review's finding 1 was found on. */
+  shape: 'st-1-shape-src',
 } as const;
 
 /** The fixture step's own question, quoted from `walk-fixtures.ts` rather than paraphrased:
@@ -321,13 +325,19 @@ function cannedReply(text: string): LlmReply {
 }
 
 /** A stand-in that records what the model was asked and answers with `text`. */
-async function recordingCore(text: string): Promise<{ calls: Sent[]; core: TutorCore }> {
+async function recordingCore(
+  text: string,
+  availability?: { ok: boolean; detail: string },
+): Promise<{ calls: Sent[]; core: TutorCore }> {
   const calls: Sent[] = [];
   const core = await coreWith({
     runLlm: (prompt, choice, cwd, timeoutMs) => {
       calls.push({ prompt, choice, cwd, timeoutMs });
       return Promise.resolve(cannedReply(text));
     },
+    // Given only when a test wants the provider to be UNREACHABLE — the refusal that is
+    // decided after the press, which is what makes it the merge bar's own scenario.
+    ...(availability ? { availability: () => Promise.resolve(availability) } : {}),
   });
   return { calls, core };
 }
@@ -524,7 +534,103 @@ suite('AC3 — the prompt is the core\'s own, and the step is really in it', () 
       'and the learner\'s file against the author\'s: a real `git diff --no-index` of the fixture target against the reference tree, carrying the one line only the author\'s copy has',
     );
     assert.ok(sent.prompt.includes('READER: Why is this its own file?'), 'and the question the learner actually typed, as the last turn of the conversation');
-    assert.equal(sent.cwd, target, 'the provider is run in the LEARNER\'s folder, never in the author\'s repository');
+    // Security review finding 3, through the surfaces that ship. It used to be `target`, with
+    // a comment saying so proudly — but the provider is an AGENT CLI, an agent CLI reads its
+    // configuration out of the directory it starts in, and T-5's `reproduceFiles` copies every
+    // `plan.reproduce` entry from an untrusted reference repo into that folder with no name
+    // allowlist (repo-tour's own inventory classifies `.claude/settings.json` and `.mcp.json`
+    // as `data`, which is the reproduce bucket). `cwd` buys the ask nothing — the whole prompt
+    // goes in on stdin — so it is now a fresh empty directory `AskLedger` made.
+    assert.notEqual(sent.cwd, target, 'never the learner\'s folder: an agent CLI reads its configuration out of the directory it starts in');
+    assert.ok(sent.cwd.startsWith(os.tmpdir()), 'a neutral scratch directory, and not the author\'s repository either');
+    assert.notEqual(sent.cwd, os.tmpdir(), 'and not the shared temp directory itself, which anyone on this machine can write into');
+    assert.deepEqual(fs.readdirSync(sent.cwd), [], 'empty — there is nothing in it for a CLI to read as configuration');
+  });
+
+  /**
+   * The review's merge bar, through the REAL panel: a refusal must not eat the question.
+   *
+   * `handleStepMessage` accepts the message and the SESSION refuses afterwards, so the page
+   * cannot know from the press alone whether the text is safe to throw away. The host's answer
+   * is `data-accepted` on the real markup — the question it actually sent — and its ABSENCE on
+   * every refusal is what leaves a minute of somebody's typing where they left it.
+   */
+  test('a refusal leaves no accepted-question marker on the page, and a real ask leaves one', async () => {
+    const { target } = newTutorial();
+    const { session, panel } = await openWalk(target);
+    const { core } = await recordingCore('Because a tokenizer has one job.', { ok: false, detail: 'claude: not found on PATH' });
+    await useCore(core);
+    await goTo(session, STEPS.file);
+
+    panel.dispatchForTest({ type: 'tutor:ask', payload: { text: 'Why is this its own file?' } });
+    await session.settled();
+
+    assert.equal(panel.getStateForTest()?.tutor?.accepted, undefined, 'nothing was sent, so the page keeps what they typed');
+    assert.ok(!tutorSection(panel).includes('data-accepted'), 'and the markup really carries no such marker');
+
+    const { core: working } = await recordingCore('Because a tokenizer has one job.');
+    await useCore(working);
+    panel.dispatchForTest({ type: 'tutor:ask', payload: { text: 'Why is this its own file?' } });
+    await session.settled();
+
+    assert.ok(tutorSection(panel).includes('data-accepted="Why is this its own file?"'),
+      'and the one path that really sends names the question, which is the signal the page drops its draft on');
+  });
+});
+
+/**
+ * The security review's finding 1 (HIGH), end to end, through the surfaces that actually ship.
+ *
+ * `test/unit/tutor-context.test.ts` pins the rule where it lives; this pins the PATH the
+ * reviewer drove — the registered panel, the registered session, the real `tutorContext` and
+ * the real `git` — because the whole finding was that every part of that path was working
+ * correctly and the learner's secrets still went out. A `shape` step is the first step of
+ * every chapter, its `target.file` is the chapter DIRECTORY, and `git diff --no-index` over
+ * two directories walks both trees, descends dot-directories and does not read `.gitignore`.
+ * No hostile plan is involved: this is the ordinary opening step with an ordinary `.env` in it.
+ */
+suite('a chapter\'s own directory is not something to send (security review, finding 1)', () => {
+  teardown(teardownTutor);
+
+  test('a `shape` step\'s ask carries no diff of the tree, and nothing the learner ignored', async () => {
+    const { target } = newTutorial();
+    // The two files the reviewer's run leaked, written the way a learner really would: named
+    // in their own `.gitignore`, inside the chapter the step is about.
+    fs.writeFileSync(path.join(target, '.gitignore'), 'src/.env\nsrc/scratch.txt\n');
+    fs.writeFileSync(path.join(target, 'src', '.env'), 'STRIPE_SECRET_KEY=sk_live_FIXTURE_NOT_A_REAL_KEY\n');
+    fs.writeFileSync(path.join(target, 'src', 'scratch.txt'), 'TODO: my db password is hunter2-FIXTURE\n');
+
+    const { session, panel } = await openWalk(target);
+    const { calls, core } = await recordingCore('Because each part earns its own folder.');
+    await useCore(core);
+    await goTo(session, STEPS.shape);
+
+    panel.dispatchForTest({ type: 'tutor:ask', payload: { text: 'What is supposed to go in here?' } });
+    await session.settled();
+
+    const sent = calls[0];
+    assert.ok(sent, 'the ask must have reached the injected runner');
+    assert.ok(!sent.prompt.includes('sk_live_FIXTURE_NOT_A_REAL_KEY'), 'a .gitignored .env reached the prompt, and would have been billed to send');
+    assert.ok(!sent.prompt.includes('hunter2-FIXTURE'), 'a .gitignored scratch file reached the prompt');
+    assert.ok(!sent.prompt.includes('diff --git '), 'no diff of a whole tree may be sent for a step whose target is a directory');
+    assert.ok(sent.prompt.includes(NOT_ONE_FILE), 'and the tutor is TOLD why it has no diff, rather than left to guess');
+    assert.ok(sent.prompt.includes('--- THE BUILD STEP ---'), 'the rest of the step is still there: the ask is answered, not refused');
+  });
+
+  test('the file steps in that same chapter still get their real diff', async () => {
+    // The control, and the reason the test above is not just "the tutor stopped working":
+    // the refusal is about what the target IS, not about this chapter or this reference tree.
+    const { target } = newTutorial();
+    const { session, panel } = await openWalk(target);
+    const { calls, core } = await recordingCore('Because a tokenizer has one job.');
+    await useCore(core);
+    await goTo(session, STEPS.file);
+
+    panel.dispatchForTest({ type: 'tutor:ask', payload: { text: 'Why is this its own file?' } });
+    await session.settled();
+
+    assert.ok(calls[0]?.prompt.includes(AUTHOR_ONLY_LINE), 'a step whose target is one file still sends git\'s own diff of it');
+    assert.ok(!calls[0]?.prompt.includes(NOT_ONE_FILE), 'and never the sentence that stands in for one');
   });
 });
 

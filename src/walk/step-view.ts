@@ -179,6 +179,11 @@ import type { AskMessage } from '../tutor/core.js';
 import { FALLBACK_DIAL, type OptionLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
 
+/** What `TutorView.spend` looks like once it has reached the page — named here so the two
+ *  functions that read it (`spendHtml` and `stepRenderKey`) share one shape rather than each
+ *  spelling out an inline object that could drift from the other. */
+type TutorSpendView = NonNullable<NonNullable<StepViewState['tutor']>['spend']>;
+
 /** Verbatim — a test asserts this exact phrase when `step.witness.sha` is `null`. */
 export const NO_HISTORY_MESSAGE = 'no history to show';
 
@@ -383,6 +388,10 @@ export const REPRODUCE_BUTTON_LABEL = 'Copy them in';
 export const TUTOR_HEADING = 'Ask the tutor';
 export const ASK_BUTTON_LABEL = 'Ask';
 export const CANCEL_BUTTON_LABEL = 'Cancel';
+/** The retention control's label (code review finding 6). "Forget" rather than "Clear",
+ *  because what it does is delete somebody's own words off their own disk and the verb should
+ *  say so. */
+export const CLEAR_BUTTON_LABEL = 'Forget this conversation';
 
 /**
  * The two speakers, named on the page rather than distinguished by colour alone.
@@ -408,6 +417,18 @@ export const ASK_PLACEHOLDER = 'Ask about this step — Enter sends, Shift+Enter
 /** What stands where the button was while an ask is in flight (AC4). Lower case and with the
  *  ellipsis, because it is a state and not a heading. */
 export const THINKING_MESSAGE = 'thinking…';
+
+/**
+ * What stands there during the PRE-FLIGHT — the availability probe and the diff — before
+ * anything has been sent (security review finding 5).
+ *
+ * The two halves of the wait are different promises. Until the ask is sent nothing has left
+ * this machine and nothing is being charged, and calling a fifteen-second `claude --version`
+ * "thinking…" would be a small lie told at the exact moment a learner is deciding whether the
+ * button worked at all. It ends in an ellipsis and lower case for the same reason
+ * `THINKING_MESSAGE` does: it is a state, not a heading.
+ */
+export const PREPARING_MESSAGE = 'getting ready to ask…';
 
 /**
  * How many turns of one step's conversation this panel draws, newest last.
@@ -601,6 +622,14 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .tutor-input:disabled { opacity:0.6; }
 .tutor-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .tutor-thinking { color:var(--muted); font-size:12px; }
+/* The live-ask-elsewhere line and the spend line are both news about MONEY, so they take the
+   note's colour rather than the muted one: a request that is billing right now, and what this
+   walk has paid, are not background information. btn-quiet is a secondary button — the
+   controls beside them stop something or delete something, and neither should read as the
+   primary action of the section, which is asking. */
+.tutor-elsewhere { color:var(--kw); font-size:12px; margin:0 0 8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.tutor-spend { color:var(--kw); font-size:12px; margin:10px 0 0; }
+.btn.btn-quiet { font-weight:400; opacity:0.85; }
 
 /* This page lives in a SIDEBAR, and everything on it is someone else's text — a docstring,
    a commit subject, a generated sentence. The real plan already ships a \`why\` that is a
@@ -611,7 +640,8 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 main, section, .option { min-width:0; }
 .step-head h1, .option-label, .option-consequence, .why-text, .why-source, .witness-text,
 .note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
-.write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty { overflow-wrap:anywhere; }
+.write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty,
+.tutor-elsewhere, .tutor-spend { overflow-wrap:anywhere; }
 
 /* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
    title and the skin picker stop competing for one line and 48px of horizontal padding
@@ -1082,20 +1112,147 @@ function tutorHtml(state: StepViewState): string {
   // of letting them write past it and be told afterwards. The host's half
   // (`handleStepMessage`) is not redundant — a `maxlength` is a courtesy to a person and never
   // a guarantee about a value arriving from a webview.
+  //
+  // `data-accepted` is the host telling this page which question it really SENT (code review
+  // findings 1 and 2). The script keeps the learner's draft until it matches — see
+  // `CLIENT_SCRIPT` — so a refusal decided after the press leaves the question in the box. It
+  // is the learner's own text going into an attribute, so `escapeAttr` rather than
+  // `escapeHtml`: this is the one place on this page where a `"` would matter.
+  const accepted = typeof tutor?.accepted === 'string' && tutor.accepted !== ''
+    ? ` data-accepted="${escapeAttr(planText(tutor.accepted, MAX_ASK_TEXT))}"`
+    : '';
   const input = `<textarea class="tutor-input" id="tutor-input" rows="3" maxlength="${MAX_ASK_TEXT}"`
-    + ` placeholder="${escapeAttr(ASK_PLACEHOLDER)}"${thinking ? ' disabled' : ''}></textarea>`;
+    + ` placeholder="${escapeAttr(ASK_PLACEHOLDER)}"${accepted}${thinking ? ' disabled' : ''}></textarea>`;
 
   const controls = thinking
-    ? `<span class="tutor-thinking" id="tutor-thinking">${escapeHtml(THINKING_MESSAGE)}</span>`
+    ? `<span class="tutor-thinking" id="tutor-thinking">${escapeHtml(waitingMessage(tutor?.stage))}</span>`
       + `<button type="button" class="btn" id="btn-tutor-cancel">${escapeHtml(CANCEL_BUTTON_LABEL)}</button>`
-    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
+    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`
+      + clearButtonHtml(state);
 
   return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
     + transcriptHtml(state.transcript)
     + note
     + unreachable
+    + elsewhereHtml(state)
     + `<div class="tutor-ask">${input}<div class="tutor-controls">${controls}</div></div>`
+    + spendHtml(tutor?.spend)
     + '</section>';
+}
+
+/**
+ * *Forget this conversation* — but only when there is one (code review finding 6).
+ *
+ * The control is absent rather than disabled on a step nobody has asked about, which is the
+ * same "a control that was never rendered cannot be pressed by accident" rule the options list
+ * and *Cancel* follow. It is also absent while an ask is in flight: deleting the conversation
+ * a question is at that moment being answered into is a race with nothing to gain, and *Cancel*
+ * is the control that belongs there.
+ */
+function clearButtonHtml(state: StepViewState): string {
+  const turns = Array.isArray(state.transcript) ? state.transcript.length : 0;
+  if (turns === 0) return '';
+  return `<button type="button" class="btn btn-quiet" id="btn-tutor-clear">${escapeHtml(CLEAR_BUTTON_LABEL)}</button>`;
+}
+
+/**
+ * A live ask on a step the learner is not looking at, with a control that really stops it
+ * (code review finding 3).
+ *
+ * The old page said "press Cancel" on a step whose markup has no *Cancel* in it: `thinking` is
+ * per-step, so navigating away mid-ask left a billing request with no control anywhere in the
+ * UI to stop it. The button here posts the same `tutor:cancel` — the session's cancel goes
+ * through `AskLedger.abandonAll()`, which reaches every live ask rather than the one the page
+ * happens to know about — and the sentence names the step rather than pointing at a control
+ * the learner cannot see.
+ */
+function elsewhereHtml(state: StepViewState): string {
+  const away = state.tutor?.elsewhere;
+  if (!away || typeof away.stepId !== 'string') return '';
+  const steps = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+  const index = steps.findIndex((s) => s?.id === away.stepId);
+  const where = index >= 0 ? `step ${index + 1}` : 'another step';
+  const what = away.stage === 'sending'
+    ? `A question you asked on ${where} is still with the tutor, and it is still being billed.`
+    : `A question you asked on ${where} is still being prepared — nothing has been sent yet.`;
+  return `<p class="tutor-elsewhere" id="tutor-elsewhere">${escapeHtml(what)} `
+    + `<button type="button" class="btn btn-quiet" id="btn-tutor-cancel-elsewhere">${escapeHtml(CANCEL_BUTTON_LABEL)}</button></p>`;
+}
+
+/**
+ * What this walk has spent — the half of `AskCost` that was computed on every reply and drawn
+ * nowhere (code review finding 5).
+ *
+ * **`metered: false` is rendered as UNKNOWN, never as zero.** `src/tutor/core.ts` is emphatic
+ * about it and so is `AskCost`: a provider that cannot report what it spent says so with a
+ * flag, and a panel showing `$0.00` to somebody who was in fact billed is the dishonest half of
+ * carrying the numbers at all. So a walk whose provider does not meter gets a sentence saying
+ * how many answers it has paid for and that nobody reported the price — which is the true
+ * statement — rather than a total.
+ *
+ * `unwatched` is the money half of the cancel story (code review finding 10): a request the
+ * learner stopped waiting for is still running and still costing them, and this is where that
+ * is said out loud rather than only in the note that scrolls away.
+ */
+function spendHtml(spend: TutorSpendView | undefined): string {
+  if (!spend) return '';
+  // Total, like every other lookup on this page (T-4 security review, finding 5): a throw from
+  // inside a render takes down a PUSH rather than merely a paragraph, and `stepRenderKey` reads
+  // the same fields on every push to decide whether to paint at all. The numbers are the
+  // ledger's own and are already guarded there — this is the same rule applied twice, which is
+  // what the rest of this file does with plan text.
+  const replies = counted(spend.replies);
+  const sending = counted(spend.sending);
+  const unwatched = counted(spend.unwatched);
+  const lines: string[] = [];
+
+  if (replies > 0) {
+    const answers = `${replies} ${replies === 1 ? 'answer' : 'answers'}`;
+    lines.push(spend.metered === true
+      ? `This walk has spent ${formatUsd(spend.usd)} on ${answers} — ${counted(spend.inputTokens).toLocaleString('en-US')} tokens in, ${counted(spend.outputTokens).toLocaleString('en-US')} out.`
+      : `This walk has paid for ${answers}. Your provider does not report what they cost, so this is not a total — it is a count.`);
+  }
+  if (sending > 0) {
+    const requests = `${sending} ${sending === 1 ? 'request is' : 'requests are'}`;
+    lines.push(unwatched > 0
+      ? `${requests} with the tutor right now, and ${unwatched === sending ? (unwatched === 1 ? 'it is one you stopped waiting for' : 'they are ones you stopped waiting for') : `${unwatched} of them you stopped waiting for`} — still running, still billing.`
+      : `${requests} with the tutor right now.`);
+  } else if (counted(spend.preparing) > 0) {
+    lines.push('A question is being prepared. Nothing has been sent yet, so nothing is being charged.');
+  }
+
+  if (lines.length === 0) return '';
+  return `<p class="tutor-spend" id="tutor-spend">${lines.map((line) => escapeHtml(line)).join(' ')}</p>`;
+}
+
+/** A count this page is willing to print. Anything that is not a finite number is zero, which
+ *  reads as "nothing to report" — the honest answer, and never a `NaN` on the page. */
+function counted(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * A dollar figure with enough places to be true.
+ *
+ * One question costs fractions of a cent, and `$0.00` next to an answer somebody paid for is
+ * the exact sentence this whole section exists not to print — so small amounts keep four
+ * decimal places, and anything under a hundredth of a cent says so in words rather than
+ * rounding itself away to nothing.
+ */
+function formatUsd(usd: unknown): string {
+  if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0) return 'an amount the provider did not report';
+  if (usd === 0) return 'nothing the provider could put a price on';
+  if (usd < 0.0001) return 'less than $0.0001';
+  return `$${usd < 1 ? usd.toFixed(4) : usd.toFixed(2)}`;
+}
+
+/** What stands where the button was, told apart by which half of the wait it is (AC4, and
+ *  security review finding 5 — a fifteen-second `claude --version` probe described as
+ *  "thinking…" is a small lie at the exact moment somebody is deciding whether the button
+ *  worked). A missing stage reads as the model call, which is what `thinking` used to mean on
+ *  its own and is the safe way round: it never under-claims what is being spent. */
+function waitingMessage(stage: unknown): string {
+  return stage === 'preparing' ? PREPARING_MESSAGE : THINKING_MESSAGE;
 }
 
 function bodyHtml(state: StepViewState, skins: SkinsModule): string {
@@ -1195,7 +1352,25 @@ const CLIENT_SCRIPT = `
   // here than the note does: the panel REPAINTS when the transcript grows, which is exactly
   // the moment the tutor answers, which is exactly when a learner is most likely to be typing
   // their follow-up. Without this, every answer would delete the next question.
+  //
+  // ── The draft is dropped ONLY when the host says it took the question ──────────────────
+  //
+  // This used to clear on the press, and that destroyed the learner's question on every path
+  // that refuses AFTER the press — an unreachable provider, no request.json, a core that will
+  // not load, one ask already in flight. On a machine with no \`claude\` it was the first thing
+  // the tutor ever did: gone from the box, gone from this blob, and deliberately not in the
+  // transcript. It was nowhere.
+  //
+  // \`data-accepted\` is the host naming the question it really SENT. Compared rather than
+  // merely present, because it survives the answer's repaint too: on the page that draws the
+  // reply the attribute still holds that question, and re-applying the draft there would show
+  // the learner their question twice — once in the conversation and once in the box.
   var inputEl = document.getElementById('tutor-input');
+  var acceptedText = inputEl ? inputEl.getAttribute('data-accepted') : null;
+  if (savedDraft && acceptedText !== null && acceptedText === savedDraft) {
+    savedDraft = '';
+    persist();
+  }
   if (inputEl && savedDraft) { inputEl.value = savedDraft; }
 
   function on(id, type, handler) {
@@ -1221,23 +1396,29 @@ const CLIENT_SCRIPT = `
    * a button that quietly does nothing is the one thing this project's conventions rule out.
    * Guarding it here would make that sentence unreachable and turn the control silent again.
    *
-   * The draft is cleared BEFORE the post, not after: the text is about to become a turn in the
-   * transcript, the repaint that draws it will rebuild this box empty, and a saved draft left
-   * behind would then be re-applied on top and the learner would find their question typed
-   * twice — once in the conversation and once in the box.
+   * The question is KEPT — in the box and in the saved blob — until the host says it took it.
+   * The host can refuse after this press (an unreachable provider, no request.json, a core
+   * that will not load, one ask already in flight), and a page that had already thrown the
+   * text away would be telling somebody their question was refused beside an empty box. The
+   * saving is what matters: the acceptance arrives with a REPAINT, which tears this iframe
+   * down, so the draft has to survive in \`setState\` and be dropped by the page that comes
+   * back — see the \`data-accepted\` comparison at the top of this script.
    */
   function askTutor() {
     var box = document.getElementById('tutor-input');
     if (!box) { return; }
     var text = box.value;
-    box.value = '';
-    savedDraft = '';
+    savedDraft = text;
     persist();
     post('tutor:ask', { text: text });
   }
 
   on('btn-tutor-ask', 'click', askTutor);
   on('btn-tutor-cancel', 'click', function () { post('tutor:cancel', {}); });
+  // The same message from the line about an ask on ANOTHER step: the host's cancel goes
+  // through the ledger and stops every live request, so one message is the whole control.
+  on('btn-tutor-cancel-elsewhere', 'click', function () { post('tutor:cancel', {}); });
+  on('btn-tutor-clear', 'click', function () { post('tutor:clear', {}); });
 
   // Enter sends, Shift+Enter makes a newline — sql-gauntlet's pattern, which the owner asked
   // for by name. Every other key falls straight through, so nothing here interferes with
@@ -1502,14 +1683,43 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
         ]
       : null,
     state.reproduce ? [state.reproduce.count, state.reproduce.done] : null,
-    // ── T-6: the tutor. Every one of these four is drawn by `tutorHtml`, and every one of
-    // them is a "stored on the host and never shown" bug if it is dropped from here. The
-    // thinking state is the worst of the four to lose: the *Ask* button would go on looking
-    // pressable while a question was in flight, and the answer would appear only when
-    // something else forced a repaint — which reads exactly like a tutor that ignores you.
+    // ── T-6: the tutor. Every one of these is drawn by `tutorHtml`, and every one of them is
+    // a "stored on the host and never shown" bug if it is dropped from here. The thinking
+    // state is the worst to lose: the *Ask* button would go on looking pressable while a
+    // question was in flight, and the answer would appear only when something else forced a
+    // repaint — which reads exactly like a tutor that ignores you.
+    //
+    // The four fields the review pass added — `stage`, `elsewhere`, `spend`, `accepted` —
+    // are here for the same reason and NOT because the list looked short. Each of them
+    // changes the page, so each of them must move the key, and `stepRenderKey — every field
+    // the page draws moves the repaint key` proves it one field at a time. `accepted` is the
+    // subtle one: it is drawn as an ATTRIBUTE rather than as text, and an attribute the
+    // client script reads is exactly as load-bearing as a paragraph it does not.
+    //
+    // `spend` is bounded by construction — eight numbers and a boolean, none of them a
+    // string — so it needs no `keyOf`.
     keyOfTranscript(state.transcript),
     state.tutor
-      ? [state.tutor.thinking, keyOf(state.tutor.unreachable ?? null), keyOf(state.tutor.note ?? null, MAX_PLAN_TEXT)]
+      ? [
+          state.tutor.thinking,
+          keyOf(state.tutor.unreachable ?? null),
+          keyOf(state.tutor.note ?? null, MAX_PLAN_TEXT),
+          state.tutor.stage ?? null,
+          state.tutor.elsewhere ? [keyOf(state.tutor.elsewhere.stepId), state.tutor.elsewhere.stage] : null,
+          state.tutor.spend
+            ? [
+                state.tutor.spend.preparing,
+                state.tutor.spend.sending,
+                state.tutor.spend.unwatched,
+                state.tutor.spend.replies,
+                state.tutor.spend.inputTokens,
+                state.tutor.spend.outputTokens,
+                state.tutor.spend.usd,
+                state.tutor.spend.metered,
+              ]
+            : null,
+          keyOf(state.tutor.accepted ?? null, MAX_ASK_TEXT),
+        ]
       : null,
     keyOfList<SkinRow | undefined>(skins.SKINS, MAX_LIST_ROWS, (row) => [keyOf(row?.name), keyOf(row?.label), keyOf(row?.note)]),
   ]);

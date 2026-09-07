@@ -59,6 +59,7 @@ import {
   SHAPE_NOTE_MESSAGE, T10_BADGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
+  CLEAR_BUTTON_LABEL, PREPARING_MESSAGE,
   optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey,
   stepScript, turnsOmittedMessage,
 } from '../../src/walk/step-view.js';
@@ -200,6 +201,7 @@ function recordingEffects(): { effects: StepEffects; asked: string[] } {
     persistSkin: () => undefined,
     ask: (text) => { asked.push(text); },
     cancelAsk: () => undefined,
+    clearConversation: () => undefined,
   };
   return { effects, asked };
 }
@@ -787,6 +789,10 @@ const ELEMENT_IDS = [
   // they render would not have had — the harness pre-creates every id it knows about, and a
   // real browser simply answers `null`.
   'tutor-input', 'btn-tutor-ask', 'btn-tutor-cancel',
+  // The T-6 review's three. Each is on the page only in one state — a live ask on ANOTHER
+  // step, and a conversation with something in it — so the tests that care about their absence
+  // delete them, exactly as the two above.
+  'btn-tutor-cancel-elsewhere', 'btn-tutor-clear',
 ];
 
 /** `saved` seeds what `getState()` returns BEFORE the script loads — the view-scoped blob a
@@ -848,6 +854,19 @@ function runScript(dom: ReturnType<typeof buildFakeDom>, state: StepViewState): 
   const noteMatch = /<div class="note" id="step-note">([\s\S]*?)<\/div>/.exec(html);
   assert.ok(noteMatch, 'the page should render the note node');
   dom.elements.get('step-note')!.textContent = noteMatch[1]!;
+
+  // T-6 review: the third value copied out of the real markup, for the same reason as the
+  // other two — in a browser the script reads it off the page it was shipped inside. This one
+  // is the host telling the page which question it actually SENT, and the whole of "a refusal
+  // does not eat the learner's question" turns on the script seeing it (or not).
+  const acceptedMatch = /<textarea class="tutor-input"[^>]*\sdata-accepted="([^"]*)"/.exec(html);
+  const inputNode = dom.elements.get('tutor-input');
+  if (acceptedMatch && inputNode) {
+    // Through the same unescaping a browser does, so a question with a `&` or a `"` in it is
+    // compared as the learner typed it rather than as the attribute spells it.
+    inputNode.setAttribute('data-accepted', acceptedMatch[1]!
+      .replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&'));
+  }
 
   const [, code] = /<script[^>]*>([\s\S]*?)<\/script>/.exec(html) ?? [];
   assert.ok(code, 'renderStepHtml should inline a <script> block');
@@ -1043,7 +1062,13 @@ suite('the tutor\'s own client script, executed against the fake DOM (AC2, AC4, 
     // accepts fails here rather than silently, in a webview, on the one control that spends
     // the learner's money.
     assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'tutor:ask', payload: { text: 'Why not keep it inline?' } });
-    assert.equal(dom.elements.get('tutor-input')!.value, '', 'the box is emptied — the question is about to be a turn in the transcript');
+    // NOT emptied. The host can still refuse this press — an unreachable provider, no
+    // request.json, a core that will not load, one ask already in flight — and a page that had
+    // already thrown the text away would be telling somebody their question was refused beside
+    // an empty box. It goes when the host says it took it: see the `data-accepted` tests below.
+    assert.equal(dom.elements.get('tutor-input')!.value, 'Why not keep it inline?', 'the question stays until the host says it took it');
+    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: 'Why not keep it inline?' },
+      'and it is SAVED, because the acceptance arrives with a repaint that tears this page down');
   });
 
   test('an EMPTY box still posts — the host owns the refusal, not this script', () => {
@@ -1228,10 +1253,10 @@ suite('the tutor\'s DRAFT survives the repaint that answering causes (AC5)', () 
     });
   });
 
-  test('pressing Ask clears the saved draft as well as the box', () => {
-    // Before the post, not after: the text is about to become a turn, the repaint that draws
-    // it rebuilds the box empty, and a draft left behind would be re-applied on top — the
-    // learner would find their question typed twice, once in the conversation and once below.
+  test('pressing Ask KEEPS the saved draft — the host has not accepted it yet', () => {
+    // The merge bar of the first review pass, from the page's side. Clearing on the press
+    // destroyed the question on all four of the paths that refuse AFTER it, and on a machine
+    // with no `claude` that was the first thing the tutor ever did.
     const dom = buildFakeDom();
     runScript(dom, stateAt('st-2-file-parse'));
 
@@ -1239,8 +1264,8 @@ suite('the tutor\'s DRAFT survives the repaint that answering causes (AC5)', () 
     dom.elements.get('tutor-input')!.dispatch('input');
     dom.elements.get('btn-tutor-ask')!.dispatch('click');
 
-    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: '' });
-    assert.deepEqual(dom.posted, [{ type: 'tutor:ask', payload: { text: 'why?' } }], 'and the question really was sent before it was forgotten');
+    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: 'why?' });
+    assert.deepEqual(dom.posted, [{ type: 'tutor:ask', payload: { text: 'why?' } }], 'and the question really was sent');
   });
 });
 
@@ -2176,7 +2201,73 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
       pair('state.tutor.note changing', { tutor: { thinking: false, note: 'the tutor did not answer in time' } }, {
         tutor: { thinking: false, note: 'you stopped waiting' },
       }),
+
+      // ── The T-6 REVIEW's four. The reviewer proved this key complete with no off-by-one
+      // over twelve mutations, and that proof does not survive a new rendered field for free:
+      // anything drawn and not keyed is stored and never shown, and fails no other test in
+      // this file. `accepted` is the subtle one — it is drawn as an ATTRIBUTE the client
+      // script reads, which is exactly as load-bearing as a paragraph it does not. ──
+      pair('state.tutor.stage appearing', { tutor: { thinking: true } }, { tutor: { thinking: true, stage: 'preparing' } }),
+      pair('state.tutor.stage changing', { tutor: { thinking: true, stage: 'preparing' } }, { tutor: { thinking: true, stage: 'sending' } }),
+      pair('state.tutor.elsewhere appearing', { tutor: { thinking: false } }, {
+        tutor: { thinking: false, elsewhere: { stepId: 'st-2-file-parse', stage: 'sending' } },
+      }),
+      pair('state.tutor.elsewhere step', {
+        tutor: { thinking: false, elsewhere: { stepId: 'st-2-file-parse', stage: 'sending' } },
+      }, {
+        tutor: { thinking: false, elsewhere: { stepId: 'st-4-symbol-render', stage: 'sending' } },
+      }),
+      pair('state.tutor.elsewhere stage', {
+        tutor: { thinking: false, elsewhere: { stepId: 'st-2-file-parse', stage: 'sending' } },
+      }, {
+        tutor: { thinking: false, elsewhere: { stepId: 'st-2-file-parse', stage: 'preparing' } },
+      }),
+      pair('state.tutor.spend appearing', { tutor: { thinking: false } }, { tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.01, metered: true }) } }),
+      pair('state.tutor.spend usd', {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.01, metered: true }) },
+      }, {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.02, metered: true }) },
+      }),
+      pair('state.tutor.spend metered', {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0, metered: true }) },
+      }, {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0, metered: false }) },
+      }),
+      pair('state.tutor.spend replies', {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.01, metered: true }) },
+      }, {
+        tutor: { thinking: false, spend: spend({ replies: 2, usd: 0.01, metered: true }) },
+      }),
+      pair('state.tutor.spend inputTokens', {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.01, inputTokens: 10, metered: true }) },
+      }, {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.01, inputTokens: 20, metered: true }) },
+      }),
+      pair('state.tutor.spend outputTokens', {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.01, outputTokens: 3, metered: true }) },
+      }, {
+        tutor: { thinking: false, spend: spend({ replies: 1, usd: 0.01, outputTokens: 4, metered: true }) },
+      }),
+      pair('state.tutor.spend sending', { tutor: { thinking: true, spend: spend({ sending: 1 }) } }, { tutor: { thinking: true, spend: spend({ sending: 2 }) } }),
+      pair('state.tutor.spend unwatched', {
+        tutor: { thinking: true, spend: spend({ sending: 2, unwatched: 0 }) },
+      }, {
+        tutor: { thinking: true, spend: spend({ sending: 2, unwatched: 1 }) },
+      }),
+      pair('state.tutor.spend preparing', { tutor: { thinking: true, stage: 'preparing', spend: spend({}) } }, { tutor: { thinking: true, stage: 'preparing', spend: spend({ preparing: 1 }) } }),
+      pair('state.tutor.accepted appearing', { tutor: { thinking: false } }, { tutor: { thinking: false, accepted: 'why?' } }),
+      pair('state.tutor.accepted changing', { tutor: { thinking: false, accepted: 'why?' } }, { tutor: { thinking: false, accepted: 'why not?' } }),
+
+      // `transcript` is what puts *Forget this conversation* on the page, so the control's
+      // appearance is already keyed — but only as a side effect of a field that was keyed for
+      // another reason, which is exactly the kind of coverage that quietly stops being true.
+      pair('the clear control appearing with the first turn', { transcript: [] }, { transcript: turns(['user', 'why?']) }),
     ];
+  }
+
+  /** A whole `AskSpend`, so a mutation can name the ONE number it is changing. */
+  function spend(over: Partial<NonNullable<NonNullable<StepViewState['tutor']>['spend']>>): NonNullable<NonNullable<StepViewState['tutor']>['spend']> {
+    return { preparing: 0, sending: 0, unwatched: 0, replies: 0, inputTokens: 0, outputTokens: 0, usd: 0, metered: false, ...over };
   }
 
   test('changing one drawn field changes the key AND the page — every field, one at a time', () => {
@@ -2199,7 +2290,14 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
       writeNote: 'the reference file was written',
       reproduce: { count: 4, done: false },
       transcript: turns(['user', 'why?'], ['assistant', 'because']),
-      tutor: { thinking: false, unreachable: 'not found on PATH', note: 'you stopped waiting' },
+      tutor: {
+        thinking: false,
+        unreachable: 'not found on PATH',
+        note: 'you stopped waiting',
+        elsewhere: { stepId: 'st-4-symbol-render', stage: 'sending' },
+        spend: { preparing: 0, sending: 1, unwatched: 1, replies: 2, inputTokens: 90, outputTokens: 12, usd: 0.004, metered: true },
+        accepted: 'why?',
+      },
     });
     const state = stateAt('st-2-file-parse', everything());
     assert.equal(stepRenderKey(state, FAKE_SKINS), stepRenderKey(stateAt('st-2-file-parse', everything()), FAKE_SKINS),
@@ -2248,5 +2346,222 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
     state.step.decision.options = poison({ 0: { id: 'author' } });
     assert.doesNotThrow(() => stepRenderKey(state, FAKE_SKINS));
     assert.doesNotThrow(() => stepRenderKey(stateAt('st-2-file-parse'), poison({ ...FAKE_SKINS, SKINS: null })));
+  });
+});
+
+// ── T-6 review: the page's half of the cost-and-abort control surface ──────────────────────
+
+suite('the tutor\'s DRAFT survives a REFUSAL — the review\'s merge bar, from the page', () => {
+  /**
+   * `askTutor()` used to do `box.value = ''; savedDraft = ''; persist()` BEFORE it posted, so
+   * the four refusals the host decides after the press each destroyed the learner's question:
+   * gone from the box, gone from the saved blob, and deliberately not in the transcript. It
+   * was nowhere. On a machine with no `claude` it was the first thing the tutor ever did.
+   *
+   * The page now keeps the draft until the host names the question it actually sent
+   * (`data-accepted`), so these two tests are the two directions of that one comparison.
+   */
+  test('a refused press leaves the question in the box, with the reason beside it', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-2-file-parse'));
+    dom.elements.get('tutor-input')!.value = 'why does the tokenizer get its own module?';
+    dom.elements.get('tutor-input')!.dispatch('input');
+    dom.elements.get('btn-tutor-ask')!.dispatch('click');
+
+    // The host refuses and repaints — an unreachable provider, say. The page that comes back
+    // has a note and NO `data-accepted`, because nothing was sent.
+    const refused = buildFakeDom(dom.states[dom.states.length - 1]);
+    runScript(refused, stateAt('st-2-file-parse', {
+      tutor: { thinking: false, unreachable: 'claude: not found on PATH', note: 'nothing was asked and nothing was charged. Your question is still in the box.' },
+    }));
+
+    assert.equal(refused.elements.get('tutor-input')!.value, 'why does the tokenizer get its own module?',
+      'a minute of somebody\'s typing, still there');
+    assert.deepEqual(refused.states[refused.states.length - 1] ?? refused.states[0], {
+      stepId: 'st-2-file-parse', note: '', draft: 'why does the tokenizer get its own module?',
+    }, 'and still saved, so the next repaint keeps it too');
+  });
+
+  test('an ACCEPTED press drops the draft, so the question is not typed twice', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-2-file-parse'));
+    dom.elements.get('tutor-input')!.value = 'why?';
+    dom.elements.get('tutor-input')!.dispatch('input');
+    dom.elements.get('btn-tutor-ask')!.dispatch('click');
+
+    // The host accepted it: the repaint that raises the spinner names the question it sent.
+    const accepted = buildFakeDom(dom.states[dom.states.length - 1]);
+    runScript(accepted, stateAt('st-2-file-parse', {
+      transcript: turns(['user', 'why?']),
+      tutor: { thinking: true, stage: 'sending', accepted: 'why?' },
+    }));
+
+    assert.equal(accepted.elements.get('tutor-input')!.value, '', 'it is a turn in the conversation now, not a draft');
+    assert.deepEqual(accepted.states[accepted.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: '' });
+  });
+
+  test('a DIFFERENT question being accepted does not drop this draft', () => {
+    // The comparison is what makes this safe on the one path where the host accepts one
+    // question and refuses another: an ask already in flight.
+    const dom = buildFakeDom({ stepId: 'st-2-file-parse', note: '', draft: 'second?' });
+    runScript(dom, stateAt('st-2-file-parse', {
+      transcript: turns(['user', 'first?']),
+      tutor: { thinking: true, stage: 'sending', accepted: 'first?', note: 'One question is already with the tutor.' },
+    }));
+
+    assert.equal(dom.elements.get('tutor-input')!.value, 'second?');
+  });
+
+  test('the draft survives the answer\'s repaint too, when it is a NEW question', () => {
+    // The bug the draft was added for in the first place, re-proved against the new signal:
+    // the panel repaints when the transcript grows, which is exactly when a learner is typing
+    // their follow-up.
+    const dom = buildFakeDom({ stepId: 'st-2-file-parse', note: '', draft: 'and what about handle?' });
+    runScript(dom, stateAt('st-2-file-parse', {
+      transcript: turns(['user', 'why?'], ['assistant', 'because']),
+      tutor: { thinking: false, accepted: 'why?' },
+    }));
+
+    assert.equal(dom.elements.get('tutor-input')!.value, 'and what about handle?');
+  });
+
+  test('the accepted question is rendered as an ATTRIBUTE, and escaped as one', () => {
+    // The one place on this page where a `"` matters: everything else the tutor draws lands in
+    // a text node, which is why `escapeHtml` not escaping quotes is fine everywhere else.
+    const html = renderStepHtml(stateAt('st-2-file-parse', {
+      tutor: { thinking: false, accepted: 'why " onmouseover="alert(1) ?' },
+    }), FAKE_SKINS);
+
+    assert.ok(!/data-accepted="why " onmouseover=/.test(html), 'the attribute must not be breakable');
+    assert.ok(html.includes('data-accepted="why &quot; onmouseover=&quot;alert(1) ?"'));
+    assert.deepEqual(tags(tutorSection(html)).filter((tag) => tag.startsWith('<img') || tag.startsWith('<script')), []);
+  });
+});
+
+suite('renderStepHtml — the tutor\'s new controls and what they cost (findings 3, 5, 6, and security 5)', () => {
+  test('the pre-flight says it is getting ready, not that anything is thinking', () => {
+    const preparing = tutorSection(renderStepHtml(stateAt('st-2-file-parse', { tutor: { thinking: true, stage: 'preparing' } }), FAKE_SKINS));
+    assert.ok(preparing.includes(escapeForHtml(PREPARING_MESSAGE)), 'nothing has been sent yet, and describing a `claude --version` probe as "thinking" is a small lie');
+    assert.ok(!preparing.includes(THINKING_MESSAGE));
+    assert.ok(preparing.includes('id="btn-tutor-cancel"'), 'and it is interruptible, which is the whole of security review finding 5');
+
+    const sending = tutorSection(renderStepHtml(stateAt('st-2-file-parse', { tutor: { thinking: true, stage: 'sending' } }), FAKE_SKINS));
+    assert.ok(sending.includes(escapeForHtml(THINKING_MESSAGE)));
+  });
+
+  test('a live ask on another step is named, with a control that can actually stop it', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-3-symbol-handle', {
+      tutor: { thinking: false, elsewhere: { stepId: 'st-2-file-parse', stage: 'sending' } },
+    }), FAKE_SKINS));
+
+    assert.ok(section.includes('id="tutor-elsewhere"'));
+    assert.match(section, /step 2/, 'the step it belongs to, by ordinal — the old page pointed at a Cancel that was not on it');
+    assert.match(section, /still being billed/);
+    assert.ok(section.includes('id="btn-tutor-cancel-elsewhere"'));
+  });
+
+  test('and that control posts the same tutor:cancel the host already accepts', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-3-symbol-handle', {
+      tutor: { thinking: false, elsewhere: { stepId: 'st-2-file-parse', stage: 'sending' } },
+    }));
+    dom.elements.get('btn-tutor-cancel-elsewhere')!.dispatch('click');
+
+    assert.deepEqual(dom.posted, [{ type: 'tutor:cancel', payload: {} }]);
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'tutor:cancel' });
+  });
+
+  test('an elsewhere line for a step this plan does not have says "another step" rather than a raw id', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      tutor: { thinking: false, elsewhere: { stepId: 'st-99-invented', stage: 'preparing' } },
+    }), FAKE_SKINS));
+
+    assert.match(section, /another step/);
+    assert.match(section, /nothing has been sent yet/);
+  });
+
+  test('a metered spend is a figure with enough places to be true', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      tutor: { thinking: false, spend: { preparing: 0, sending: 0, unwatched: 0, replies: 3, inputTokens: 2400, outputTokens: 310, usd: 0.0123, metered: true } },
+    }), FAKE_SKINS));
+
+    assert.ok(section.includes('id="tutor-spend"'));
+    assert.match(section, /\$0\.0123/, 'one question costs fractions of a cent, so two decimal places would round the whole thing away');
+    assert.match(section, /3 answers/);
+    assert.match(section, /2,400 tokens in/);
+  });
+
+  test('an UNMETERED spend never renders $0.00 — the dishonest half of carrying the numbers', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      tutor: { thinking: false, spend: { preparing: 0, sending: 0, unwatched: 0, replies: 2, inputTokens: 0, outputTokens: 0, usd: 0, metered: false } },
+    }), FAKE_SKINS));
+
+    assert.ok(!section.includes('$0.00'), '`metered: false` means UNKNOWN, and a learner who was in fact billed must never read a zero');
+    assert.ok(!section.includes('$'), 'no figure at all, because there is no figure');
+    assert.match(section, /2 answers/);
+    assert.match(section, /does not report what they cost/);
+  });
+
+  test('a request the learner stopped waiting for is still said to be billing (finding 10)', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      tutor: { thinking: true, stage: 'sending', spend: { preparing: 0, sending: 2, unwatched: 1, replies: 0, inputTokens: 0, outputTokens: 0, usd: 0, metered: false } },
+    }), FAKE_SKINS));
+
+    assert.match(section, /2 requests are with the tutor right now/);
+    assert.match(section, /1 of them you stopped waiting for/);
+    assert.match(section, /still running, still billing/);
+  });
+
+  test('the pre-flight says explicitly that nothing is being charged yet', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      tutor: { thinking: true, stage: 'preparing', spend: { preparing: 1, sending: 0, unwatched: 0, replies: 0, inputTokens: 0, outputTokens: 0, usd: 0, metered: false } },
+    }), FAKE_SKINS));
+
+    assert.match(section, /Nothing has been sent yet, so nothing is being charged/);
+  });
+
+  test('a walk that has spent nothing and has nothing in the air draws no spend line at all', () => {
+    const section = tutorSection(renderStepHtml(stateAt('st-2-file-parse', { tutor: { thinking: false } }), FAKE_SKINS));
+    assert.ok(!section.includes('id="tutor-spend"'), 'an empty box saying nothing is worse than no box');
+  });
+
+  test('Forget this conversation appears only when there IS one, and never mid-ask', () => {
+    const empty = tutorSection(renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS));
+    assert.ok(!empty.includes('id="btn-tutor-clear"'), 'a control that was never rendered cannot be pressed by accident');
+
+    const withTurns = tutorSection(renderStepHtml(stateAt('st-2-file-parse', { transcript: turns(['user', 'why?']) }), FAKE_SKINS));
+    assert.ok(withTurns.includes('id="btn-tutor-clear"'));
+    assert.ok(withTurns.includes(escapeForHtml(CLEAR_BUTTON_LABEL)));
+
+    const asking = tutorSection(renderStepHtml(stateAt('st-2-file-parse', {
+      transcript: turns(['user', 'why?']), tutor: { thinking: true, stage: 'sending' },
+    }), FAKE_SKINS));
+    assert.ok(!asking.includes('id="btn-tutor-clear"'), 'deleting the conversation an answer is landing in is a race with nothing to gain');
+  });
+
+  test('it posts tutor:clear, and the host accepts it', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-2-file-parse', { transcript: turns(['user', 'why?']) }));
+    dom.elements.get('btn-tutor-clear')!.dispatch('click');
+
+    assert.deepEqual(dom.posted, [{ type: 'tutor:clear', payload: {} }]);
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'tutor:clear' });
+  });
+});
+
+suite('renderStepHtml — the spend line is TOTAL, like every other lookup on this page', () => {
+  test('a spend block full of nonsense renders rather than throwing a push down', () => {
+    // T-4 security review finding 5's family: a throw from inside a render takes down a PUSH,
+    // and the panel stops updating with nothing to say why. The numbers here are the ledger's
+    // own — this is the same guard applied a second time, where the drawing happens.
+    const state = stateAt('st-2-file-parse', {
+      tutor: { thinking: false, spend: poison({ replies: '3', usd: null, inputTokens: undefined, outputTokens: {}, sending: NaN, unwatched: [], preparing: 'x', metered: 'yes' }) },
+    });
+
+    assert.doesNotThrow(() => renderStepHtml(state, FAKE_SKINS));
+    assert.doesNotThrow(() => stepRenderKey(state, FAKE_SKINS));
+    const section = tutorSection(renderStepHtml(state, FAKE_SKINS));
+    assert.ok(!section.includes('NaN'), 'and never a NaN on somebody\'s page');
+    assert.ok(!section.includes('$0.00'));
   });
 });

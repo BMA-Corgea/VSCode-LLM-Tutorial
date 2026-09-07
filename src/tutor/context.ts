@@ -15,7 +15,7 @@
  *
  * **No `vscode` import, value or type.** `esbuild.mjs`'s `test/unit/*.test.ts` bundle marks
  * `repo-tour` and `mocha` external and deliberately NOT `vscode`, so one such import fails
- * the build and takes all 479 unit tests with it — `src/dial/writer.ts`'s header spells this
+ * the build and takes the whole unit suite with it — `src/dial/writer.ts`'s header spells this
  * out and it applies here word for word.
  *
  * ── What the tutor is given, and why each piece ─────────────────────────────────────────────
@@ -61,13 +61,22 @@
  * and simply resolves with the diff on stdout — the shape a hand-written test fake naturally
  * takes — still works: the resolved string is the fallback.
  *
+ * **`--output` bounds MEMORY, and only memory** — this sentence used to claim more. Git
+ * writes the WHOLE diff into that file before `readDiffOutput` reads 32 KB of it, so the file
+ * is as big as the comparison is: the security review measured **26.0 MB** in `os.tmpdir()`
+ * from a single ask on a 25 MB chapter directory, and a chapter carrying a real `node_modules`
+ * would write hundreds. What bounds the DISK is the outbound contract below — git is never
+ * asked at all unless both sides are ordinary files under `MAX_DIFF_INPUT_BYTES` — which also
+ * removes the directory case that produced that measurement. The box is still deleted in a
+ * `finally`, so this was always churn rather than a leak; it is now bounded churn.
+ *
  * `cwd` is the deepest directory the two paths share, and the paths handed to git are
  * relative to it. Git echoes the names it was given straight into the `diff --git a/… b/…`
  * header, so this is the difference between three header lines that read
  * `a/reference/src/parse.ts` and three that read `a/home/<someone>/Coding Projects/…` — a
  * shorter prompt, and the learner's home directory not sent to a third party to be billed.
  *
- * ── Four ways there is no diff, and four different sentences ────────────────────────────────
+ * ── Six ways there is no diff, and six different sentences ──────────────────────────────────
  *
  * "No diff" is never one state, and collapsing them would leave the tutor guessing:
  *
@@ -79,6 +88,12 @@
  *     empty string, which `buildContextBlock` would drop on the floor, leaving the tutor
  *     unable to tell a perfect reproduction from a question it was never given the material
  *     for. Said out loud instead, it changes the answer: they are not stuck on the code.
+ *   - **The step does not point at one file** — `NOT_ONE_FILE`, and see the contract below.
+ *     A `shape` step's `target.file` is the chapter DIRECTORY, so this is the first step of
+ *     every chapter rather than an exotic case.
+ *   - **One side is too big to compare** — `tooBigToDiff`, with the real size in it. Above
+ *     `MAX_DIFF_INPUT_BYTES` the answer git would write to disk is orders of magnitude larger
+ *     than the 8,000 characters that could ever be sent, so the comparison is not made.
  *   - **The path escapes its tree** — the field is omitted. `plan.json` is generated from a
  *     repository the learner pointed us at, so `target.file` is untrusted input
  *     (`src/walk/paths.ts` gives the full argument); a step naming `../../.ssh/id_rsa` gets
@@ -90,17 +105,67 @@
  *     longer there is the common cause; there is nothing to say about it that a learner or a
  *     tutor could act on, and an ask is not worth failing over.
  *
- * ── The clip, and why exactly 8,000 ─────────────────────────────────────────────────────────
+ * ── `Outbound`: the one thing that decides what reaches a paid third party ───────────────────
  *
- * `MAX_DIFF_CHARS` is 8,000 because that is `buildContextBlock`'s OWN budget for this field.
- * Sending more is not "more context": repo-tour clips it back to 8,000 on arrival with a bare
- * `… (truncated)`, so every character above the line is one the learner is billed to send and
- * the model never sees, announced — if at all — in someone else's terser words. Clipping here
- * to a total that includes our marker means repo-tour's clip never fires, the model is told
- * how big the real diff is, and the announcement is ours. The cap is a cap on the LEARNER'S
- * MONEY, which is why it is announced twice over rather than applied quietly: a reply is
- * billed by the token, and a diff is the one field in this context with no natural ceiling
- * (a `shape` step compares two whole directories).
+ * T-6's security review found four separate holes on this path (findings 1, 2, 6 and 8) and
+ * they are one absence: `MAX_DIFF_CHARS` was the only bound anywhere on it, it was on one
+ * field, and it bounded SIZE while the exposure that mattered was CONTENT. Four separate
+ * patches would each have been defensible and would each have left the next field — the one
+ * nobody has added yet — wide open. So there is one object instead, `Outbound`, and every
+ * field of every `AskContext` this module builds goes through it. The answer to "what decides
+ * what leaves this machine" is meant to be a name.
+ *
+ * Its five rules, each with the finding it closes:
+ *
+ *   1. **Only an ordinary file may be read for its contents** (finding 1, HIGH).
+ *      `git diff --no-index <dirA> <dirB>` walks both trees recursively, descends
+ *      dot-directories, includes dotfiles and **does not read `.gitignore`** — and a `shape`
+ *      step's `target.file` is the chapter DIRECTORY (repo-tour's `build/plan.ts` writes it
+ *      that way; `test/unit/walk-fixtures.ts` documents it), which makes this the FIRST step
+ *      of every chapter and the one a stuck learner is most likely to ask about. The reviewer
+ *      drove this repository's own fixture plan and got a `.gitignore`d `src/.env` — a live
+ *      Stripe key — into the prompt. Containment was never the missing check: `<target>/.env`
+ *      really is inside the target. What was missing is that a directory is not a file.
+ *      Of the three fixes offered (refuse anything but a regular file; diff only the paths the
+ *      plan teaches; run git with the plan's file list as a pathspec) this takes the first,
+ *      for two reasons. The second and third need the PLAN, and `tutorContext` is handed one
+ *      step — widening that seam means widening `session.ts`'s call too, for a field this
+ *      module would then have to bound anyway. And they answer a directory with a smaller
+ *      "everything under here", which is the same shape of answer: the honest reply to "what
+ *      goes in this chapter" is the step's own words, not a walk of the learner's disk. The
+ *      refusal is a SENTENCE (`NOT_ONE_FILE`), not a silent omission, so the tutor can say
+ *      why it cannot see their work.
+ *   2. **Every plan-sourced string is capped, and the cap announces itself** (finding 2).
+ *      `question`, `why` and every option's `label`/`consequence` reached the prompt with no
+ *      bound at all: a plan with a 5 MB `question` and a 5 MB `why` produced a measured
+ *      **19,906,863-character prompt (~5M tokens) on one button press**. These are the same
+ *      fields T-4's own security review capped for the RENDER, at `MAX_PLAN_TEXT` (20,000)
+ *      and `MAX_OPTIONS_RENDERED` (24), one file away in `step-view.ts` — and the lesson the
+ *      code reviewer drew from that is the rule this object exists to make true:
+ *      **downstream caps are not your caps**. A cap in the renderer bounds a render; the
+ *      prompt is billed by the token and needs its own. Where repo-tour clips a field itself
+ *      (`fileMeaning` and `stopText` at 2,000, `learnerDiff` at 8,000), the budget here is
+ *      ITS number, so its silent `… (truncated)` never fires and the announcement stays ours —
+ *      which also keeps `fileMeaning`'s source label, the sentence that tells the tutor whose
+ *      words the `why` is, from being the thing repo-tour cuts off.
+ *   3. **A stored turn is capped by size, not only by count** (finding 4) — `Outbound.turn`,
+ *      used by `src/tutor/transcript.ts`. `MAX_TURNS_KEPT` bounds how MANY turns are kept and
+ *      nothing bounded how big one is; `trimMessages` re-sends the last thirty IN FULL on
+ *      every later ask about the step, so one large reply is billed again on every follow-up.
+ *   4. **The disk is bounded before git writes, not after** (finding 6) — `MAX_DIFF_INPUT_BYTES`,
+ *      and the paragraph above on `--output`.
+ *   5. **Every announcement sits where file content cannot forge it** (finding 8). The clip
+ *      marker used to be appended INSIDE the diff body, where any reference or learner file
+ *      containing that sentence puts it into an UN-clipped diff and lies to the model about
+ *      the diff's size. The tutor's one sentence now goes ABOVE git's output, on a line
+ *      content can never occupy — git's own first line is `diff --git …` — and it is present
+ *      whether the diff was clipped or not, so its absence cannot be forged either. The rest
+ *      of the block's structure was checked and holds: every diff body line carries a prefix,
+ *      and git C-quotes a filename containing a newline even under `core.quotePath=false`.
+ *
+ * The budgets are stated as constants below with the measurement behind each, and
+ * `MAX_CONTEXT_CHARS` is their sum: what one ask can put in front of a model from this module
+ * is now arithmetic rather than whatever `plan.json` happened to contain.
  */
 
 import fs from 'node:fs';
@@ -122,14 +187,40 @@ import type { AskContext } from './core.js';
 export const NO_FILE_YET =
   'The learner has not created this file yet, so there is nothing of theirs to compare against the author’s version.';
 
-/** What `learnerDiff` says when the two files match exactly — see the header's four states. */
+/** What `learnerDiff` says when the two files match exactly — see the header's six states. */
 export const NO_DIFFERENCE =
   'The learner’s file is already byte-for-byte identical to the author’s: this diff is empty.';
 
 /**
- * The largest `learnerDiff` this module will send, marker included — `buildContextBlock`'s own
- * budget for the field, for the reasons the header gives at length. Retuning it moves the
- * tests with it; they assert against this constant rather than a copy of its value.
+ * What `learnerDiff` says when the step points at something that is not one ordinary file —
+ * a chapter directory, which is what every `shape` step points at, or (far more rarely) a
+ * device or a pipe. Rule 1 of the outbound contract; the header gives the full argument.
+ *
+ * A sentence rather than an omitted field, for the same reason `NO_FILE_YET` is one: the
+ * tutor is about to answer a learner who may be stuck precisely BECAUSE this is the "what
+ * goes in this part of the repository" step, and "I was not shown your work" is a true and
+ * useful thing for it to know. It also says what it would have taken to see the diff, so the
+ * model can ask for it in the learner's own words rather than apologising vaguely.
+ */
+export const NOT_ONE_FILE =
+  'This step is about a whole part of the repository rather than one file, so there is no diff of the learner’s work here: comparing two directories would mean sending every file inside them — including files the learner never meant to share, which their own .gitignore would not stop. Ask them about one file in it if you need to see their code.';
+
+/**
+ * What `learnerDiff` says when one side is too big to be worth comparing — rule 4, and the
+ * disk half of the `--output` correction in the header. The real size is in it for the same
+ * reason `diffNote` carries one: a model told the file is enormous asks about part of it,
+ * while a model told nothing answers confidently about a file it never saw.
+ */
+export function tooBigToDiff(bytes: number): string {
+  return `One of the two copies of this file is ${bytes} bytes, which is too large for this tutor to diff: git would have to write the whole comparison to disk to show you a few thousand characters of it. Ask the learner about one part of the file instead.`;
+}
+
+/**
+ * The largest `learnerDiff` this module will send, the tutor's own note line included —
+ * `buildContextBlock`'s own budget for the field, so its silent `… (truncated)` never fires and
+ * the announcement stays ours (rule 2). Sending more is not "more context": every character
+ * above the line is one the learner is billed for and the model never sees. Retuning it moves
+ * the tests with it; they assert against this constant rather than a copy of its value.
  */
 export const MAX_DIFF_CHARS = 8000;
 
@@ -141,18 +232,281 @@ export const MAX_DIFF_CHARS = 8000;
 const MAX_DIFF_READ_BYTES = MAX_DIFF_CHARS * 4 + 4;
 
 /**
- * What a clipped diff says about itself, with the real size in it — the same shape
- * `src/walk/step-view.ts` uses for `optionsOmittedMessage`, and exported for the same reason:
- * a test should assert the sentence this module really appends, never a copy that can drift.
+ * The largest either copy of a file may be before the two are compared at all — rule 4.
+ *
+ * This is the DISK bound `--output` was mistaken for. Git writes the whole diff into the temp
+ * box before `readDiffOutput` reads 32 KB of it, so the only number that bounds what lands in
+ * `os.tmpdir()` is the size of what git is handed. Two files under this cap bound it at a
+ * little over twice the cap: the worst case is that every line of both is emitted, each with a
+ * one-character prefix, and two 2.4 MB files differing on every line measure 5.2 MB of diff —
+ * 2.1×. Against the 26.0 MB one ask on a chapter directory produced, and the hundreds a
+ * chapter carrying a real `node_modules` would.
+ *
+ * Measured, like every other number here. The largest hand-written source file across the
+ * three repositories on hand is repo-tour's own `test/pipeline.test.ts` at 105,728 bytes, and
+ * the largest VENDORED one a plan could legitimately name is sql-gauntlet's bundled
+ * `codemirror.min.js` at 170,535. Two megabytes is roughly twelve times that, so nothing a
+ * tutorial step honestly points at comes close — while a generated file, a checked-in
+ * database or a media asset stops here instead of being copied through a temp file to show
+ * the model 8,000 characters of it.
+ */
+export const MAX_DIFF_INPUT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * How many characters of any ONE plan-sourced string reach the prompt — rule 2.
+ *
+ * `step-view.ts`'s `MAX_PLAN_TEXT`, deliberately the same 20,000 and for the same measured
+ * reason (across 621 doc comments in the three repositories on hand the median is 146
+ * characters, the 99th percentile 1,814 and the longest 5,121; the longest `why` in the real
+ * 61-step sql-gauntlet plan is 279). Duplicated rather than imported, exactly as
+ * `WHY_SOURCE_LABEL` below duplicates that file's copy and for the same reason: the panel's
+ * constant is the PANEL's, this one is the PROMPT's, and the whole finding is that the first
+ * was mistaken for the second. They are free to diverge the day one of them should.
+ */
+export const MAX_PROMPT_TEXT = 20000;
+
+/**
+ * The budget for the two fields repo-tour clips ITSELF — `fileMeaning` and `stopText`, both at
+ * 2,000 in `buildContextBlock`. Sending more is not more context: it is billed on the way out
+ * and dropped on arrival, with our own announcement dropped along with it. Matching its number
+ * means its silent `… (truncated)` never fires and what the model is told about the cut is
+ * ours. `fileMeaning` is the sharper case: the source label (`from the author's own comment`)
+ * is APPENDED to the `why`, so a long `why` clipped downstream takes the label with it and the
+ * tutor loses the one sentence that tells it whose words it is holding.
+ */
+export const MAX_PAGE_TEXT = 2000;
+
+/**
+ * How many of a step's options are sent — `step-view.ts`'s `MAX_OPTIONS_RENDERED`, the same 24
+ * and duplicated for the same reason as `MAX_PROMPT_TEXT`. A plan built with no interpretation
+ * gives every step exactly one option (all 61 steps of the real sql-gauntlet plan); a fully
+ * interpreted step gives three. 24 is eight times what anything honest produces, and a hostile
+ * `alternatives` array stops here rather than at fifty thousand.
+ */
+export const MAX_OPTIONS_SENT = 24;
+
+/**
+ * How many characters of ONE option's label or consequence are sent.
+ *
+ * Not `MAX_PROMPT_TEXT`, and the difference is arithmetic rather than taste: this budget is
+ * spent up to 48 times in a single prompt, so 20,000 here would be 960,000 characters of one
+ * ask — a quarter of a million tokens, billed, for a list. An option is a phrase and a
+ * consequence is a sentence: in the real 61-step plan the longest label is 19 characters and
+ * the longest consequence 84, and the fixture's longest is 95. 1,000 is more than ten times
+ * what anything honest has produced while keeping the whole list under 48,000 characters.
+ */
+export const MAX_OPTION_TEXT = 1000;
+
+/**
+ * What one ask can put in front of a model from this module, worst case — the sum of every
+ * budget above, plus a thousand characters for repo-tour's own labels and headings.
+ *
+ * It exists to be asserted. The security review's measurement was a 19,906,863-character
+ * prompt from one button press, and the fix is only a fix if that number is now a function of
+ * these constants rather than of `plan.json`; a test renders the real `buildContextBlock` on a
+ * hostile plan and holds it to this ceiling. (The conversation is bounded separately, by
+ * `MAX_TURNS_KEPT` × `MAX_TURN_CHARS` in `transcript.ts`, and repo-tour's `trimMessages`
+ * sends at most the last thirty of those.)
+ */
+export const MAX_CONTEXT_CHARS =
+  MAX_PROMPT_TEXT * 3 + // the question (twice — as the page's title and as the build step's) and the why
+  MAX_PAGE_TEXT * 4 + // fileMeaning, stopText, the file path and the repository name
+  MAX_OPTIONS_SENT * (MAX_OPTION_TEXT * 2 + 64) + // every option line, its `[author] … — …` frame included
+  MAX_DIFF_CHARS +
+  1000;
+
+/**
+ * The largest ONE stored turn may be — rule 3, applied in `src/tutor/transcript.ts`, which is
+ * where the transcript is read and written and where `getTranscript` is already the single
+ * enforcement point. The rule lives here because the reason for it is here: a stored turn is
+ * replayed into the next prompt.
+ *
+ * 4,000 mirrors BOTH ends of what already exists. `MAX_ASK_TEXT` (`step-protocol.ts`) lets a
+ * learner's question be 4,000 characters, so a legal question is never cut; `MAX_REPLY_TEXT`
+ * (`step-view.ts`) draws at most 4,000 characters of a turn, so nothing a learner could ever
+ * READ is lost to this cap either. What it does cut is text no human sees and every follow-up
+ * pays for: `trimMessages` re-sends the last thirty turns in full, so an uncapped 2,000,000-
+ * character reply — the reviewer stored and read one back — is billed again on every question
+ * after it. The announcement (`turnCutNote`) fits inside the cap, so `step-view.ts`'s own
+ * truncation marker never fires on top of it and the learner is told once, not twice.
+ */
+export const MAX_TURN_CHARS = 4000;
+
+/**
+ * The tutor's one sentence about the diff, and the only sentence in this whole field that the
+ * tutor writes — rule 5.
+ *
+ * It sits ABOVE git's output rather than inside it. That is the entire fix for finding 8: a
+ * marker appended after the cut lives among lines a reference or learner file controls, so any
+ * file containing that sentence puts it into an un-clipped diff and tells the model a complete
+ * diff was truncated. Git's own output begins with `diff --git …`, so a line above it is a
+ * position content cannot occupy — and it is emitted whether the diff was clipped or not, so
+ * content cannot forge its ABSENCE either, only add a line that visibly contradicts it.
  *
  * Phrased at the model rather than at the learner (it is the model that reads it) and with an
  * action in it, because a model that knows it is holding the top of a large diff asks about
  * one part of the file, while a model that merely sees `… (truncated)` answers confidently
- * about a file it has seen the first page of.
+ * about a file it has seen the first page of. Exported so a test asserts the sentence this
+ * module really writes, never a copy of it that can drift.
  */
-export function clipMarker(fullBytes: number): string {
-  return `\n… (clipped — the whole diff is ${fullBytes} bytes and you are seeing only its beginning; ask about one part of the file if you need more)`;
+export function diffNote(fullBytes: number, clipped: boolean): string {
+  const size = clipped
+    ? `the whole diff is ${fullBytes} bytes and only its beginning is below — ask about one part of the file if you need more`
+    : `the whole diff is ${fullBytes} bytes and all of it is below`;
+  return `(the tutor, above git’s own output: ${size}. Only this first line is the tutor’s — every line under it is git’s output or a file’s own contents.)`;
 }
+
+/** What any other clipped field says about itself — rule 2's announcement, and the reason the
+ *  budget rather than the receiver decides where the cut is. Exported to be asserted. */
+export function textCutNote(fullLength: number): string {
+  return `\n… (cut here by the tutor — this is the beginning of a field ${fullLength} characters long in the plan)`;
+}
+
+/** The line under a capped options list, with the COUNT in it rather than a vague "and more" —
+ *  the same promise `step-view.ts`'s `optionsOmittedMessage` makes to the learner, made to the
+ *  model. Exported to be asserted. */
+export function optionsOmittedNote(omitted: number): string {
+  return `(${omitted} more option${omitted === 1 ? '' : 's'} in this plan, not sent)`;
+}
+
+/** What a turn cut by `MAX_TURN_CHARS` says about itself. Read by BOTH the model (it is
+ *  replayed into the next prompt) and the learner (the panel draws stored turns), so it names
+ *  the real length and says who cut it. Exported to be asserted. */
+export function turnCutNote(fullLength: number): string {
+  return `\n… (cut here by the tutor — this turn was ${fullLength} characters and only its beginning is kept)`;
+}
+
+/** What stands in for a plan string that is not a string at all — `step-view.ts`'s
+ *  `NOT_TEXT_MESSAGE`, word for word, so the page and the prompt say the same thing about the
+ *  same field. Not an error and not a silent blank: "there is nothing readable in the plan at
+ *  this spot" is a true sentence and `[object Object]` is not. */
+export const NOT_TEXT_MESSAGE = '(the plan has nothing readable here)';
+
+// ── the outbound contract ───────────────────────────────────────────────────────────────────
+
+/** One option as it is SENT: repo-tour's `AskContext.build.options` entry, already through the
+ *  contract, which is why `label` and `consequence` are `string` and not `unknown`. */
+interface OutboundOption {
+  label: string;
+  consequence: string;
+  taken: boolean;
+}
+
+/** Why a path may not be read for its contents — the three refusals `Outbound.fileToRead`
+ *  distinguishes, because they are three different sentences (see the header's six states). */
+export type DiffRefusal = { reason: 'gone' } | { reason: 'not-one-file' } | { reason: 'too-big'; bytes: number };
+
+/**
+ * **What may leave this machine.** Every field of every `AskContext` this module builds passes
+ * through one of these five rules, and every one of them is a bound on the LEARNER'S MONEY or
+ * on the learner's PRIVACY — the two things that changed when T-6 pointed a filesystem read at
+ * a paid third-party model. The header states each rule with the finding it closes and the
+ * measurement behind its number; what follows is only the code.
+ *
+ * It is an object rather than five loose functions on purpose. The failure being fixed is that
+ * nobody owned the question, so four fields each answered it differently and a fifth answered
+ * it not at all; a name is the part of the fix that survives the next field being added.
+ * `src/tutor/transcript.ts` imports rule 3 from here rather than growing a cap of its own.
+ */
+export const Outbound = {
+  /**
+   * Rule 2 — one plan-sourced string, capped to `budget` INCLUDING the sentence that says it
+   * was cut, so a receiver that clips at the same number never has to (and never silently
+   * drops our announcement along with the tail).
+   *
+   * A non-string is answered with `NOT_TEXT_MESSAGE` rather than coerced: `plan.json` is
+   * parsed and not validated, and `String({})` in a prompt is the model being told the
+   * author wrote `[object Object]`.
+   */
+  text(value: unknown, budget: number): string {
+    if (typeof value !== 'string') return NOT_TEXT_MESSAGE;
+    if (value.length <= budget) return value;
+    const note = textCutNote(value.length);
+    return `${value.slice(0, Math.max(0, budget - note.length))}${note}`;
+  },
+
+  /**
+   * Rule 2, for the one field that is a LIST — capped by count as well as by the text of each
+   * entry, and reporting how many were left out so the caller can say so.
+   *
+   * The author's own option is kept even when it falls past the cap, exactly as
+   * `step-view.ts` keeps it on the page: a list of 24 alternatives with the road actually
+   * taken missing from it does not read as "some options are not shown", it reads as "the
+   * author did none of these", which is a confident lie rather than a cut.
+   */
+  options(step: StepLike): { options: OutboundOption[]; omitted: number } {
+    const all = optionsOf(step);
+    const taken = takenIdsOf(step);
+    const shown = all.slice(0, MAX_OPTIONS_SENT);
+    const authorIndex = all.findIndex((o) => taken.has(o.id));
+    if (authorIndex >= MAX_OPTIONS_SENT && shown.length === MAX_OPTIONS_SENT) {
+      shown[MAX_OPTIONS_SENT - 1] = all[authorIndex]!;
+    }
+    return {
+      options: shown.map((o) => ({
+        label: Outbound.text(o.label, MAX_OPTION_TEXT),
+        consequence: Outbound.text(o.consequence, MAX_OPTION_TEXT),
+        taken: taken.has(o.id),
+      })),
+      omitted: Math.max(0, all.length - shown.length),
+    };
+  },
+
+  /**
+   * Rule 3 — one stored turn. Called from `src/tutor/transcript.ts`'s `sanitizeTranscript`,
+   * which is the single function both the sole reader (`getTranscript`) and the sole writer
+   * (`appendTurn`) go through, so a turn is cut on the way to disk AND on the way back off it.
+   */
+  turn(content: string): string {
+    if (content.length <= MAX_TURN_CHARS) return content;
+    const note = turnCutNote(content.length);
+    return `${content.slice(0, Math.max(0, MAX_TURN_CHARS - note.length))}${note}`;
+  },
+
+  /**
+   * Rules 1 and 4 — whether a path may be read for its CONTENTS at all, which is the question
+   * containment was never asking. `null` means yes; anything else is a refusal with a sentence
+   * behind it.
+   *
+   * `statSync` follows symlinks, which is right here and only because `insideRealRoot` has
+   * already refused any link that leaves its root: the thing being asked is what kind of file
+   * this is, not where it lives. `isFile()` is the check rather than `!isDirectory()` because
+   * a fifo would block `git diff` for as long as nobody writes to it, and a device is not a
+   * file a learner wrote.
+   *
+   * **A stat is a moment, not a lock**, and this is worth stating rather than leaving to be
+   * discovered: between this answer and git opening the path, the path could become something
+   * else. Closing that window would mean handing git an open descriptor, and git takes paths.
+   * Whoever could win the race already has write access to the learner's own folder, which is
+   * a strictly larger capability than the one this rule bounds — so the check is where the
+   * value is, and the residue is named instead of implied.
+   */
+  fileToRead(abs: string): DiffRefusal | null {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      return { reason: 'gone' }; // not there, or a link to nothing
+    }
+    if (!stat.isFile()) return { reason: 'not-one-file' };
+    if (stat.size > MAX_DIFF_INPUT_BYTES) return { reason: 'too-big', bytes: stat.size };
+    return null;
+  },
+
+  /**
+   * Rules 2 and 5 — git's output, under the tutor's own one-line note and inside
+   * `MAX_DIFF_CHARS` with that note counted, so repo-tour's silent clip at the same number
+   * never fires. `whole` is false when more of the file was written than `readDiffOutput`
+   * pulled in, which is one of the two ways a diff can need cutting; `fullBytes` is always
+   * git's real size, never the size of the prefix that was read.
+   */
+  diff(body: string, fullBytes: number, whole: boolean): string {
+    const kept = `${diffNote(fullBytes, false)}\n`;
+    if (whole && kept.length + body.length <= MAX_DIFF_CHARS) return `${kept}${body}`;
+    const cut = `${diffNote(fullBytes, true)}\n`;
+    return `${cut}${body.slice(0, Math.max(0, MAX_DIFF_CHARS - cut.length))}`;
+  },
+};
 
 /**
  * The three labels the step panel puts under `why`, word for word.
@@ -222,12 +576,18 @@ function takenIdsOf(step: StepLike): Set<string> {
  * marked from `takenIdsOf`, once, for the same reason.
  *
  * Empty for a step with no options recorded, which the block then simply leaves out.
+ *
+ * Both halves come out of `Outbound.options`, so the cap cannot fire on one and not the other.
+ * This half also carries the omitted COUNT, because it is the half that is free text —
+ * `build.options` is a structured array with nowhere honest to put a sentence — and it is
+ * assembled so that the count survives the whole-field budget: `MAX_PAGE_TEXT` is repo-tour's
+ * own clip for this field, and an announcement that the receiver cuts off announces nothing.
  */
 export function renderOptionsText(step: StepLike): string {
-  const taken = takenIdsOf(step);
-  return optionsOf(step)
-    .map((o) => `[${taken.has(o.id) ? 'author' : 'alternative'}] ${String(o.label)} — ${String(o.consequence)}`)
-    .join('\n');
+  const { options, omitted } = Outbound.options(step);
+  const note = omitted > 0 ? `\n${optionsOmittedNote(omitted)}` : '';
+  const lines = options.map((o) => `[${o.taken ? 'author' : 'alternative'}] ${o.label} — ${o.consequence}`).join('\n');
+  return `${Outbound.text(lines, MAX_PAGE_TEXT - note.length)}${note}`;
 }
 
 /**
@@ -243,7 +603,12 @@ function fileMeaningOf(step: StepLike): string {
   const raw: unknown = step.decision.why;
   const why = typeof raw === 'string' ? raw.trim() : '';
   const source = whySourceLabel(step.decision.whySource);
-  return why.length > 0 ? `${why}\n(${source})` : `(nothing was recorded for this step — ${source})`;
+  if (why.length === 0) return `(nothing was recorded for this step — ${source})`;
+  // The label is what makes this field worth sending at all, so the `why` is budgeted around
+  // it rather than the other way round: repo-tour clips this whole field at `MAX_PAGE_TEXT`
+  // and would take the label — which is appended LAST — off the end of a long one.
+  const label = `\n(${source})`;
+  return `${Outbound.text(why, MAX_PAGE_TEXT - label.length)}${label}`;
 }
 
 // ── the paths, both ends ────────────────────────────────────────────────────────────────────
@@ -314,12 +679,22 @@ function readDiffOutput(file: string): { text: string; bytes: number; whole: boo
   }
 }
 
-/** `text` if it fits the budget whole, otherwise its beginning plus a marker that says so —
- *  and the total never exceeds `MAX_DIFF_CHARS`, so repo-tour's own silent clip never fires. */
-function clipDiff(text: string, bytes: number, whole: boolean): string {
-  if (whole && text.length <= MAX_DIFF_CHARS) return text;
-  const marker = clipMarker(bytes);
-  return `${text.slice(0, Math.max(0, MAX_DIFF_CHARS - marker.length))}${marker}`;
+/**
+ * Which of the header's six sentences a refusal is — or `undefined` for the two states that
+ * are said with silence, because there is nothing a learner or a tutor could act on.
+ *
+ * The learner's own missing file is NOT one of these: it is `NO_FILE_YET`, the ordinary state
+ * of every step in manual mode, and its caller answers it before asking this.
+ */
+function refusalSentence(refusal: DiffRefusal): string | undefined {
+  switch (refusal.reason) {
+    case 'gone':
+      return undefined; // the AUTHOR's file is not there — a broken plan, and not the learner's to fix
+    case 'not-one-file':
+      return NOT_ONE_FILE;
+    case 'too-big':
+      return tooBigToDiff(refusal.bytes);
+  }
 }
 
 /**
@@ -337,7 +712,16 @@ async function learnerDiffFor(
   const reference = containedPath(refRoot, file);
   const learner = containedPath(target, file);
   if (reference === null || learner === null) return undefined;
-  if (!fs.existsSync(learner)) return NO_FILE_YET;
+
+  // Rules 1 and 4, and the order matters: the learner's side is asked FIRST so that "you have
+  // not written this yet" — manual mode's ordinary state, and the most useful thing the tutor
+  // can be told — is never reported as something else. Everything after this point is two
+  // ordinary files, both small enough to hand a subprocess, which is what makes the git call
+  // below bounded on disk as well as in memory.
+  const learnerRefusal = Outbound.fileToRead(learner);
+  if (learnerRefusal?.reason === 'gone') return NO_FILE_YET;
+  const refusal = learnerRefusal ?? Outbound.fileToRead(reference);
+  if (refusal !== null) return refusalSentence(refusal);
 
   let box: string;
   try {
@@ -362,8 +746,8 @@ async function learnerDiffFor(
     }
 
     const written = readDiffOutput(output);
-    if (written.text.length > 0) return clipDiff(written.text, written.bytes, written.whole);
-    if (stdout.length > 0) return clipDiff(stdout, Buffer.byteLength(stdout, 'utf8'), true);
+    if (written.text.length > 0) return Outbound.diff(written.text, written.bytes, written.whole);
+    if (stdout.length > 0) return Outbound.diff(stdout, Buffer.byteLength(stdout, 'utf8'), true);
     return exitedZero ? NO_DIFFERENCE : undefined;
   } catch {
     return undefined; // an unreadable answer is still no reason to fail the ask
@@ -389,22 +773,20 @@ export async function tutorContext(
   target: string,
   git: GitRunner,
 ): Promise<AskContext> {
-  const taken = takenIdsOf(step);
   const learnerDiff = await learnerDiffFor(step, refRoot, target, git);
+  // Every field, without exception, and that is the point: `question` and `why` are the two
+  // the review measured at five megabytes each, `file` is the one nobody had thought about,
+  // and a field added tomorrow that skips this list is the finding again.
   return {
-    repo: path.basename(path.resolve(refRoot)),
-    file: step.target.file,
+    repo: Outbound.text(path.basename(path.resolve(refRoot)), MAX_PAGE_TEXT),
+    file: Outbound.text(step.target.file, MAX_PAGE_TEXT),
     fileMeaning: fileMeaningOf(step),
-    stopTitle: step.decision.question,
+    stopTitle: Outbound.text(step.decision.question, MAX_PROMPT_TEXT),
     stopText: renderOptionsText(step),
     build: {
-      question: step.decision.question,
-      options: optionsOf(step).map(({ id, label, consequence }) => ({
-        label: String(label),
-        consequence: String(consequence),
-        taken: taken.has(id),
-      })),
-      why: step.decision.why,
+      question: Outbound.text(step.decision.question, MAX_PROMPT_TEXT),
+      options: Outbound.options(step).options,
+      why: Outbound.text(step.decision.why, MAX_PROMPT_TEXT),
       ...(learnerDiff === undefined ? {} : { learnerDiff }),
     },
   };

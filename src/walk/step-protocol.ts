@@ -167,8 +167,39 @@ export interface StepViewState {
    *   - `note` — a sentence ABOUT the conversation that is not a turn IN it: unreachable,
    *     timed out, failed, cancelled. Kept out of `transcript` on purpose (`AskMessage` stays
    *     pure) so a model's failure is never stored as something the tutor said.
+   *   - `stage` — WHICH half of the wait `thinking` is about. `preparing` is the availability
+   *     probe and the diff, during which nothing has been sent and nothing is charged;
+   *     `sending` is a request with a provider that is billing right now. Derived from the
+   *     same field `thinking` is, so the two cannot disagree.
+   *   - `elsewhere` — a live ask on a DIFFERENT step, so the page can offer to stop it from
+   *     wherever the learner is standing rather than pointing at a *Cancel* on a page they
+   *     have left (code review finding 3).
+   *   - `spend` — what this walk has spent and what is spending right now, off
+   *     `AskLedger.spend()`. `metered: false` means the figures are UNKNOWN, never free, and
+   *     the page may not render them as a total (code review finding 5).
+   *   - `accepted` — the question the host really sent, which is how the page knows its draft
+   *     became a turn. The page keeps the learner's text until this says otherwise, so a
+   *     refusal decided after the press leaves the question where they typed it (findings 1
+   *     and 2).
    */
-  tutor?: { thinking: boolean; unreachable?: string; note?: string };
+  tutor?: {
+    thinking: boolean;
+    unreachable?: string;
+    note?: string;
+    stage?: 'preparing' | 'sending';
+    elsewhere?: { stepId: string; stage: 'preparing' | 'sending' };
+    spend?: {
+      preparing: number;
+      sending: number;
+      unwatched: number;
+      replies: number;
+      inputTokens: number;
+      outputTokens: number;
+      usd: number;
+      metered: boolean;
+    };
+    accepted?: string;
+  };
   /** the resolved skin name (never empty — see `src/skins.ts` `readSkin`). */
   skin: string;
   /**
@@ -202,7 +233,8 @@ export type InboundMessage =
   | { type: 'dial:set'; payload: { dial: Dial } }
   | { type: 'skin:set'; payload: { skin: string } }
   | { type: 'tutor:ask'; payload: { text: string } }
-  | { type: 'tutor:cancel' };
+  | { type: 'tutor:cancel' }
+  | { type: 'tutor:clear' };
 
 export type OutboundMessage = { type: 'step:note'; payload: { note: string } };
 
@@ -256,6 +288,21 @@ export interface StepEffects {
    * is still costing money.
    */
   cancelAsk(): void;
+  /**
+   * Forget this step's conversation (code review finding 6).
+   *
+   * `clearTranscript` shipped exported, with six unit tests and no caller in `src/` — the
+   * capability was built and never wired to anything a learner could press. It is wired rather
+   * than deleted because a stored conversation owes somebody a way to delete it: `progress.
+   * json` holds their questions and a model's answers, on their own disk, in a folder this
+   * extension `git init`s for them.
+   *
+   * Routed and not second-guessed, exactly like `reproduce:run`: whether there is anything to
+   * forget is the session's question, and a panel one push out of date must not be the thing
+   * that decides. The session answers a press on an empty conversation with a sentence rather
+   * than with silence.
+   */
+  clearConversation(): void;
 }
 
 export interface HandleResult {
@@ -334,6 +381,14 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
       effects.cancelAsk();
       return { state };
     }
+    case 'tutor:clear': {
+      // No reply and no state change here: what the conversation now is comes back on the
+      // session's own push, as `transcript`, and is DRAWN — the same routing `step:check` uses
+      // and for the same reason. A sentence composed here would be this file guessing at an
+      // outcome the session has not decided yet.
+      effects.clearConversation();
+      return { state };
+    }
     default: {
       const exhaustive: never = message;
       throw new Error(`unhandled step message: ${JSON.stringify(exhaustive)}`);
@@ -345,7 +400,7 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
 
 const INBOUND_TYPES = [
   'step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'dial:set', 'skin:set',
-  'tutor:ask', 'tutor:cancel',
+  'tutor:ask', 'tutor:cancel', 'tutor:clear',
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -388,6 +443,7 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
     case 'step:check':
     case 'reproduce:run':
     case 'tutor:cancel':
+    case 'tutor:clear':
       return { type };
     case 'dial:set': {
       const payload = raw['payload'];

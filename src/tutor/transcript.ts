@@ -44,6 +44,18 @@
  * the last 30 turns before a prompt is ever built, regardless of how many this module keeps —
  * so this cap changes how much scrollback a learner can still read, never what the model sees.
  *
+ * **A count is not a size, and this module used to have only the count.** T-6's security review
+ * (finding 4) stored a 2,000,000-character assistant turn through here and read it back whole:
+ * `MAX_TURNS_KEPT` said how MANY turns were kept and nothing said how big one could be, so the
+ * worst case was 200 × unbounded, written atomically to a learner's disk on every turn — and
+ * `trimMessages` re-sends the last thirty IN FULL, so one enormous reply is billed again on
+ * every follow-up question about that step. The size rule is `Outbound.turn`, and it lives in
+ * `src/tutor/context.ts` with the rest of the outbound contract rather than as a constant of
+ * this module's own, because the reason a stored turn needs a ceiling is not that it is stored:
+ * it is that it is SENT, to a paid third party, once per question from here on. The learner's
+ * own side of the conversation has a cap (`MAX_ASK_TEXT`, 4,000) and a sentence explaining it;
+ * the model's side now has both too.
+ *
  * No `vscode` import: this extension's unit-test bundle (`esbuild.mjs`) marks `repo-tour` and
  * `mocha` external for `test/unit/*` but does NOT mark `vscode` external, so one import of it
  * here would fail that whole build rather than merely this file (same reasoning as `model.ts`
@@ -51,6 +63,7 @@
  */
 
 import type { Progress } from '../walk/model.js';
+import { Outbound } from './context.js';
 import type { AskMessage } from './core.js';
 
 /**
@@ -97,6 +110,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * turns because sending one to a model wastes the round trip. An empty turn here is still a
  * real thing that happened (the learner pressed *Ask* on a blank input, say), and this
  * function's job is fidelity to what was stored, not usefulness to a prompt.
+ *
+ * **The one thing it does change is SIZE** (security review, finding 4). A kept turn's content
+ * goes through `Outbound.turn`, which cuts anything past `MAX_TURN_CHARS` and says so in the
+ * text itself. That is a departure from "fidelity to what was stored" and it is deliberate: the
+ * cut is ANNOUNCED, so nothing is silently misrepresented as complete, and this is the only
+ * function both readers and writers pass through. `getTranscript` is the sole reader of
+ * `progress.steps[id].transcript` and `appendTurn` the sole writer, and both call this — so
+ * one rule bounds what reaches the disk, what is drawn back to the learner, and what is
+ * replayed into the next prompt, including a turn that arrived oversized from a hand edit or
+ * from a version of this extension that had no cap.
  */
 export function sanitizeTranscript(raw: unknown): AskMessage[] {
   if (!Array.isArray(raw)) return [];
@@ -106,7 +129,7 @@ export function sanitizeTranscript(raw: unknown): AskMessage[] {
     const role = entry['role'];
     const content = entry['content'];
     if ((role === 'user' || role === 'assistant') && typeof content === 'string') {
-      out.push({ role, content });
+      out.push({ role, content: Outbound.turn(content) });
     }
   }
   return out;
@@ -133,17 +156,25 @@ export function getTranscript(progress: Progress, stepId: string): AskMessage[] 
  * none yet, then `...existing` to carry its other fields forward, then the one field this
  * function actually changes, last, so it always wins).
  *
- * The existing transcript is re-validated through `sanitizeTranscript` before the new turn is
- * appended — never merely cast. `ProgressStep.transcript` is typed `unknown[]` precisely
- * because nothing has checked it since it was read off disk, and appending onto unchecked data
- * would carry forward whatever was already wrong with it. The result is capped to
- * `MAX_TURNS_KEPT` from the end (oldest first) on every call, so the stored transcript can
- * never grow past the cap by even one entry, and a transcript that somehow arrived here already
- * over the cap (a hand edit, a future version) is trimmed back down rather than left oversized.
+ * The existing transcript is re-validated through `sanitizeTranscript` — never merely cast —
+ * and so is the new turn, in the same call. `ProgressStep.transcript` is typed `unknown[]`
+ * precisely because nothing has checked it since it was read off disk, and appending onto
+ * unchecked data would carry forward whatever was already wrong with it; the new turn is
+ * unchecked for a different reason (it is whatever the provider said, straight out of
+ * `deliverAsk`) and putting both through one call is what keeps the size rule from having two
+ * doors. The result is capped to `MAX_TURNS_KEPT` from the end (oldest first) on every call, so
+ * the stored transcript can never grow past the cap by even one entry, and a transcript that
+ * somehow arrived here already over the cap (a hand edit, a future version) is trimmed back
+ * down rather than left oversized.
  */
 export function appendTurn(progress: Progress, stepId: string, turn: AskMessage): Progress {
   const existing = progress.steps[stepId];
-  const transcript = [...sanitizeTranscript(existing?.transcript), turn].slice(-MAX_TURNS_KEPT);
+  const raw: unknown = existing?.transcript;
+  // The NEW turn goes through `sanitizeTranscript` with the old ones rather than being pushed
+  // onto the result of it. It is the only turn on this path nothing has checked — `deliverAsk`
+  // hands over whatever the provider said — and validating it separately from the size rule
+  // is how a 2,000,000-character reply used to reach the disk whole (security review, 4).
+  const transcript = sanitizeTranscript([...(Array.isArray(raw) ? raw : []), turn]).slice(-MAX_TURNS_KEPT);
   return {
     ...progress,
     steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, transcript } },

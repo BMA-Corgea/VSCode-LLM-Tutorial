@@ -33,6 +33,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { MAX_TURN_CHARS, turnCutNote } from '../../src/tutor/context.js';
 import type { AskMessage } from '../../src/tutor/core.js';
 import { MAX_TURNS_KEPT, appendTurn, clearTranscript, getTranscript, sanitizeTranscript } from '../../src/tutor/transcript.js';
 import { emptyProgress, markDone, setCheck, setCurrent, setDial, type Progress } from '../../src/walk/model.js';
@@ -349,5 +350,67 @@ suite('round trip through the real saveProgress / loadProgress on a temp dir (AC
     assert.deepEqual(getTranscript(progress, 'st-2-file-parse'), []);
     assert.equal(progress.current, 'st-2-file-parse', 'a bad transcript must not take the rest of the file down with it');
     assert.equal(progress.steps['st-1-shape-src']?.status, 'done', 'nor the sibling fields on its own step entry');
+  });
+});
+
+// ── the outbound contract: a stored turn is re-sent on every follow-up ───────────────────────
+
+/**
+ * The security review's finding 4. `MAX_TURNS_KEPT` bounds how MANY turns are kept and nothing
+ * bounded how big one is: the reviewer stored a 2,000,000-character assistant turn and read it
+ * back intact, and repo-tour's `trimMessages` then re-sends the last thirty turns IN FULL on
+ * every later ask about the same step — so one large reply is paid for again on every
+ * follow-up, and written to the learner's disk on every turn in between.
+ *
+ * The rule is the outbound contract's, not this module's — `Outbound.turn`, in
+ * `src/tutor/context.ts`, beside the other four — and it is applied in `sanitizeTranscript`
+ * because that is the ONE function both `getTranscript` (the sole reader) and `appendTurn`
+ * (the sole writer) go through. A cap at either call site alone would leave the other open.
+ */
+suite('the size of one turn — a reply is stored once and billed on every question after it', () => {
+  test('a two-million-character reply is cut to the contract’s size, and says so', () => {
+    const enormous = 'A'.repeat(2_000_000);
+    const progress = appendTurn(emptyProgress(fixturePlan()), 'st-1-shape-src', assistant(enormous));
+    const kept = getTranscript(progress, 'st-1-shape-src');
+    assert.equal(kept.length, 1);
+    assert.ok(
+      kept[0]!.content.length <= MAX_TURN_CHARS,
+      `${kept[0]!.content.length} characters were stored, and re-sent, against a cap of ${MAX_TURN_CHARS}`,
+    );
+    assert.ok(kept[0]!.content.endsWith(turnCutNote(2_000_000)), `the cut must be announced with the real size:\n${kept[0]!.content.slice(-200)}`);
+  });
+
+  test('the cap holds on the way IN and on the way OUT — a hand-edited progress.json is cut too', () => {
+    // `ProgressStep.transcript` is `unknown[]`: nothing validates it on the way in from disk,
+    // and `withCheckedVerdicts` carries it through untouched. `getTranscript` is the sole
+    // enforcement point and has to stay that way.
+    const progress = emptyProgress(fixturePlan());
+    const hand = {
+      ...progress,
+      steps: { 'st-1-shape-src': { status: 'pending' as const, transcript: [{ role: 'assistant', content: 'B'.repeat(500_000) }] } },
+    };
+    const kept = getTranscript(hand, 'st-1-shape-src');
+    assert.ok(kept[0]!.content.length <= MAX_TURN_CHARS, `${kept[0]!.content.length} characters read back off disk`);
+    assert.ok(kept[0]!.content.endsWith(turnCutNote(500_000)));
+  });
+
+  test('a turn the learner could legitimately type or read survives whole, untouched', () => {
+    // The opposite half. `MAX_ASK_TEXT` lets a question be 4,000 characters and the panel
+    // draws 4,000 of a reply, so a cap that cut either would be the cap doing harm: this one
+    // sits above both on purpose.
+    const legal = 'Q'.repeat(4000);
+    const progress = appendTurn(emptyProgress(fixturePlan()), 'st-1-shape-src', user(legal));
+    assert.deepEqual(getTranscript(progress, 'st-1-shape-src'), [user(legal)]);
+  });
+
+  test('the worst case is now arithmetic: MAX_TURNS_KEPT turns of MAX_TURN_CHARS, and no more', () => {
+    let progress = emptyProgress(fixturePlan());
+    for (let i = 0; i < MAX_TURNS_KEPT + 5; i += 1) {
+      progress = appendTurn(progress, 'st-1-shape-src', assistant('C'.repeat(50_000)));
+    }
+    const kept = getTranscript(progress, 'st-1-shape-src');
+    assert.equal(kept.length, MAX_TURNS_KEPT);
+    const total = kept.reduce((sum, turn) => sum + turn.content.length, 0);
+    assert.ok(total <= MAX_TURNS_KEPT * MAX_TURN_CHARS, `${total} characters on the learner's disk for one step`);
   });
 });

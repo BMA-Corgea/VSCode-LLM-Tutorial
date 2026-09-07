@@ -76,6 +76,9 @@
  * — once per step, on all sixty-one of them, if its rejection is left to escape.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 import type { GitRunner } from '../start/build.js';
 import type { StepLike } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
@@ -122,8 +125,112 @@ async function insideWorkTree(target: string, git: GitRunner): Promise<boolean> 
  * that merely happens to run first.
  */
 export async function ensureRepo(target: string, git: GitRunner): Promise<void> {
-  if (await insideWorkTree(target, git)) return;
-  await git(['init', '-q'], target);
+  const already = await insideWorkTree(target, git);
+  if (!already) await git(['init', '-q'], target);
+  // Written on BOTH paths, and the already-a-repository path is the one that matters most —
+  // see `ensureTranscriptIgnored`. Awaited rather than fired off so that `commitStep`'s single
+  // `try` covers it like everything else here.
+  await ensureTranscriptIgnored(target, git);
+}
+
+/**
+ * The directory this extension keeps a tutorial in, as a `.gitignore` pattern.
+ *
+ * Unanchored on purpose: `<target>` can itself be a subdirectory of the learner's repository,
+ * in which case the folder is at `<repo>/<something>/.repo-tour/` and a rooted `/.repo-tour/`
+ * would miss it entirely. An unanchored directory pattern matches at any depth, which is
+ * exactly the question being asked — "wherever this thing is, do not commit it".
+ */
+export const TUTORIAL_DIR_IGNORE = '.repo-tour/';
+
+/** The line written above the pattern, so a learner who does open the file finds out who put
+ *  it there and can delete it. An ignore rule nobody can attribute is its own small mystery. */
+export const TUTORIAL_IGNORE_HEADER =
+  '# Added by the Build Tutorials extension: this folder holds the tutorial plan, your';
+
+const TUTORIAL_IGNORE_BLOCK = [
+  '',
+  TUTORIAL_IGNORE_HEADER,
+  '# progress, and your conversations with the tutor. Delete these three lines to commit it.',
+  TUTORIAL_DIR_IGNORE,
+  '',
+].join('\n');
+
+/**
+ * Make `.repo-tour/` uncommittable in whatever repository `target` sits in (security review
+ * finding 12).
+ *
+ * `progress.json` used to hold statuses, a dial and a verdict. Since T-6 it holds free text —
+ * the learner's own questions and a model's answers — at `<target>/.repo-tour/build/
+ * progress.json`, in a folder this module `git init`s for them. `commitStep`'s own commits are
+ * pathspec-scoped and never sweep it up, which was checked and is true. What sweeps it up is
+ * the learner's own `git add -A`, one click of VS Code's *Stage All Changes*, in a repository
+ * this extension created — the ordinary path, where nobody did anything wrong.
+ *
+ * ## `.git/info/exclude`, not a `.gitignore` in their project
+ *
+ * The two mechanisms differ in exactly the way that decides this. A tracked `.gitignore` is
+ * this extension writing a file into somebody's project that then shows up in their `git
+ * status`, rides into their next commit, and travels to everyone who clones it — a permanent
+ * edit to their repository's content, made without asking, to say something that is only true
+ * while this extension is running on this machine. `.git/info/exclude` is git's own mechanism
+ * for exactly that: a per-checkout ignore list, invisible in `git status`, never committed,
+ * never pushed. It does not survive a clone — and it does not need to, because what it hides
+ * is a directory this extension creates where it runs, and it writes the rule again wherever
+ * it next runs.
+ *
+ * ## Written when the repository already existed, too
+ *
+ * `ensureRepo` no-ops when `target` is already inside a working tree, and it would have been
+ * easy to make this follow it. That would cover the wrong half. A learner working inside a
+ * repository of their own — their real project, with their real history, which they push — is
+ * precisely the case where a committed transcript costs them something, and the fresh-init
+ * case is the one where the repository is a scratch folder this extension just made. So the
+ * rule is written on both paths.
+ *
+ * ## Never throws, and never writes twice
+ *
+ * Idempotent by reading first: the pattern is matched line-by-line, so running this on every
+ * commit — which is what `ensureRepo` does — appends nothing after the first time, and an
+ * exclude file the learner already has is appended to rather than replaced. Every failure is
+ * swallowed: a repository whose `.git` is unreadable, a `--git-dir` git will not answer, a
+ * read-only checkout. This runs in front of a commit the learner asked for and in front of a
+ * question they asked; a hardening step that could not happen is not a reason to refuse either
+ * of them, and `commitStep` has no channel for a sentence about it that would not read as the
+ * commit having failed.
+ */
+export async function ensureTranscriptIgnored(target: string, git: GitRunner): Promise<void> {
+  try {
+    // `--git-dir` rather than `fs.existsSync(<target>/.git)`, for the reason `insideWorkTree`
+    // gives: the answer is a path (absolute, or relative to `target`), and it is correct for a
+    // subdirectory of a repository, for a linked worktree and for a submodule, all three of
+    // which keep their real gitdir somewhere else entirely.
+    const raw = (await git(['rev-parse', '--git-dir'], target)).trim();
+    if (raw === '') return;
+    const info = path.resolve(target, raw, 'info');
+    const excludeFile = path.join(info, 'exclude');
+
+    let existing = '';
+    try {
+      existing = fs.readFileSync(excludeFile, 'utf8');
+    } catch {
+      // No exclude file yet is the ordinary state of a repository git just created; the write
+      // below makes one. Any other read failure lands here too and is treated the same way,
+      // which is safe in the one direction that matters: the pattern is appended rather than
+      // the file replaced, so nothing a learner wrote can be lost by a read that failed.
+      existing = '';
+    }
+    if (existing.split('\n').some((line) => line.trim() === TUTORIAL_DIR_IGNORE)) return;
+
+    fs.mkdirSync(info, { recursive: true });
+    // A leading newline when the file does not already end in one, so this never joins itself
+    // onto somebody's last pattern and silently changes what it matches.
+    const separator = existing === '' || existing.endsWith('\n') ? '' : '\n';
+    fs.appendFileSync(excludeFile, separator + TUTORIAL_IGNORE_BLOCK);
+  } catch {
+    // See the header: hardening that could not happen is not a reason to refuse the commit or
+    // the question it runs in front of.
+  }
 }
 
 /**

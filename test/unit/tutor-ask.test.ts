@@ -35,10 +35,25 @@
  */
 
 import * as assert from 'node:assert/strict';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
-import { askTutor, checkReachable, startAsk, type AskOutcome, type TutorDeps } from '../../src/tutor/ask.js';
+import {
+  AskLedger,
+  askTutor,
+  boundedTimeoutMs,
+  checkReachable,
+  DEFAULT_TIMEOUT_MS,
+  isFetchRequestReply,
+  MAX_TIMEOUT_MS,
+  MIN_TIMEOUT_MS,
+  startAsk,
+  withoutFetchProtocol,
+  type AskOutcome,
+  type AskSettings,
+  type TutorDeps,
+} from '../../src/tutor/ask.js';
 import { tutorCoreFor, type AskContext, type AskMessage, type LlmChoice, type LlmReply, type TutorCore } from '../../src/tutor/core.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
@@ -535,5 +550,395 @@ suite('startAsk — cancelling detaches the panel; it does not kill the request'
 
     assert.equal(await ask.delivered, null);
     assert.equal(calls.length, 0);
+  });
+});
+
+// ── T-6 review: the seam ───────────────────────────────────────────────────────────────────
+
+/**
+ * The first review of this module found five defects that are one absence: nothing owned the
+ * set of live paid requests, the bound on their deadline, the directory they launch in, or
+ * what they had cost. `AskLedger` is that owner, and these suites are its proof — every one of
+ * them drives the ledger rather than reading it, and none of them can reach a provider.
+ */
+
+/** An ask that will not answer until the test says so, and remembers whether it was asked. */
+function held(): { run: TutorCore['runLlm']; calls: () => number; reply: (r?: Partial<LlmReply>) => void; fail: (why: string) => void } {
+  let resolveWith: ((reply: LlmReply) => void) | undefined;
+  let rejectWith: ((err: Error) => void) | undefined;
+  let calls = 0;
+  return {
+    run: () => {
+      calls += 1;
+      return new Promise<LlmReply>((resolve, reject) => { resolveWith = resolve; rejectWith = reject; });
+    },
+    calls: () => calls,
+    reply: (r = {}) => resolveWith?.({ text: 'an answer', inputTokens: 10, outputTokens: 5, usd: 0.002, metered: true, ...r }),
+    fail: (why) => rejectWith?.(new Error(why)),
+  };
+}
+
+function settingsWith(overrides: Partial<AskSettings> = {}): AskSettings {
+  const deps = depsWith();
+  // Everything the ledger does NOT choose. `cwd` is deliberately absent from `AskSettings`:
+  // the ledger picks the directory the provider is started in, so no caller can hand it one.
+  return { core: deps.core, provider: deps.provider, model: deps.model, timeoutMs: deps.timeoutMs, ...overrides };
+}
+
+function tick(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Let the pre-flight inside `askTutor` — the availability probe and the prompt build — run,
+ *  so `held()`'s runner has actually been reached and can be released. Three hops, because
+ *  that is how many awaits sit between `send()` and the call. */
+async function reachedTheRunner(): Promise<void> {
+  await tick();
+  await tick();
+  await tick();
+}
+
+suite('boundedTimeoutMs — the deadline is neither NaN nor an overflow (review finding 9)', () => {
+  test('a value that is not a number becomes the default, rather than NaN', () => {
+    // The shipped defect, in one line. `src/extension.ts` did `Math.max(5, seconds) * 1000`
+    // with no type check, `Math.max(5, "two minutes")` is NaN, and `setTimeout(…, NaN)` fires
+    // IMMEDIATELY — so every ask instantly "timed out" while the request ran on and billed.
+    for (const raw of ['two minutes', NaN, Infinity, -Infinity, undefined, null, {}, []] as unknown[]) {
+      assert.equal(boundedTimeoutMs(raw), DEFAULT_TIMEOUT_MS, `${JSON.stringify(raw) ?? 'undefined'} is not a deadline`);
+    }
+  });
+
+  test('a deadline that has already passed is garbage too, not an instant timeout', () => {
+    assert.equal(boundedTimeoutMs(0), DEFAULT_TIMEOUT_MS);
+    assert.equal(boundedTimeoutMs(-1), DEFAULT_TIMEOUT_MS);
+  });
+
+  test('anything past an hour is capped, three orders of magnitude short of the int32 wrap', () => {
+    // Measured on the shipped code: `tutorTimeoutSeconds=999999999` → `timedOut` after 1 ms,
+    // because Node clamps a timer past 2^31-1 ms to 1 ms while the model runs on and bills.
+    assert.equal(boundedTimeoutMs(999_999_999_000), MAX_TIMEOUT_MS);
+    assert.ok(MAX_TIMEOUT_MS < 2_147_483_647, 'the cap must be a number a 32-bit timer can hold');
+  });
+
+  test('an ordinary deadline passes through untouched, including a very small one', () => {
+    assert.equal(boundedTimeoutMs(120_000), 120_000);
+    // Not clamped up to the SETTING's floor: `package.json`'s `minimum: 5` is a statement
+    // about what is sensible to wait for, and this function's job is garbage, not policy.
+    // A suite that could not race a 20 ms deadline could not pin the race at all.
+    assert.equal(boundedTimeoutMs(20), 20);
+    assert.equal(boundedTimeoutMs(0.4), MIN_TIMEOUT_MS, 'and never rounds down to a zero-millisecond timer');
+  });
+
+  test('driven: a string deadline no longer times an ask out instantly', async () => {
+    const { run } = recorder();
+    const started = Date.now();
+
+    const outcome = await askTutor(depsWith({ run, timeoutMs: 'two minutes' as unknown as number }), CTX, ONE_QUESTION);
+
+    assert.equal(outcome.kind, 'reply', 'the shipped code answered `timedOut` here, in about a millisecond');
+    assert.ok(Date.now() - started < 1_000);
+  });
+
+  test('driven: an overflowing deadline no longer times an ask out instantly', async () => {
+    const { calls, run } = recorder();
+
+    const outcome = await askTutor(depsWith({ run, timeoutMs: 999_999_999_000 }), CTX, ONE_QUESTION);
+
+    assert.equal(outcome.kind, 'reply');
+    assert.equal(calls[0]!.timeoutMs, MAX_TIMEOUT_MS, 'and the provider is handed the SAME bounded number, so its own kill deadline agrees with ours');
+  });
+});
+
+suite('the FETCH protocol the persona promises and this consumer does not have (security 10)', () => {
+  test('the real persona\'s fetch section is replaced with the truth, in the real prompt', () => {
+    // Read off the REAL repo-tour prompt rather than a fixture: the whole risk is that
+    // repo-tour's `ASK_PERSONA` says something this extension cannot do.
+    const prompt = realCore.buildAskPrompt(ONE_QUESTION, CTX);
+    assert.match(prompt, /FETCH: file/, 'the core really does promise the protocol — if this stops being true, so does the fix');
+
+    const sent = withoutFetchProtocol(prompt);
+
+    assert.doesNotMatch(sent, /FETCH: file/, 'the model is no longer told it may ask for a file');
+    assert.match(sent, /Looking things up:/, 'and the heading stays, because an earlier bullet cross-references it by name');
+    assert.match(sent, /implements no fetch protocol/);
+    assert.ok(sent.includes(realCore.buildContextBlock(CTX)), 'nothing but the section was touched');
+  });
+
+  test('a prompt with no such section is returned exactly as it came', () => {
+    // Best-effort by design: repo-tour rewording the persona must not corrupt a prompt.
+    const plain = 'SYSTEM\n\nsome context\n\n--- CONVERSATION SO FAR ---\nREADER: hi\n';
+    assert.equal(withoutFetchProtocol(plain), plain);
+  });
+
+  test('a reply that IS a fetch request is refused rather than drawn as an answer', async () => {
+    const { run } = recorder({ text: 'FETCH: file src/rank.ts', usd: 0.004, metered: true });
+
+    const outcome = await askTutor(depsWith({ run }), CTX, ONE_QUESTION);
+
+    assert.equal(outcome.kind, 'failed', 'plumbing is not an answer, and must never become a stored assistant turn');
+    assert.match(outcome.kind === 'failed' ? outcome.detail : '', /no way to fetch one/);
+    // The money half: the request was made and paid for, whatever came back.
+    assert.equal(outcome.kind === 'failed' ? outcome.cost?.usd : undefined, 0.004);
+  });
+
+  test('an answer that merely mentions FETCH is an answer', () => {
+    assert.equal(isFetchRequestReply('FETCH: file src/rank.ts'), true);
+    assert.equal(isFetchRequestReply('```\nFETCH: search tokenize\n```'), true, 'fenced, exactly as repo-tour\'s own parser reads it');
+    assert.equal(isFetchRequestReply('The model may reply FETCH: file x — but it cannot here.\nSo ask me instead.'), false);
+    assert.equal(isFetchRequestReply('FETCH: nonsense'), false);
+    assert.equal(isFetchRequestReply('Because the parser has one job.'), false);
+  });
+});
+
+suite('AskLedger — the one thing that owns a live paid request', () => {
+  test('the neutral cwd is the ledger\'s, and it is neither the learner\'s folder nor /tmp itself', async () => {
+    // Security review finding 3: the provider is an agent CLI, an agent CLI reads its
+    // configuration out of the directory it starts in, and T-5's `reproduceFiles` copies a
+    // reference repo's `.claude/settings.json` into the learner's folder with no allowlist.
+    const ledger = new AskLedger();
+    const { calls, run } = recorder();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      ticket.send(settingsWith({ run }), CTX, ONE_QUESTION);
+      await ticket.delivered;
+
+      const dir = calls[0]!.cwd;
+      assert.notEqual(dir, '/learner/target');
+      assert.notEqual(dir, os.tmpdir(), 'a world-writable directory is not a neutral one');
+      assert.ok(dir.startsWith(os.tmpdir()) && fs.existsSync(dir));
+      assert.deepEqual(fs.readdirSync(dir), [], 'empty — there is nothing in it for a CLI to read as configuration');
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('close() takes the scratch directory away and refuses to open another ticket', async () => {
+    const ledger = new AskLedger();
+    const { calls, run } = recorder();
+    const first = ledger.open('st-2-file-parse');
+    first.send(settingsWith({ run }), CTX, ONE_QUESTION);
+    await first.delivered;
+    const dir = calls[0]!.cwd;
+
+    ledger.close();
+
+    assert.equal(fs.existsSync(dir), false, 'no litter in the temp directory, one per window reload');
+    const after = ledger.open('st-3-symbol-handle');
+    after.send(settingsWith({ run }), CTX, ONE_QUESTION);
+    assert.equal(calls.length, 1, 'a closed ledger never sends again — a disposed session must not be able to start a request');
+    assert.equal(await after.delivered, null);
+  });
+
+  test('the deadline is bounded at the ledger, so no entry point can arm a NaN timer', async () => {
+    const ledger = new AskLedger();
+    const { calls, run } = recorder();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      ticket.send(settingsWith({ run, timeoutMs: 'soon' as unknown as number }), CTX, ONE_QUESTION);
+      await ticket.delivered;
+
+      assert.equal(calls[0]!.timeoutMs, DEFAULT_TIMEOUT_MS);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('spend() counts what came back, and says UNKNOWN rather than zero when nothing metered it', async () => {
+    const ledger = new AskLedger();
+    try {
+      assert.deepEqual(ledger.spend(), {
+        preparing: 0, sending: 0, unwatched: 0, replies: 0, inputTokens: 0, outputTokens: 0, usd: 0, metered: false,
+      }, 'a walk that has asked nothing has spent nothing, and knows it');
+
+      const metered = ledger.open('st-2-file-parse');
+      metered.send(settingsWith({ run: recorder({ inputTokens: 800, outputTokens: 120, usd: 0.0031, metered: true }).run }), CTX, ONE_QUESTION);
+      await metered.delivered;
+      assert.deepEqual(ledger.spend(), {
+        preparing: 0, sending: 0, unwatched: 0, replies: 1, inputTokens: 800, outputTokens: 120, usd: 0.0031, metered: true,
+      });
+
+      const unmetered = ledger.open('st-2-file-parse');
+      unmetered.send(settingsWith({ run: recorder({ inputTokens: 0, outputTokens: 0, usd: 0, metered: false }).run }), CTX, ONE_QUESTION);
+      await unmetered.delivered;
+
+      const spend = ledger.spend();
+      assert.equal(spend.replies, 2);
+      assert.equal(spend.metered, false,
+        'ONE unmetered answer makes the total a floor rather than a figure — zeros mean unknown, never free');
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('a provider that reports nonsense cannot turn the total into NaN', async () => {
+    const ledger = new AskLedger();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      ticket.send(settingsWith({ run: recorder({ usd: NaN, inputTokens: Infinity, metered: true }).run }), CTX, ONE_QUESTION);
+      await ticket.delivered;
+
+      const spend = ledger.spend();
+      assert.equal(spend.usd, 0);
+      assert.equal(spend.inputTokens, 0);
+      assert.equal(spend.replies, 1, 'it still happened and was still paid for');
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('abandoning BEFORE the send means nothing is ever sent, and nothing is charged', async () => {
+    // The pre-flight half of the seam (security review finding 5). `startAsk` alone could only
+    // ever detach from a request that had already been made.
+    const ledger = new AskLedger();
+    const gate = held();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      assert.equal(ticket.phase, 'preparing');
+      assert.equal(ledger.spend().preparing, 1, 'and the panel can draw it, which is why it exists');
+
+      ticket.abandon();
+      ticket.send(settingsWith({ run: gate.run }), CTX, ONE_QUESTION);
+
+      assert.equal(gate.calls(), 0, 'a cancel during the pre-flight is a real cancellation, not a detachment');
+      assert.equal(await ticket.delivered, null);
+      assert.deepEqual(ledger.live(), []);
+      assert.equal(ledger.spend().replies, 0);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('a question the learner walked away from stays counted until the provider is done with it', async () => {
+    // Code review finding 10's money half, and the reason the ledger listens to
+    // `AskRun.finished` rather than to `delivered`.
+    const ledger = new AskLedger();
+    const gate = held();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      ticket.send(settingsWith({ run: gate.run }), CTX, ONE_QUESTION);
+      assert.deepEqual(
+        { sending: ledger.spend().sending, unwatched: ledger.spend().unwatched },
+        { sending: 1, unwatched: 0 },
+      );
+
+      await reachedTheRunner();
+      ticket.abandon();
+      assert.equal(await ticket.delivered, null, 'the panel stops waiting AT ONCE');
+      assert.deepEqual(
+        { sending: ledger.spend().sending, unwatched: ledger.spend().unwatched },
+        { sending: 1, unwatched: 1 },
+        'and the request is still running and still billing, which is what the page has to say',
+      );
+
+      gate.reply({ usd: 0.005, metered: true });
+      await tick();
+
+      assert.equal(ledger.spend().sending, 0);
+      assert.equal(ledger.spend().usd, 0.005, 'they were billed for it, so it is in the total');
+      assert.equal(ledger.spend().replies, 1);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('two live requests are two, and abandonAll() reaches both — from anywhere', async () => {
+    // Code review finding 3: `thinking` is per-step, so navigating away used to leave a
+    // billing request with no control anywhere in the UI to stop it. One control, one call.
+    const ledger = new AskLedger();
+    const first = held();
+    const second = held();
+    try {
+      const a = ledger.open('st-2-file-parse');
+      a.send(settingsWith({ run: first.run }), CTX, ONE_QUESTION);
+      const b = ledger.open('st-3-symbol-handle');
+      b.send(settingsWith({ run: second.run }), CTX, ONE_QUESTION);
+
+      assert.deepEqual(ledger.live().map((entry) => entry.stepId), ['st-2-file-parse', 'st-3-symbol-handle']);
+      assert.equal(ledger.spend().sending, 2);
+
+      ledger.abandonAll();
+
+      assert.equal(await a.delivered, null);
+      assert.equal(await b.delivered, null);
+      assert.equal(ledger.spend().unwatched, 2, 'stopped waiting for, still running, still billing — and the page says so');
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('live() names the step each ask belongs to, which is what the OTHER step\'s page draws', async () => {
+    const ledger = new AskLedger();
+    const gate = held();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      assert.deepEqual(ledger.live(), [{ stepId: 'st-2-file-parse', phase: 'preparing', abandoned: false }]);
+      ticket.send(settingsWith({ run: gate.run }), CTX, ONE_QUESTION);
+      assert.deepEqual(ledger.live(), [{ stepId: 'st-2-file-parse', phase: 'sending', abandoned: false }]);
+
+      await reachedTheRunner();
+      gate.reply();
+      await ticket.delivered;
+      await tick();
+      assert.deepEqual(ledger.live(), [], 'an answered ask is not live, and nothing has to remember to say so');
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('a ticket is one request: a second send does nothing, and there is no retry', async () => {
+    const ledger = new AskLedger();
+    const gate = held();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      ticket.send(settingsWith({ run: gate.run }), CTX, ONE_QUESTION);
+      ticket.send(settingsWith({ run: gate.run }), CTX, ONE_QUESTION);
+      await reachedTheRunner();
+
+      assert.equal(gate.calls(), 1);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test('a failing provider closes the ticket and is not counted as a paid reply', async () => {
+    const ledger = new AskLedger();
+    const gate = held();
+    try {
+      const ticket = ledger.open('st-2-file-parse');
+      ticket.send(settingsWith({ run: gate.run }), CTX, ONE_QUESTION);
+      await reachedTheRunner();
+      gate.fail('claude exited 127');
+      const outcome = await ticket.delivered;
+
+      assert.equal(outcome?.kind, 'failed');
+      await tick();
+      assert.deepEqual(ledger.live(), []);
+      assert.equal(ledger.spend().replies, 0, 'a call that never produced an answer reported no cost, and inventing one would be worse than saying nothing');
+    } finally {
+      ledger.close();
+    }
+  });
+});
+
+suite('AskRun.finished — what was paid for, as opposed to what was delivered', () => {
+  test('it resolves with the real outcome even after a detach', async () => {
+    const gate = held();
+    const run = startAsk(depsWith({ run: gate.run }), CTX, ONE_QUESTION);
+    await reachedTheRunner();
+
+    run.detach();
+    assert.equal(await run.delivered, null, 'the panel is disconnected');
+
+    gate.reply({ usd: 0.01, metered: true });
+    const finished = await run.finished;
+    assert.equal(finished.kind, 'reply', 'and the request finished anyway, because detaching is not killing');
+    assert.equal(finished.kind === 'reply' && finished.cost.usd, 0.01);
+  });
+
+  test('it never rejects, whatever the runner does', async () => {
+    const run = startAsk(depsWith({ run: () => Promise.reject(new Error('boom')) }), CTX, ONE_QUESTION);
+
+    const finished = await run.finished;
+    assert.equal(finished.kind, 'failed');
   });
 });

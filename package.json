@@ -139,7 +139,8 @@
           "type": "number",
           "default": 120,
           "minimum": 5,
-          "description": "How long to wait for a tutor answer before giving up. A timeout is reported as a reply in the panel, never as a spinner that does not end."
+          "maximum": 3600,
+          "description": "How long to wait for a tutor answer before giving up, between 5 seconds and an hour. A timeout is reported as a reply in the panel, never as a spinner that does not end. The maximum is not a preference: past about 2,147,483 seconds the deadline overflows a 32-bit timer, Node fires it after one millisecond, and every ask would report a timeout instantly while the model kept running and kept billing. The extension bounds this again where the timer is armed, so a hand-edited settings file cannot get past it either."
         }
       }
     }

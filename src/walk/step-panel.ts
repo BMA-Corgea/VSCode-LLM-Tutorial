@@ -153,6 +153,9 @@ export interface WalkSessionLike {
    */
   ask(text: string): void;
   cancelAsk(): void;
+  /** T-6 review: forget this step's conversation. `clearTranscript` shipped exported with six
+   *  unit tests and no caller — a stored conversation owes somebody a way to delete it. */
+  clearConversation(): void;
 }
 
 export interface StepPanelDeps {
@@ -264,6 +267,7 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       reproduce: () => { this.deps.session()?.reproduce(); },
       ask: (text: string) => { this.deps.session()?.ask(text); },
       cancelAsk: () => { this.deps.session()?.cancelAsk(); },
+      clearConversation: () => { this.deps.session()?.clearConversation(); },
       persistDial: (stepId: string, dial: Dial) => { this.deps.session()?.setDial(stepId, dial); },
       persistSkin: (name: string) => {
         // Updated here, not merely taken from `handleStepMessage`'s returned state: `setView`

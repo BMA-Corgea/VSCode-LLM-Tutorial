@@ -1320,6 +1320,10 @@ suite('the dial, the check and the commit (T-5)', () => {
       assert.deepEqual(pick(fake, 'git').map((call) => call.args), [
         ['rev-parse', '--is-inside-work-tree'],
         ['init', '-q'],
+        // T-6 security review finding 12: the repository this extension just created is made
+        // to ignore `.repo-tour/` before anything is committed into it, so a learner's own
+        // `git add -A` cannot sweep up their tutor conversation. A read, not a write.
+        ['rev-parse', '--git-dir'],
         ['config', 'user.name'],
         ['config', 'user.email'],
         ['add', '--', path.join(target, 'src/parse.ts')],
@@ -1664,7 +1668,7 @@ suite('the dial, the check and the commit (T-5)', () => {
       session.runCheck();
       await session.settled();
 
-      assert.deepEqual(pick(fake, 'git').map((call) => call.args[0]), ['rev-parse', 'init', 'config', 'config'],
+      assert.deepEqual(pick(fake, 'git').map((call) => call.args[0]), ['rev-parse', 'init', 'rev-parse', 'config', 'config'],
         'it never reaches commit — a tutorial inventing an author on a repository the learner will keep and push is graffiti with a signature');
       assert.match(session.getView()?.writeNote ?? '', /was not committed/);
       assert.equal(pick(fake, 'reportError').length, 1);
@@ -2226,7 +2230,15 @@ suite('the tutor — asking, and what is remembered (AC2, AC3)', () => {
     assert.match(sent[0]!.prompt, /file=src\/parse\.ts/);
     assert.match(sent[0]!.prompt, /diff=The learner has not created this file yet/, 'and how their file differs — here, that there is not one');
     assert.match(sent[0]!.prompt, /turns=user:why\?/, 'with the conversation so far, this question included');
-    assert.equal(sent[0]!.cwd, TARGET, 'run in the LEARNER\'s folder, never the reference');
+    // Security review finding 3. It used to be the LEARNER's folder, and the comment beside it
+    // said so proudly — but the provider is an agent CLI, an agent CLI reads its configuration
+    // out of the directory it starts in, and T-5's `reproduceFiles` copies a reference repo's
+    // `.claude/settings.json` and `.mcp.json` into exactly that folder with no name allowlist.
+    // `cwd` buys the ask nothing (the prompt goes in on stdin), so it is now a fresh empty
+    // directory the ledger made — see `AskLedger.scratchDir`.
+    assert.notEqual(sent[0]!.cwd, TARGET, 'never the learner\'s folder: an agent CLI reads its configuration out of the directory it starts in');
+    assert.ok(sent[0]!.cwd.startsWith(os.tmpdir()), 'a neutral scratch directory this process made, not the reference either');
+    assert.notEqual(sent[0]!.cwd, os.tmpdir(), 'and not the shared temp directory itself, which anyone on this machine can write into');
     assert.equal(sent[0]!.timeoutMs, 9_000);
     // `resolveTutorChoice`, not `resolveChoice`: an unset tutor model means the provider's
     // STRONGEST, which is the right way round for the one place a wrong answer is read by
@@ -2613,5 +2625,459 @@ suite('the tutor — the spinner comes off even when a surface misbehaves (AC4)'
     assert.deepEqual(getTranscript(fake.stored()!, STEP).map((t) => t.content), ['why?', 'because the parser has one job']);
     assert.equal(pick(fake, 'reportError').length, 1, 'and the throw was reported rather than swallowed');
     session.dispose();
+  });
+});
+
+// ── T-6 review: the merge bar, and the seam behind it ──────────────────────────────────────
+
+/**
+ * **Four refusal paths used to DESTROY the question the learner typed.**
+ *
+ * The client script emptied the box, cleared the saved draft and persisted the clearing on the
+ * PRESS — before the host had decided anything — and four of the host's answers are decided
+ * after that press: the provider is unreachable, there is no `request.json`, repo-tour will not
+ * load, one ask is already in flight. On each of them the question was gone from the box, gone
+ * from the saved blob and (deliberately, and tested) not in the transcript either. It was
+ * nowhere. On a machine with no `claude` that was the FIRST thing the tutor ever did, which is
+ * the AC4 scenario the spec names by hand.
+ *
+ * The fix is one signal: the host says which question it actually SENT, and the page keeps its
+ * draft until then (`TutorView.accepted`, `data-accepted`, and the client script's comparison).
+ * So the assertion that matters on every refusal is that `accepted` is ABSENT — because that
+ * absence is what leaves the learner's text where they typed it.
+ */
+suite('the tutor — a refusal never eats the question (review findings 1, 2, 3)', () => {
+  const STEP = 'st-2-file-parse';
+
+  function tutorOf(fake: Fake): NonNullable<WalkView['tutor']> | undefined {
+    const pushes = pick(fake, 'setPanel');
+    return pushes[pushes.length - 1]?.view?.tutor;
+  }
+
+  test('the ONE path that sends names the question it sent — and only that path', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why does the tokenizer get its own module?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.accepted, 'why does the tokenizer get its own module?',
+      'this is the signal the page drops its draft on, and nothing else may set it');
+    assert.deepEqual(getTranscript(fake.stored()!, STEP).map((t) => t.content), ['why does the tokenizer get its own module?', 'because']);
+  });
+
+  test('an unreachable provider refuses WITHOUT naming a question — the AC4 machine', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), availability: { ok: false, detail: 'claude: not found on PATH' } });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.accepted, undefined, 'nothing was sent, so the page keeps what the learner typed');
+    assert.match(tutorOf(fake)?.note ?? '', /still in the box/, 'and the sentence says so, where the eye already is');
+    assert.deepEqual(pick(fake, 'runLlm'), []);
+  });
+
+  test('no request.json refuses without naming a question', async () => {
+    const plan = fixturePlan();
+    const fake = fakeAdapters({ plan, progress: setCurrent(fixtureProgress(plan), STEP) });
+    const session = WalkSession.open(TARGET, fake.adapters);
+    fake.clearLog();
+
+    session.ask('why?');
+    await session.settled();
+
+    const pushes = pick(fake, 'setPanel');
+    assert.equal(pushes[pushes.length - 1]?.view?.tutor?.accepted, undefined);
+    assert.match(pushes[pushes.length - 1]?.view?.tutor?.note ?? '', /still in the box/);
+    session.dispose();
+  });
+
+  test('a core that will not load refuses without naming a question', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorCoreMissing: true });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.accepted, undefined);
+    assert.match(tutorOf(fake)?.note ?? '', /still in the box/);
+  });
+
+  test('a second ask while one is in flight refuses without naming the SECOND question', async () => {
+    // Review finding 2: the branch's comment claimed it was unreachable. It is not — but the
+    // window is now one chain hop instead of a dynamic import, a `claude --version` spawn with
+    // a fifteen-second budget and a `git diff`, because the ticket is opened at the press.
+    let release: (() => void) | undefined;
+    const { session, fake } = opened({
+      request: tutorRequest(),
+      tutorRunner: () => new Promise((resolve) => { release = () => resolve({ text: 'first answer', inputTokens: 0, outputTokens: 0, usd: 0, metered: false }); }),
+    });
+
+    session.ask('first?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.ask('second?');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(tutorOf(fake)?.accepted, 'first?', 'the FIRST question is the one that was sent, and the page must not drop the second on its name');
+    assert.match(tutorOf(fake)?.note ?? '', /already with the tutor/);
+    assert.match(tutorOf(fake)?.note ?? '', /still in the box/);
+    assert.deepEqual(getTranscript(fake.stored()!, STEP).map((t) => t.content), ['first?']);
+
+    release!();
+    await session.settled();
+  });
+
+  test('asking the SAME question twice does not let the first ask\'s signal eat the second draft', async () => {
+    // A retry after a failure is the obvious way to type the same words twice, and it is
+    // exactly when the provider is most likely to refuse again. `accepted` describes THIS ask.
+    const gate = { availability: { ok: false, detail: 'claude: not found on PATH' } };
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why?');
+    await session.settled();
+    assert.equal(tutorOf(fake)?.accepted, 'why?');
+
+    // Now the provider goes away, and they ask the same thing again.
+    const core = await fake.adapters.tutorCore!();
+    fake.adapters.tutorCore = () => Promise.resolve(core ? { ...core, availability: () => Promise.resolve(gate.availability) } : core);
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.accepted, undefined,
+      'nothing was sent this time, so the page must keep the words they retyped');
+    assert.match(tutorOf(fake)?.note ?? '', /still in the box/);
+  });
+
+  test('the signal does not follow the learner to another step', async () => {
+    // A question about one decision must not empty the box under another.
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why?');
+    await session.settled();
+    session.goTo('st-3-symbol-handle');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.accepted, undefined);
+  });
+});
+
+suite('the tutor — the wait begins at the PRESS, and Cancel reaches it (security finding 5)', () => {
+  const STEP = 'st-2-file-parse';
+
+  /** A probe that will not answer until the test says so — the fifteen-second `claude
+   *  --version` budget, in miniature. */
+  function gatedProbe(): { availability: () => Promise<Availability>; open: () => void } {
+    // Every waiter is held, not just the last one: `askTutor` probes again on its own way in
+    // (it is contracted to), so one ask reaches this twice and releasing one of them would
+    // leave the other hanging.
+    const waiting: Array<() => void> = [];
+    let opened = false;
+    const answer: Availability = { ok: true, detail: 'a slow probe' };
+    return {
+      availability: () => opened
+        ? Promise.resolve(answer)
+        : new Promise<Availability>((resolve) => { waiting.push(() => resolve(answer)); }),
+      open: () => {
+        opened = true;
+        for (const release of waiting.splice(0)) release();
+      },
+    };
+  }
+
+  function withGatedProbe(gate: ReturnType<typeof gatedProbe>, options: FakeOptions = {}): { session: WalkSession; fake: Fake } {
+    const plan = fixturePlan();
+    const fake = fakeAdapters({ ...options, plan, progress: setCurrent(fixtureProgress(plan), STEP), request: tutorRequest() });
+    const loadCore = fake.adapters.tutorCore?.bind(fake.adapters);
+    assert.ok(loadCore, 'the fake wires a tutor core unless a test says otherwise');
+    fake.adapters.tutorCore = async () => {
+      const core = await loadCore();
+      return core ? { ...core, availability: gate.availability } : core;
+    };
+    const session = WalkSession.open(TARGET, fake.adapters);
+    fake.clearLog();
+    return { session, fake };
+  }
+
+  test('the panel shows the wait DURING the probe, which used to run off camera entirely', async () => {
+    const gate = gatedProbe();
+    const { session, fake } = withGatedProbe(gate, { tutorReply: 'because' });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const pushes = pick(fake, 'setPanel');
+    const tutor = pushes[pushes.length - 1]?.view?.tutor;
+    assert.equal(tutor?.thinking, true, 'the shipped code pushed NOTHING here — pressing Ask looked exactly like a button that did nothing');
+    assert.equal(tutor?.stage, 'preparing', 'and it says which half of the wait this is: nothing has been sent, nothing is charged');
+    assert.deepEqual(pick(fake, 'runLlm'), [], 'because nothing has been sent');
+
+    gate.open();
+    await session.settled();
+    assert.equal(pick(fake, 'setPanel').pop()?.view?.tutor?.thinking, false);
+  });
+
+  test('Cancel during the probe stops the ask — nothing is sent, and nothing is charged', async () => {
+    const gate = gatedProbe();
+    const { session, fake } = withGatedProbe(gate, { tutorReply: 'because' });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.cancelAsk();
+
+    // SYNCHRONOUS, like every other Cancel: the whole promise of the control is that the wait
+    // ends now. `cancelAsk` used to early-return on `!asking` here and say nothing at all.
+    const tutor = pick(fake, 'setPanel').pop()?.view?.tutor;
+    assert.equal(tutor?.thinking, false);
+    assert.match(tutor?.note ?? '', /nothing was asked and nothing was charged/,
+      'a cancel BEFORE the send is a real cancellation, and saying "you will still be billed" there would be its own small lie');
+
+    gate.open();
+    await session.settled();
+    assert.deepEqual(pick(fake, 'runLlm'), [], 'the request was never made');
+    assert.deepEqual(getTranscript(fake.stored() ?? emptyProgress(fixturePlan()), STEP), [],
+      'and nothing was recorded as asked');
+  });
+});
+
+suite('the tutor — a live ask is reachable from every step (review finding 3)', () => {
+  const STEP = 'st-2-file-parse';
+
+  function held(): { runner: TutorCore['runLlm']; release: (text: string) => void; calls: () => number } {
+    let resolveWith: ((reply: LlmReply) => void) | undefined;
+    let calls = 0;
+    return {
+      runner: () => { calls += 1; return new Promise<LlmReply>((resolve) => { resolveWith = resolve; }); },
+      release: (text) => resolveWith?.({ text, inputTokens: 0, outputTokens: 0, usd: 0, metered: false }),
+      calls: () => calls,
+    };
+  }
+
+  test('navigating away names the step the ask is on, instead of pointing at a Cancel that is not there', async () => {
+    const gate = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: gate.runner });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.goTo('st-3-symbol-handle');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const tutor = pick(fake, 'setPanel').pop()?.view?.tutor;
+    assert.equal(tutor?.thinking, false, 'no spinner on a step the learner merely walked to — that part was always right');
+    assert.deepEqual(tutor?.elsewhere, { stepId: STEP, stage: 'sending' },
+      'but the request is real, and it is still billing, so the page they ARE on has to be able to say so');
+
+    gate.release('the late answer');
+    await session.settled();
+  });
+
+  test('and Cancel pressed from that other step really stops it', async () => {
+    const gate = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: gate.runner });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.goTo('st-3-symbol-handle');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.cancelAsk();
+
+    const tutor = pick(fake, 'setPanel').pop()?.view?.tutor;
+    assert.equal(tutor?.elsewhere, undefined, 'there is nothing live left to name');
+    gate.release('an answer to a question you walked away from');
+    await session.settled();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(getTranscript(fake.stored()!, STEP).map((t) => t.content), ['why?'],
+      'and the safety property is unchanged: the answer to a cancelled question lands nowhere');
+  });
+});
+
+suite('the tutor — what it cost is on the page (review findings 5 and 10)', () => {
+  const STEP = 'st-2-file-parse';
+
+  function tutorOf(fake: Fake): NonNullable<WalkView['tutor']> | undefined {
+    return pick(fake, 'setPanel').pop()?.view?.tutor;
+  }
+
+  function held(): { runner: TutorCore['runLlm']; release: (reply?: Partial<LlmReply>) => void; calls: () => number } {
+    let resolveWith: ((reply: LlmReply) => void) | undefined;
+    let calls = 0;
+    return {
+      runner: () => { calls += 1; return new Promise<LlmReply>((resolve) => { resolveWith = resolve; }); },
+      release: (reply = {}) => resolveWith?.({ text: 'an answer', inputTokens: 0, outputTokens: 0, usd: 0, metered: false, ...reply }),
+      calls: () => calls,
+    };
+  }
+
+  test('a metered answer reaches the panel as a figure, not as a comment nobody reads', async () => {
+    // `AskCost` was computed on every reply, carried through `AskOutcome` and read NOWHERE —
+    // in a module whose own header argues that "a tutor that quietly bills is not honest".
+    const { session, fake } = opened({
+      request: tutorRequest(),
+      tutorRunner: () => Promise.resolve({ text: 'because', inputTokens: 900, outputTokens: 140, usd: 0.0042, metered: true }),
+    });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.deepEqual(tutorOf(fake)?.spend, {
+      preparing: 0, sending: 0, unwatched: 0, replies: 1, inputTokens: 900, outputTokens: 140, usd: 0.0042, metered: true,
+    });
+  });
+
+  test('an unmetered provider is reported as UNKNOWN, never as a free answer', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why?');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.spend?.replies, 1);
+    assert.equal(tutorOf(fake)?.spend?.metered, false, 'zeros with metered:false mean unknown, and the page may not draw them as a total');
+  });
+
+  test('cancel-then-ask says the money half out loud: TWO requests are billing', async () => {
+    // Review finding 10. The safety half was already right — a cancelled answer lands nowhere
+    // — and the money half was not said anywhere at all.
+    const first = held();
+    const { session, fake } = opened({ request: tutorRequest(), tutorRunner: first.runner });
+
+    session.ask('first?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.cancelAsk();
+    session.ask('second?');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const spend = tutorOf(fake)?.spend;
+    assert.equal(spend?.sending, 2, 'two requests really are with a provider, and the learner is paying for both');
+    assert.equal(spend?.unwatched, 1, 'one of them nobody is waiting for — still running, still billing');
+
+    first.release({ usd: 0.003, metered: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(tutorOf(fake)?.spend?.usd, 0.003,
+      'and when the abandoned one lands, its cost is counted: they were billed for it whether or not they read it');
+    session.dispose();
+  });
+
+  test('the walk\'s spend outlives the step it was spent on', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why?');
+    await session.settled();
+    session.goTo('st-3-symbol-handle');
+    await session.settled();
+
+    assert.equal(tutorOf(fake)?.spend?.replies, 1, 'it is the WALK\'s money, not the step\'s');
+    void STEP;
+  });
+});
+
+suite('the tutor — a timeout says how long in a sentence that agrees with itself (finding 9)', () => {
+  test('one second is "1 second", not "1 seconds"', async () => {
+    const { session, fake } = opened({
+      request: tutorRequest(),
+      tutorTimeoutMs: 20,
+      tutorRunner: () => new Promise<LlmReply>(() => { /* a wedged provider */ }),
+    });
+
+    session.ask('why?');
+    await session.settled();
+
+    const note = pick(fake, 'setPanel').pop()?.view?.tutor?.note ?? '';
+    assert.match(note, /within 1 second\./, 'the shipped sentence read "within 1 seconds"');
+    assert.doesNotMatch(note, /1 seconds/);
+    session.dispose();
+  });
+});
+
+suite('the tutor — forgetting a conversation (review finding 6, security finding 12)', () => {
+  const STEP = 'st-2-file-parse';
+
+  test('clearConversation empties this step\'s transcript, on disk, and says how much went', async () => {
+    // `clearTranscript` shipped exported with six unit tests and no caller in `src/`. A stored
+    // conversation owes somebody a way to delete it: it is their own words, on their own disk.
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why?');
+    await session.settled();
+    assert.equal(getTranscript(fake.stored()!, STEP).length, 2);
+
+    session.clearConversation();
+    await session.settled();
+
+    assert.deepEqual(getTranscript(fake.stored()!, STEP), [], 'through the SAVE, not merely in memory');
+    assert.deepEqual(session.getView()?.transcript, []);
+    assert.match(pick(fake, 'setPanel').pop()?.view?.tutor?.note ?? '', /2 turns deleted/);
+  });
+
+  test('it does not touch any other step\'s conversation', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('about parse?');
+    await session.settled();
+    session.goTo('st-3-symbol-handle');
+    await session.settled();
+    session.ask('about handle?');
+    await session.settled();
+
+    session.clearConversation();
+    await session.settled();
+
+    assert.deepEqual(getTranscript(fake.stored()!, 'st-3-symbol-handle'), []);
+    assert.equal(getTranscript(fake.stored()!, STEP).length, 2, 'the step they are not standing on is not theirs to forget by accident');
+  });
+
+  test('pressing it with nothing to forget says so rather than doing nothing', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.clearConversation();
+    await session.settled();
+
+    assert.match(pick(fake, 'setPanel').pop()?.view?.tutor?.note ?? '', /nothing in this conversation to forget/);
+  });
+
+  test('an ask in flight is abandoned first, so its answer cannot re-create what was deleted', async () => {
+    let release: ((reply: LlmReply) => void) | undefined;
+    const { session, fake } = opened({
+      request: tutorRequest(),
+      tutorRunner: () => new Promise<LlmReply>((resolve) => { release = resolve; }),
+    });
+
+    session.ask('why?');
+    await new Promise((resolve) => setImmediate(resolve));
+    session.clearConversation();
+    await session.settled();
+
+    release!({ text: 'an answer to a conversation that no longer exists', inputTokens: 0, outputTokens: 0, usd: 0, metered: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(getTranscript(fake.stored()!, STEP), []);
+    assert.equal(pick(fake, 'setPanel').pop()?.view?.tutor?.thinking, false);
+    session.dispose();
+  });
+
+  test('it is a no-op after dispose, like every other mutator', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+    session.dispose();
+    fake.clearLog();
+
+    session.clearConversation();
+    await session.settled();
+
+    assert.deepEqual(fake.names(), []);
+  });
+});
+
+suite('the tutor — the transcript is uncommittable before it is written (security finding 12)', () => {
+  test('the ignore rule is asked for BEFORE the first question reaches the disk, once per session', async () => {
+    const { session, fake } = opened({ request: tutorRequest(), tutorReply: 'because' });
+
+    session.ask('why?');
+    await session.settled();
+    session.ask('and why not?');
+    await session.settled();
+
+    const gitCalls = pick(fake, 'git').map((call) => call.args.join(' '));
+    const rule = gitCalls.filter((args) => args === 'rev-parse --git-dir');
+    assert.equal(rule.length, 1, 'a standing condition is established once per session, not once per question');
+    const saves = pick(fake, 'saveProgress');
+    assert.ok(saves.length > 0, 'and the transcript really did reach the disk, so the ordering claim is about something');
   });
 });

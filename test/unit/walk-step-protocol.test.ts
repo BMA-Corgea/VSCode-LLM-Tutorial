@@ -52,10 +52,12 @@ interface Calls {
    *  which is how the two refusals below are proved to be refusals and not merely quiet. */
   ask: string[];
   cancelAsk: number;
+  /** T-6 review, code finding 6: the retention control the session finally has. */
+  clearConversation: number;
 }
 
 function noCalls(): Calls {
-  return { goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [], cancelAsk: 0 };
+  return { goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [], cancelAsk: 0, clearConversation: 0 };
 }
 
 const NOTHING: Calls = noCalls();
@@ -73,6 +75,7 @@ function fakeEffects(): { effects: StepEffects; calls: Calls } {
     // every other — nothing in this suite has a provider anywhere near it.
     ask: (text) => { calls.ask.push(text); },
     cancelAsk: () => { calls.cancelAsk += 1; },
+    clearConversation: () => { calls.clearConversation += 1; },
   };
   return { effects, calls };
 }
@@ -508,5 +511,39 @@ suite('parseStepMessage — the tutor\'s two messages', () => {
     assert.ok(cancel);
     handleStepMessage(stateAt('st-2-file-parse'), cancel, e2);
     assert.deepEqual(c2, { ...NOTHING, cancelAsk: 1 });
+  });
+});
+
+suite('handleStepMessage — tutor:clear (T-6 review, code finding 6)', () => {
+  test('drives clearConversation once, changes nothing, and posts no reply', () => {
+    // Routed and not second-guessed, like `reproduce:run` and `step:check`: what the
+    // conversation now IS comes back on the session's own push, as `transcript`, and is drawn.
+    // A sentence composed here would be this file guessing at an outcome the session has not
+    // decided yet — including the honest "there was nothing to forget".
+    const { effects, calls } = fakeEffects();
+    const state = stateAt('st-2-file-parse', { transcript: [{ role: 'user', content: 'why?' }] });
+    const result = handleStepMessage(state, { type: 'tutor:clear' }, effects);
+
+    assert.deepEqual(calls, { ...NOTHING, clearConversation: 1 });
+    assert.equal(result.state, state);
+    assert.equal(result.post, undefined);
+  });
+
+  test('routes even when the state it holds shows an empty conversation', () => {
+    const { effects, calls } = fakeEffects();
+    handleStepMessage(stateAt('st-2-file-parse'), { type: 'tutor:clear' }, effects);
+    assert.deepEqual(calls, { ...NOTHING, clearConversation: 1 });
+  });
+
+  test('it parses straight into the handler, payload or none', () => {
+    const bare = parseStepMessage({ type: 'tutor:clear' });
+    assert.deepEqual(bare, { type: 'tutor:clear' });
+    const withPayload = parseStepMessage({ type: 'tutor:clear', payload: {} });
+    assert.deepEqual(withPayload, { type: 'tutor:clear' }, 'the payload is dropped, exactly as it is for the four other no-payload messages');
+
+    const { effects, calls } = fakeEffects();
+    assert.ok(withPayload);
+    handleStepMessage(stateAt('st-2-file-parse'), withPayload, effects);
+    assert.deepEqual(calls, { ...NOTHING, clearConversation: 1 });
   });
 });

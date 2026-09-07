@@ -41,7 +41,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { realGit, type GitRunner } from '../../src/start/build.js';
-import { commitStep, commitSubject, ensureRepo, identityConfigured } from '../../src/dial/commit.js';
+import {
+  commitStep,
+  commitSubject,
+  ensureRepo,
+  ensureTranscriptIgnored,
+  identityConfigured,
+  TUTORIAL_DIR_IGNORE,
+  TUTORIAL_IGNORE_HEADER,
+} from '../../src/dial/commit.js';
 import type { StepLike } from '../../src/walk/model.js';
 
 const madeDirs: string[] = [];
@@ -202,8 +210,12 @@ suite('ensureRepo — git-inits a folder that is not in a work tree, and only th
 
     assert.deepEqual(
       calls,
-      [['rev-parse', '--is-inside-work-tree']],
-      'the work-tree question, and nothing else — git init must not be attempted a second time',
+      // The work-tree question, then the one `ensureTranscriptIgnored` asks — and NO init.
+      // The second `rev-parse` is what locates `info/exclude`; it is a read, and it is asked
+      // on this path deliberately, because a learner working inside a repository of their own
+      // is exactly the person whose `git add -A` would otherwise commit their conversation.
+      [['rev-parse', '--is-inside-work-tree'], ['rev-parse', '--git-dir']],
+      'git init must not be attempted a second time',
     );
   });
 
@@ -470,5 +482,145 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
     await commitStep(target, step, [step.target.file], realGit);
 
     assert.equal(fs.existsSync(path.join(target, '.git')), true, 'commitStep must have initialised a repository to get this far');
+  });
+});
+
+// ── T-6 review, security finding 12: a transcript nobody can commit by accident ────────────
+
+/**
+ * `progress.json` used to hold statuses, a dial and a verdict. Since T-6 it holds free text —
+ * the learner's own questions and a model's answers — in `<target>/.repo-tour/`, a folder this
+ * module `git init`s for them. `commitStep`'s own commits are pathspec-scoped and never sweep
+ * it up, which `the commit CONTAINS exactly the step's files` already proves. What sweeps it up
+ * is the learner's own `git add -A`, one click of *Stage All Changes*, in a repository this
+ * extension created.
+ *
+ * Every test here runs the REAL `git` in a real temporary repository, and the load-bearing
+ * assertion is `git check-ignore` — git's own answer to "would this be committed", rather than
+ * this suite's opinion about what a pattern means.
+ */
+suite('ensureTranscriptIgnored — the tutor conversation is uncommittable by default', () => {
+  /** git's own verdict, not a string comparison against a pattern. `check-ignore` exits 1 when
+   *  nothing matched, which `realGit` surfaces as a rejection — that is the "not ignored"
+   *  answer, not a failure. */
+  async function isIgnored(target: string, rel: string): Promise<boolean> {
+    try {
+      await realGit(['check-ignore', '-q', '--no-index', rel], target);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function excludePath(target: string): string {
+    return path.join(target, '.git', 'info', 'exclude');
+  }
+
+  test('a freshly inited target ignores .repo-tour/ — git says so, not this test', async () => {
+    const target = tmpDir();
+    assert.equal(fs.existsSync(path.join(target, '.git')), false);
+
+    await ensureRepo(target, realGit);
+
+    assert.equal(await isIgnored(target, '.repo-tour/build/progress.json'), true,
+      'the learner\'s questions and the model\'s answers must not be committable by an ordinary `git add -A`');
+    assert.equal(await isIgnored(target, 'src/parse.ts'), false,
+      'and nothing else of theirs was swept into the rule');
+  });
+
+  test('a target that was ALREADY a repository gets the rule too — the case that matters most', async () => {
+    // `ensureRepo` no-ops the init here, and it would have been easy to make the ignore rule
+    // follow it. That would cover the wrong half: a learner working inside a repository of
+    // their own — their real project, with their real history, which they push — is exactly
+    // the person for whom a committed transcript costs something.
+    const target = tmpDir();
+    await realGit(['init', '-q'], target);
+    fs.rmSync(excludePath(target), { force: true });
+
+    await ensureTranscriptIgnored(target, realGit);
+
+    assert.equal(await isIgnored(target, '.repo-tour/build/progress.json'), true);
+  });
+
+  test('a target INSIDE the learner\'s repository is covered from the repository root', async () => {
+    // The pattern is deliberately unanchored: `<target>` can be a subdirectory, in which case
+    // the folder is at `<repo>/<sub>/.repo-tour/` and a rooted `/.repo-tour/` would miss it.
+    const outer = tmpDir();
+    await realGit(['init', '-q'], outer);
+    const target = path.join(outer, 'learner', 'tutorial');
+    fs.mkdirSync(target, { recursive: true });
+
+    await ensureTranscriptIgnored(target, realGit);
+
+    assert.equal(await isIgnored(outer, 'learner/tutorial/.repo-tour/build/progress.json'), true,
+      'asked from the repository ROOT, which is where the learner runs `git add -A`');
+    assert.equal(fs.existsSync(path.join(target, '.gitignore')), false,
+      'and nothing tracked was written into their project to do it');
+  });
+
+  test('the rule goes in .git/info/exclude and NOT into a tracked .gitignore', async () => {
+    // The choice is argued in `ensureTranscriptIgnored`'s header: a tracked `.gitignore` is
+    // this extension writing a file into somebody's project that shows up in their `git
+    // status`, rides into their next commit and travels to everyone who clones it.
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+
+    assert.ok(fs.readFileSync(excludePath(target), 'utf8').includes(TUTORIAL_DIR_IGNORE));
+    assert.equal(fs.existsSync(path.join(target, '.gitignore')), false);
+    const status = await realGit(['status', '--porcelain'], target);
+    assert.equal(status.trim(), '', 'nothing this wrote is visible to the learner as a change to their repository');
+  });
+
+  test('running it twice does not write the rule twice', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    const once = fs.readFileSync(excludePath(target), 'utf8');
+
+    await ensureTranscriptIgnored(target, realGit);
+    await ensureTranscriptIgnored(target, realGit);
+    await ensureRepo(target, realGit);
+
+    const after = fs.readFileSync(excludePath(target), 'utf8');
+    assert.equal(after, once, 'idempotent — and `ensureRepo` runs at the top of every commitStep, on all sixty-one steps');
+    assert.equal(after.split('\n').filter((line) => line.trim() === TUTORIAL_DIR_IGNORE).length, 1);
+  });
+
+  test('an exclude file the learner already wrote is APPENDED to, never replaced', async () => {
+    const target = tmpDir();
+    await realGit(['init', '-q'], target);
+    // No trailing newline on purpose: the pattern must not join itself onto their last line
+    // and silently change what it matches.
+    fs.writeFileSync(excludePath(target), '# mine\nscratch/\n*.local');
+
+    await ensureTranscriptIgnored(target, realGit);
+
+    const after = fs.readFileSync(excludePath(target), 'utf8');
+    assert.ok(after.startsWith('# mine\nscratch/\n*.local'), 'their rules are still there, unchanged');
+    assert.ok(after.split('\n').includes('*.local'), 'and the last one did not get a pattern glued onto the end of it');
+    assert.equal(await isIgnored(target, '.repo-tour/build/progress.json'), true);
+    assert.equal(await isIgnored(target, 'scratch/x'), true, 'and theirs still works');
+  });
+
+  test('it names itself in the file, so a learner who finds it knows who to blame', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+
+    assert.ok(fs.readFileSync(excludePath(target), 'utf8').includes(TUTORIAL_IGNORE_HEADER),
+      'an ignore rule nobody can attribute is its own small mystery');
+  });
+
+  test('a folder that is not a repository at all is a no-op, not a throw', async () => {
+    // It runs in front of a commit the learner asked for and in front of a question they
+    // asked; a hardening step that could not happen is not a reason to refuse either.
+    const target = tmpDir();
+
+    await assert.doesNotReject(() => ensureTranscriptIgnored(target, realGit));
+    assert.equal(fs.existsSync(path.join(target, '.git')), false, 'and it did not create one to have somewhere to write');
+  });
+
+  test('a git that rejects everything is swallowed rather than failing the commit', async () => {
+    const exploding: GitRunner = () => Promise.reject(new Error('git: command not found'));
+
+    await assert.doesNotReject(() => ensureTranscriptIgnored(tmpDir(), exploding));
   });
 });
