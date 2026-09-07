@@ -386,21 +386,61 @@ export async function askTutor(
   ctx: AskContext,
   messages: AskMessage[],
 ): Promise<AskOutcome> {
+  return askBuilt(deps, () =>
+    // `withoutFetchProtocol` is applied to the BUILT prompt because `buildAskPrompt` hardcodes
+    // `ASK_PERSONA` and takes no persona of its own. See there: the persona promises a fetch
+    // loop this extension does not have, and a promise nobody can keep is a sentence that gets
+    // rendered at the learner as an answer.
+    withoutFetchProtocol(deps.core.buildAskPrompt(deps.core.trimMessages(messages), ctx)));
+}
+
+/**
+ * The same request with the prompt ALREADY BUILT (T-7, AC1).
+ *
+ * The detour does not ask a question in a conversation: it asks for one JSON object matching
+ * `src/detour/types.ts`, composed by `src/detour/prompt.ts` out of the step's decision and the
+ * learner's domain. `buildAskPrompt` cannot compose that — it prepends repo-tour's
+ * `ASK_PERSONA`, which says "be concise: usually under 200 words. Plain text… No headings",
+ * and a prompt that asks for prose and for one JSON object in the same breath is a prompt
+ * arguing with itself.
+ *
+ * **This is not a second door out and not a second way to start a paid request.** It is the
+ * same door with the composing step moved to the caller: it goes through `AskTicket.sendPrompt`
+ * and so through `AskLedger`, which still owns the deadline, the scratch directory, the live
+ * set and the running total. The alternative considered and rejected was handing `send` a
+ * counterfeit `TutorCore` whose `buildAskPrompt` returned the detour's prompt — which works,
+ * touches nothing here, and is exactly the sort of second path wearing the first one's clothes
+ * that this file's own header spends five bullet points regretting.
+ *
+ * What the caller owes: `prompt` must already be bounded. `src/detour/prompt.ts` states its
+ * ceiling as arithmetic over `Outbound`'s budgets (`MAX_DETOUR_PROMPT_CHARS`) for exactly this
+ * reason — nothing here re-caps it, because a second set of caps is the failure `Outbound`
+ * exists to end (T-6 security finding 2).
+ */
+export async function askWithPrompt(deps: TutorDeps, prompt: string): Promise<AskOutcome> {
+  return askBuilt(deps, () => prompt);
+}
+
+/**
+ * The body both entry points share: probe, compose, choose a model, send, race the deadline.
+ *
+ * `build` is a THUNK rather than a string so that a prompt builder which throws is answered by
+ * the same `failed` outcome as a `resolveTutorChoice` that throws — the property the original
+ * single `try` had, kept exactly rather than re-derived at each call site.
+ */
+async function askBuilt(deps: TutorDeps, build: () => string): Promise<AskOutcome> {
   const availability = await checkReachable(deps);
   if (!availability.ok) return { kind: 'unreachable', detail: availability.detail };
 
   let prompt: string;
   let choice: LlmChoice;
   try {
-    // `trimMessages` is a validator as much as a trimmer and returns fresh objects, so the
-    // caller's transcript — the array that is about to be SAVED — is never touched. The
-    // trimming applies to what is sent and to nothing else: the stored conversation keeps
-    // every turn, and only the prompt is cut to the last thirty.
-    // `withoutFetchProtocol` is applied to the BUILT prompt because `buildAskPrompt` hardcodes
-    // `ASK_PERSONA` and takes no persona of its own. See there: the persona promises a fetch
-    // loop this extension does not have, and a promise nobody can keep is a sentence that gets
-    // rendered at the learner as an answer.
-    prompt = withoutFetchProtocol(deps.core.buildAskPrompt(deps.core.trimMessages(messages), ctx));
+    // For `askTutor` this is `buildAskPrompt` over `trimMessages`, which is a validator as
+    // much as a trimmer and returns fresh objects, so the caller's transcript — the array
+    // that is about to be SAVED — is never touched. The trimming applies to what is sent and
+    // to nothing else: the stored conversation keeps every turn, and only the prompt is cut
+    // to the last thirty.
+    prompt = build();
     // `resolveTutorChoice`, NOT `resolveChoice`. repo-tour keeps the two apart on purpose and
     // its own reasoning transfers exactly: the build model is chosen for what interpreting a
     // whole repository costs, once, in the background — and inheriting that for the one thing
@@ -503,6 +543,22 @@ export interface AskRun {
  * see `AskLedger`, which owns all three.
  */
 export function startAsk(deps: TutorDeps, ctx: AskContext, messages: AskMessage[]): AskRun {
+  return startRun(() => askTutor(deps, ctx, messages));
+}
+
+/**
+ * The same primitive over an already-built prompt (T-7) — `askWithPrompt`'s detachable half.
+ * Not an entry point either: `AskLedger.open(...).sendPrompt(...)` is how the detour starts a
+ * paid request, for every reason `startAsk`'s own note gives.
+ */
+export function startPromptAsk(deps: TutorDeps, prompt: string): AskRun {
+  return startRun(() => askWithPrompt(deps, prompt));
+}
+
+/** What both of the above are: one call, made detachable. Factored out rather than duplicated
+ *  because the detaching — not the asking — is the delicate part, and two copies of it would
+ *  be two places for a late rejection to become unhandled. */
+function startRun(begin: () => Promise<AskOutcome>): AskRun {
   let detached = false;
   let deliver: (outcome: AskOutcome | null) => void = () => undefined;
   const delivered = new Promise<AskOutcome | null>((resolve) => {
@@ -513,7 +569,7 @@ export function startAsk(deps: TutorDeps, ctx: AskContext, messages: AskMessage[
   // future edit to it cannot turn this into an unhandled rejection nobody is listening for.
   // Attached HERE, at the moment the promise is created, so nothing downstream can leave a
   // late rejection unhandled.
-  const finished: Promise<AskOutcome> = askTutor(deps, ctx, messages).then(
+  const finished: Promise<AskOutcome> = begin().then(
     (outcome) => outcome,
     (err: unknown): AskOutcome => ({ kind: 'failed', detail: detailOf(err) }),
   );
@@ -597,6 +653,18 @@ export interface AskTicket {
    */
   send(settings: AskSettings, ctx: AskContext, messages: AskMessage[]): void;
   /**
+   * The same send with the prompt already composed (T-7) — see `askWithPrompt`.
+   *
+   * It exists so the DETOUR's paid request is this ticket's request: same phase machine, same
+   * bounded deadline, same scratch directory, same `spend()`, same reach from `abandonAll()`.
+   * The rule it protects is the one T-6 closed and the plan restates as R2 — nothing starts a
+   * paid request except a ticket this ledger opened — and the way to break that rule is not to
+   * add a method here, it is to reach for `startAsk`, `askTutor` or `core.runLlm` directly.
+   *
+   * `prompt` arrives already bounded (`src/detour/prompt.ts`); nothing here re-caps it.
+   */
+  sendPrompt(settings: AskSettings, prompt: string): void;
+  /**
    * Stop. Idempotent, and safe in every phase.
    *
    * Before `send` this is genuinely a cancellation: nothing was ever sent, so nothing is
@@ -632,13 +700,25 @@ class LedgerTicket implements AskTicket {
   }
 
   send(settings: AskSettings, ctx: AskContext, messages: AskMessage[]): void {
+    this.begin(settings, (deps) => startAsk(deps, ctx, messages));
+  }
+
+  sendPrompt(settings: AskSettings, prompt: string): void {
+    this.begin(settings, (deps) => startPromptAsk(deps, prompt));
+  }
+
+  /** Everything the two sends share, which is everything except which primitive is started:
+   *  the phase transition, the scratch directory, the bounded deadline, the delivery hook and
+   *  the accounting. One body, so a future third kind of request cannot accidentally acquire
+   *  its own deadline or escape `spend()`. */
+  private begin(settings: AskSettings, start: (deps: TutorDeps) => AskRun): void {
     if (this.phase !== 'preparing' || this.abandoned) return;
     this.phase = 'sending';
-    const run = startAsk(
-      { ...settings, cwd: this.ledger.scratchDir(), timeoutMs: boundedTimeoutMs(settings.timeoutMs) },
-      ctx,
-      messages,
-    );
+    const run = start({
+      ...settings,
+      cwd: this.ledger.scratchDir(),
+      timeoutMs: boundedTimeoutMs(settings.timeoutMs),
+    });
     this.run = run;
     void run.delivered.then((outcome) => { this.deliver(outcome); });
     // `finished`, not `delivered`: a cancelled question is still a bill, and it stays open in

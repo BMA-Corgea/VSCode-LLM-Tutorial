@@ -200,6 +200,34 @@ export interface StepViewState {
     };
     accepted?: string;
   };
+  /**
+   * T-7: the detour — *Show me an unrelated example*, the second button beside *Ask*.
+   *
+   * Declared inline rather than imported from `src/detour/session.js`'s `DetourView`, exactly
+   * as `tutor` is declared inline against `WalkView`'s `TutorView`: this file is the pure
+   * protocol, the panel builds its state by spreading a `WalkView`, and so the two shapes are
+   * structurally checked against each other on every push and a drift cannot compile.
+   *
+   *   - `generating` — an example is being written FOR THIS STEP. It is what turns the button
+   *     into a sentence about waiting, and it is `false` in every other case including a
+   *     failed one. It comes off the same object the ledger's spinner does, so a detour being
+   *     written is counted, drawn and cancellable exactly like a question with the tutor.
+   *   - `open` — a detour is on screen right now, and on WHICH step. Present even when that
+   *     step is not the one being drawn, because the way out has to be reachable from
+   *     wherever the learner is standing — the same argument `tutor.elsewhere` makes, and the
+   *     same failure it fixed (a control named on a page that does not have it).
+   *   - `note` — why the last attempt was refused, or what the last return could not finish.
+   *     Every refusal `src/detour/prompt.ts` and `src/detour/store.ts` can produce carries a
+   *     specific reason for exactly this line (AC5: "a failed generation says why").
+   *
+   * Required rather than optional, unlike `tutor`: the button is on every step, so there is
+   * always something here to draw.
+   */
+  detour: {
+    generating: boolean;
+    open?: { stepId: string; title: string };
+    note?: string;
+  };
   /** the resolved skin name (never empty — see `src/skins.ts` `readSkin`). */
   skin: string;
   /**
@@ -234,7 +262,9 @@ export type InboundMessage =
   | { type: 'skin:set'; payload: { skin: string } }
   | { type: 'tutor:ask'; payload: { text: string } }
   | { type: 'tutor:cancel' }
-  | { type: 'tutor:clear' };
+  | { type: 'tutor:clear' }
+  | { type: 'detour:start' }
+  | { type: 'detour:back' };
 
 export type OutboundMessage = { type: 'step:note'; payload: { note: string } };
 
@@ -303,6 +333,24 @@ export interface StepEffects {
    * than with silence.
    */
   clearConversation(): void;
+
+  // ── T-7: the detour ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Write and open an unrelated worked example (ACs 1, 2). `void` for the reason `ask` is, and
+   * more so: this waits on a MODEL and then writes files and opens tabs, and a rejected
+   * promise raised inside a webview message listener has nobody listening for it. The session
+   * owns the whole asynchronous life of it and its answers come back the way every other
+   * change does — as a fresh `WalkView`.
+   */
+  startDetour(): void;
+  /**
+   * *Back to my build* (AC3). Routed and not second-guessed, exactly like `reproduce:run`:
+   * whether there is a detour to come back from is the session's question, and a panel one
+   * push out of date must not be the thing that decides. The session answers a press with no
+   * detour open with a sentence rather than with silence.
+   */
+  returnFromDetour(): void;
 }
 
 export interface HandleResult {
@@ -381,6 +429,19 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
       effects.cancelAsk();
       return { state };
     }
+    case 'detour:start': {
+      // No state change and no reply, deliberately — the same routing `step:check` and
+      // `tutor:clear` use. What the detour did comes back on the session's own push, as
+      // `detour` and as `tutor.note`, and is DRAWN. A sentence composed here would be this
+      // file guessing at an outcome that has not been decided yet — and the outcome takes a
+      // model call to reach.
+      effects.startDetour();
+      return { state };
+    }
+    case 'detour:back': {
+      effects.returnFromDetour();
+      return { state };
+    }
     case 'tutor:clear': {
       // No reply and no state change here: what the conversation now is comes back on the
       // session's own push, as `transcript`, and is DRAWN — the same routing `step:check` uses
@@ -401,6 +462,12 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
 const INBOUND_TYPES = [
   'step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'dial:set', 'skin:set',
   'tutor:ask', 'tutor:cancel', 'tutor:clear',
+  // T-7. Both are payload-less, and that is the design rather than an omission: WHICH step a
+  // detour is for and WHICH one is open are the session's answers, and a payload here would
+  // be a webview-supplied key for work the host is about to do on disk — the one shape of
+  // message this file exists to refuse. `narrator.ts`'s own three messages make the identical
+  // argument for the identical reason.
+  'detour:start', 'detour:back',
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -444,6 +511,8 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
     case 'reproduce:run':
     case 'tutor:cancel':
     case 'tutor:clear':
+    case 'detour:start':
+    case 'detour:back':
       return { type };
     case 'dial:set': {
       const payload = raw['payload'];

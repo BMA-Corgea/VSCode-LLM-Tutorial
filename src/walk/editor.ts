@@ -285,6 +285,55 @@ export class StepDecorator {
     this.lastRangeCount = ranges.length;
   }
 
+  /**
+   * The same reveal-and-decorate for one range of one absolute path (T-7, AC2's "reveal +
+   * decoration" on a detour stop).
+   *
+   * It is a method here rather than a second decorator inside `src/detour/` for the reason the
+   * `decoration` field already argues: ONE long-lived decoration type per window, so that
+   * "clear the last highlight" is one call that really clears rather than a set of handles
+   * somebody has to remember. A detour's highlight and a step's are the same colour because
+   * they mean the same thing — *this region, but you are not editing it* — and the learner
+   * moves between them constantly.
+   *
+   * `revealSeq` is claimed exactly as `revealStep` claims it, so a stop and a step navigation
+   * racing each other resolve the same way: the newest wins and the loser touches nothing.
+   * `preview: false` for the reason `detourAdaptersFor` gives — the detour's tabs must stack —
+   * and `preserveFocus` because the narrator is what the learner is driving.
+   *
+   * Resolves, never rejects: the caller is a button press, and there is nobody above it.
+   */
+  async revealRangeAt(absPath: string, startLine: number, endLine: number): Promise<void> {
+    const seq = ++this.revealSeq;
+    let editor: vscode.TextEditor;
+    try {
+      const doc = await vscode.workspace.openTextDocument(absPath);
+      if (seq !== this.revealSeq) return;
+      editor = await vscode.window.showTextDocument(doc, {
+        preview: false,
+        preserveFocus: true,
+        viewColumn: vscode.ViewColumn.One,
+      });
+      if (seq !== this.revealSeq) return;
+    } catch {
+      // The tab was closed by hand, or the file is gone. The narrator has already moved and
+      // says where to look; there is nothing here worth taking a button press down for, and
+      // the previous highlight is deliberately LEFT alone — unlike `revealStep`'s failure
+      // path, nothing about a detour stop that would not open says the walk has moved on.
+      return;
+    }
+
+    const doc = editor.document;
+    const start = toZeroBased(startLine, doc.lineCount);
+    const end = Math.max(start, toZeroBased(endLine, doc.lineCount));
+    editor.revealRange(new vscode.Range(start, 0, end, 0), vscode.TextEditorRevealType.InCenter);
+    const range = new vscode.Range(start, 0, end, doc.lineAt(end).text.length);
+    if (this.lastEditor !== editor) this.clear();
+    editor.setDecorations(this.decoration, [range]);
+    this.lastEditor = editor;
+    this.lastRangeCount = 1;
+  }
+
   /** Un-decorate the editor the ranges were actually painted on. Safe when there are none. */
   clear(): void {
     const editor = this.lastEditor;

@@ -54,10 +54,16 @@ interface Calls {
   cancelAsk: number;
   /** T-6 review, code finding 6: the retention control the session finally has. */
   clearConversation: number;
+  /** T-7: the two the detour adds — the ask that writes an example, and the way back. */
+  startDetour: number;
+  returnFromDetour: number;
 }
 
 function noCalls(): Calls {
-  return { goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [], cancelAsk: 0, clearConversation: 0 };
+  return {
+    goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [],
+    cancelAsk: 0, clearConversation: 0, startDetour: 0, returnFromDetour: 0,
+  };
 }
 
 const NOTHING: Calls = noCalls();
@@ -76,6 +82,8 @@ function fakeEffects(): { effects: StepEffects; calls: Calls } {
     ask: (text) => { calls.ask.push(text); },
     cancelAsk: () => { calls.cancelAsk += 1; },
     clearConversation: () => { calls.clearConversation += 1; },
+    startDetour: () => { calls.startDetour += 1; },
+    returnFromDetour: () => { calls.returnFromDetour += 1; },
   };
   return { effects, calls };
 }
@@ -101,7 +109,9 @@ function stateAt(stepId: string, overrides: Partial<StepViewState> = {}): StepVi
     plan, progress, step, fileExists: true, dial: stepDial(progress, stepId), skin: 'system',
     // T-6: a step nobody has asked about has an EMPTY conversation, which is the ordinary
     // state and the one every test below starts from unless it says otherwise.
-    transcript: [], ...overrides,
+    // T-7: nothing being written and nothing open — the state that puts the button on the
+    // page, and what every test that is not about the detour starts from.
+    transcript: [], detour: { generating: false }, ...overrides,
   };
 }
 
@@ -545,5 +555,71 @@ suite('handleStepMessage — tutor:clear (T-6 review, code finding 6)', () => {
     assert.ok(withPayload);
     handleStepMessage(stateAt('st-2-file-parse'), withPayload, effects);
     assert.deepEqual(calls, { ...NOTHING, clearConversation: 1 });
+  });
+});
+
+// ── T-7: the detour ─────────────────────────────────────────────────────────────────────────
+
+suite('handleStepMessage — the detour (T-7)', () => {
+  test('detour:start routes to the session and changes no state here', () => {
+    const { effects, calls } = fakeEffects();
+    const before = stateAt('st-2-file-parse');
+
+    const { state, post } = handleStepMessage(before, { type: 'detour:start' }, effects);
+
+    assert.equal(calls.startDetour, 1, 'the session is asked');
+    assert.equal(state, before, 'and this file decides nothing — the answer takes a model call to reach');
+    assert.equal(post, undefined, 'so there is no reply to compose either');
+    assert.deepEqual({ ...calls, startDetour: 0 }, NOTHING, 'and nothing else happened');
+  });
+
+  test('detour:back routes to the session and changes no state here', () => {
+    const { effects, calls } = fakeEffects();
+    const before = stateAt('st-2-file-parse');
+
+    const { state, post } = handleStepMessage(before, { type: 'detour:back' }, effects);
+
+    assert.equal(calls.returnFromDetour, 1);
+    assert.equal(state, before);
+    assert.equal(post, undefined);
+    assert.deepEqual({ ...calls, returnFromDetour: 0 }, NOTHING);
+  });
+
+  test('a press with no detour open is ROUTED, not second-guessed here', () => {
+    // Whether there is anything to come back from is the session's question: this panel is one
+    // push out of date by construction, and a protocol that refused on its own stale picture
+    // would be the silent no-op the conventions rule out. The session answers with a sentence.
+    const { effects, calls } = fakeEffects();
+    handleStepMessage(stateAt('st-2-file-parse', { detour: { generating: false } }), { type: 'detour:back' }, effects);
+    assert.equal(calls.returnFromDetour, 1, 'it still reaches the session');
+  });
+});
+
+suite('parseStepMessage — the detour\'s two messages (T-7)', () => {
+  test('both are accepted, and rebuilt rather than passed through', () => {
+    for (const type of ['detour:start', 'detour:back'] as const) {
+      assert.deepEqual(parseStepMessage({ type }), { type }, `${type} is a message this panel speaks`);
+      // A payload smuggled alongside a known type is left on the floor — `sanitizeTranscript`'s
+      // rebuild-don't-copy rule (T-6 security review), applied here. It matters more for these
+      // two than for most: a webview-supplied key for work the host is about to do ON DISK is
+      // the exact shape this validator exists to refuse.
+      assert.deepEqual(
+        parseStepMessage({ type, payload: { stepId: '../../etc', dir: '/tmp' } }),
+        { type },
+        `${type} carries nothing, whatever arrived beside it`,
+      );
+    }
+  });
+
+  test('a near miss is not a message', () => {
+    for (const raw of [
+      { type: 'detour:starts' },
+      { type: 'detour' },
+      { type: 'detour:prev' }, // the NARRATOR's message, not this panel's — different surface
+      { type: 'detour:next' },
+      { type: ['detour:start'] },
+    ]) {
+      assert.equal(parseStepMessage(raw), null, `${JSON.stringify(raw)} is dropped`);
+    }
   });
 });

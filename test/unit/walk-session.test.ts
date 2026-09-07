@@ -116,7 +116,13 @@ type Call =
   // What was actually SENT to a model, as `askTutor` composed it. The prompt is the whole
   // point: it is how a test can tell "the tutor was given this step" from "something was
   // asked", without a provider anywhere near the suite.
-  | { fn: 'runLlm'; prompt: string; provider: string; model: string; cwd: string; timeoutMs: number | undefined };
+  | { fn: 'runLlm'; prompt: string; provider: string; model: string; cwd: string; timeoutMs: number | undefined }
+  // ── T-7 ───────────────────────────────────────────────────────────────────────────────────
+  | { fn: 'openDetourTab'; absPath: string }
+  | { fn: 'revealDetourStop'; absPath: string; startLine: number; endLine: number }
+  | { fn: 'closeTabsUnder'; prefixes: string[] }
+  | { fn: 'showNarrator' }
+  | { fn: 'closeNarrator' };
 
 interface Fake {
   adapters: WalkAdapters;
@@ -187,6 +193,13 @@ interface FakeOptions {
   tutorTimeoutMs?: number;
   tutorProvider?: string;
   tutorModel?: string;
+
+  // ── T-7 ─────────────────────────────────────────────────────────────────────────────────
+
+  /** Wire the detour's adapters, pointed at `dir`. Absent means NO detour adapters at all —
+   *  the default every suite written before this ticket gets, and what `test/dial.test.ts`
+   *  gets in production code. The adapter set is optional precisely so that stays possible. */
+  detourStorage?: string;
 }
 
 /** What the fake core's `stubFile` hands back: nothing like the reference file, so a test can
@@ -426,6 +439,32 @@ function fakeAdapters(options: FakeOptions = {}): Fake {
           };
         },
       }),
+    // T-7. Recorded like every other adapter: what the detour did to the editor and to the
+    // narrator IS its behaviour from this file's point of view. `src/detour/session.ts`'s own
+    // suite drives the state machine; this one is about the WALK — the note, the reveal and
+    // the ledger it shares with the tutor.
+    ...(options.detourStorage === undefined
+      ? {}
+      : {
+          detour: {
+            globalStorageRoot: options.detourStorage,
+            openDetourTab: (absPath: string) => {
+              log.push({ fn: 'openDetourTab', absPath });
+              return Promise.resolve();
+            },
+            revealDetourStop: (absPath: string, startLine: number, endLine: number) => {
+              log.push({ fn: 'revealDetourStop', absPath, startLine, endLine });
+              return Promise.resolve();
+            },
+            closeTabsUnder: (prefixes: string[]) => {
+              log.push({ fn: 'closeTabsUnder', prefixes });
+              return Promise.resolve([]);
+            },
+            showNarrator: () => { log.push({ fn: 'showNarrator' }); },
+            closeNarrator: () => { log.push({ fn: 'closeNarrator' }); },
+            skin: () => 'system',
+          },
+        }),
   };
 
   return {
@@ -3079,5 +3118,190 @@ suite('the tutor — the transcript is uncommittable before it is written (secur
     assert.equal(rule.length, 1, 'a standing condition is established once per session, not once per question');
     const saves = pick(fake, 'saveProgress');
     assert.ok(saves.length > 0, 'and the transcript really did reach the disk, so the ordering claim is about something');
+  });
+});
+
+// ── T-7: the detour, as the WALK sees it ────────────────────────────────────────────────────
+
+/**
+ * The state machine itself is proved in `detour-session.test.ts`, with a real disk under it.
+ * What is proved HERE is the wiring the walk owns and nothing else can: the note that lands in
+ * `progress.json` (AC4), that it is a note rather than something the tutor said, that it is
+ * kept off the send path, that the step is re-revealed, and that the detour's paid request is
+ * the same ledger's request as the tutor's (plan R2).
+ */
+suite('the detour, wired into the walk (T-7)', () => {
+  const DETOUR_JSON = JSON.stringify({
+    title: 'A vending machine',
+    domain: 'vending machines',
+    files: [
+      { path: 'coins.ts', content: 'export const VALUES = [5, 10, 25];\n' },
+      { path: 'tray.ts', content: 'export const EMPTY = [];\n' },
+    ],
+    stops: [
+      { file: 'coins.ts', startLine: 1, endLine: 1, text: 'one idea, one file' },
+      { file: 'tray.ts', startLine: 1, endLine: 1, text: 'and it knows nothing about coins' },
+      { file: 'coins.ts', startLine: 1, endLine: 1, text: 'which is the whole point' },
+    ],
+  });
+
+  const storages: string[] = [];
+
+  function storage(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-detour-'));
+    storages.push(dir);
+    return dir;
+  }
+
+  teardown(() => {
+    for (const dir of storages.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A walk with a reference root (so an ask is possible at all) and detour adapters wired. */
+  function walkWithDetour(over: FakeOptions = {}) {
+    const fake = fakeAdapters({
+      request: { idea: '', recreate: true, repo: '/fixture/reference', referenceRoot: '/fixture/reference', target: TARGET, dial: 'manual' },
+      tutorReply: DETOUR_JSON,
+      detourStorage: storage(),
+      ...over,
+    });
+    return { fake, session: WalkSession.open(TARGET, fake.adapters) };
+  }
+
+  test('the return records "detour taken: <title>" in the step\'s transcript (AC4)', async () => {
+    const { fake, session } = walkWithDetour();
+    await session.settled();
+
+    session.startDetour();
+    await session.settled();
+    session.returnFromDetour();
+    await session.settled();
+
+    const stored = fake.stored();
+    assert.ok(stored, 'the note is PERSISTED — AC4 checks progress.json, not a screen');
+    const turns = getTranscript(stored, 'st-1-shape-src');
+    assert.equal(turns.length, 1, 'exactly one turn, for one detour');
+    assert.deepEqual(turns[0], {
+      role: 'assistant',
+      content: 'detour taken: A vending machine',
+      kind: 'note',
+    }, 'the sentence AC4 names, marked as a note rather than as something the tutor said');
+
+    session.dispose();
+  });
+
+  test('the note never reaches a model — sentTurns is what keeps it off the send path', async () => {
+    const { fake, session } = walkWithDetour();
+    await session.settled();
+    session.startDetour();
+    await session.settled();
+    session.returnFromDetour();
+    await session.settled();
+
+    // Now ask a real question on the same step. What the model is shown is the transcript
+    // MINUS anything neither party said — because repo-tour's `trimMessages` rebuilds turns as
+    // `{ role, content }`, so a note routed through it would arrive as a sentence the
+    // assistant appears to have written (T-6 security finding 7's channel, self-inflicted).
+    fake.clearLog();
+    session.ask('why is this its own module?');
+    await session.settled();
+
+    const sent = pick(fake, 'runLlm');
+    assert.equal(sent.length, 1, 'the question really was sent');
+    assert.ok(
+      !sent[0]?.prompt.includes('detour taken'),
+      'and the note is NOT in the prompt — a walk\'s own record must never be replayed as a tutor turn',
+    );
+    assert.ok(sent[0]?.prompt.includes('why is this its own module?'), 'while the learner\'s question is');
+
+    // …and it is still in the conversation the learner reads.
+    const turns = getTranscript(fake.stored() ?? { steps: {}, current: '' } as unknown as Progress, 'st-1-shape-src');
+    assert.ok(turns.some((turn) => turn.kind === 'note'), 'the note stays in the record it belongs to');
+
+    session.dispose();
+  });
+
+  test('the return re-reveals the step the learner left, at the same dial', async () => {
+    const { fake, session } = walkWithDetour();
+    await session.settled();
+    session.startDetour();
+    await session.settled();
+
+    const dialBefore = pick(fake, 'setPanel').at(-1)?.view?.dial;
+    fake.clearLog();
+    session.returnFromDetour();
+    await session.settled();
+
+    const reveals = pick(fake, 'revealEditor');
+    assert.equal(reveals.length, 1, 'the learner lands back in their own file, not merely told which step it was');
+    assert.equal(reveals[0]?.view.step.id, 'st-1-shape-src', 'the step they left');
+    assert.equal(reveals[0]?.view.dial, dialBefore, 'at the dial it was on — nothing about a detour touches it');
+
+    session.dispose();
+  });
+
+  test('the detour\'s spend is the WALK\'s spend — one ledger, not two (plan R2)', async () => {
+    const { fake, session } = walkWithDetour();
+    await session.settled();
+    session.startDetour();
+    await session.settled();
+
+    const spend = pick(fake, 'setPanel').at(-1)?.view?.tutor?.spend;
+    assert.ok(spend, 'the panel is told what has been spent');
+    assert.equal(spend.replies, 1, 'and the detour\'s answer is in the total — a second door would show zero here');
+
+    session.dispose();
+  });
+
+  test('the button\'s state reaches the panel, and clears when it is over', async () => {
+    const { fake, session } = walkWithDetour();
+    await session.settled();
+    assert.deepEqual(pick(fake, 'setPanel').at(-1)?.view?.detour, { generating: false }, 'the state that draws the button');
+
+    session.startDetour();
+    await session.settled();
+    const open = pick(fake, 'setPanel').at(-1)?.view?.detour;
+    assert.equal(open?.generating, false, 'nothing left generating once it is open');
+    assert.deepEqual(open?.open, { stepId: 'st-1-shape-src', title: 'A vending machine' });
+
+    session.returnFromDetour();
+    await session.settled();
+    assert.deepEqual(pick(fake, 'setPanel').at(-1)?.view?.detour, { generating: false }, 'and the button is back');
+
+    session.dispose();
+  });
+
+  test('a walk with NO detour adapters says so rather than doing nothing', async () => {
+    const fake = fakeAdapters({
+      request: { idea: '', recreate: true, repo: '/fixture/reference', referenceRoot: '/fixture/reference', target: TARGET, dial: 'manual' },
+    });
+    const session = WalkSession.open(TARGET, fake.adapters);
+    await session.settled();
+
+    fake.clearLog();
+    session.startDetour();
+    await session.settled();
+
+    const note = pick(fake, 'setPanel').at(-1)?.view?.tutor?.note;
+    assert.ok(note !== undefined && note.length > 0, 'honest controls: the panel is told the capability is absent');
+    assert.equal(pick(fake, 'openDetourTab').length, 0, 'and nothing was opened');
+
+    session.dispose();
+  });
+
+  test('disposing the walk takes the detour with it', async () => {
+    const { fake, session } = walkWithDetour();
+    await session.settled();
+    session.startDetour();
+    await session.settled();
+
+    fake.clearLog();
+    session.dispose();
+    // `dispose` is synchronous; the detour's cleanup is best-effort and voided, so it is given
+    // a turn of the loop to land — the same wait `test/tutor.test.ts`'s teardown allows.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 10); });
+
+    assert.equal(pick(fake, 'closeTabsUnder').length, 1, 'its tabs are closed');
+    assert.equal(pick(fake, 'closeNarrator').length, 1, 'and its narrator disposed');
   });
 });

@@ -200,6 +200,7 @@ import {
   type AskSpend,
   type AskTicket,
 } from '../tutor/ask.js';
+import { DetourSession, type DetourAdapters, type DetourView } from '../detour/session.js';
 import { tutorContext } from '../tutor/context.js';
 import type { AskMessage, TutorCore } from '../tutor/core.js';
 import { appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
@@ -295,6 +296,17 @@ export interface WalkView {
   transcript: AskMessage[];
   /** T-6 (AC4): what the tutor is doing, as opposed to what it has said — see `TutorView`. */
   tutor?: TutorView;
+  /**
+   * T-7: the detour's transient state — is one being written, is one open, and what the last
+   * attempt had to say (`DetourView`, `src/detour/session.ts`).
+   *
+   * Always present, like `tutor` and unlike T-5's four: "nothing open, nothing generating" is
+   * a real and drawable state — it is what puts *Show me an unrelated example* on the page —
+   * so there is nothing for an absent key to mean. **Every field of it is in
+   * `stepRenderKey`** (plan R4): a field the panel draws and the key omits is stored on the
+   * host and never shown, which fails no test and is this repository's most-repeated lesson.
+   */
+  detour: DetourView;
 }
 
 /**
@@ -498,6 +510,25 @@ export interface WalkAdapters {
    * tutor.
    */
   tutorSettings?(): { provider: string; model: string; timeoutMs: number };
+
+  // ── T-7: the detour ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * The editor tabs and the narrator webview one detour needs (`src/detour/session.ts`).
+   *
+   * **OPTIONAL, for exactly the reasons `tutorCore` is.** A session driven with no detour
+   * adapters is a walk whose *Show me an unrelated example* button says so honestly and
+   * changes nothing else: every other surface works, no position of the dial moves, and
+   * nothing is silently degraded. Requiring it would force `test/dial.test.ts`'s adapter set —
+   * which exists to prove a learner's bytes survive a real write path — to invent a narrator
+   * webview to do it.
+   *
+   * It carries `globalStorageRoot` rather than the session composing one, because AC2 is
+   * precisely that the files land in the extension's own global storage and never in the
+   * workspace: the folder is the EXTENSION's to know (`context.globalStorageUri`), not
+   * something a state machine should be able to derive from the target it is walking.
+   */
+  detour?: DetourAdapters;
 }
 
 /**
@@ -600,6 +631,16 @@ export class WalkSession {
    *  the walk moves — a `claude` that is not installed is not installed on the next step
    *  either, and the line belongs beside the input for as long as that holds. */
   private unreachable: string | undefined;
+
+  /**
+   * T-7: the detour, built on first use and only when the adapters for one were wired.
+   *
+   * Lazy rather than built in the constructor because a walk nobody presses the button on
+   * should create nothing — the same argument `AskLedger.scratchDir` makes for its temp
+   * directory. `undefined` therefore means one of two things that are answered identically:
+   * no detour adapters were wired at all, or nobody has asked for a detour yet.
+   */
+  private detourSession: DetourSession | undefined;
 
   private constructor(
     public readonly target: string,
@@ -864,11 +905,24 @@ export class WalkSession {
   cancelAsk(): void {
     if (this.disposed) return;
     const asking = this.asking;
+    // T-7: *Cancel* is ONE control and it stops every live request this walk started, which
+    // now includes a detour being written. Done before the early return below, because a
+    // detour generation with no tutor ask beside it is exactly the case that would otherwise
+    // fall through it — a *Cancel* that did nothing while a paid request ran is the shape
+    // T-6's own finding 3 was about, and the ledger's `abandonAll` alone would stop the
+    // request while leaving the button on the page saying an example was still coming.
+    const stoppedDetour = this.detourSession?.cancel() === true;
     // Nothing in flight is an ordinary outcome, not an error: the answer landed while the
     // press was in the air, and the page it was pressed on is already a repaint out of date.
     // There is nothing to say about a wait that has already ended, and the reply the learner
-    // is now looking at says more than any sentence about it could.
-    if (!asking) return;
+    // is now looking at says more than any sentence about it could. T-6 pinned that as a
+    // no-op — no note, no push — and the detour must not quietly turn it into a push: only a
+    // detour that really was stopped repaints, because only then is there a button still
+    // drawn un-pressable with nothing behind it.
+    if (!asking) {
+      if (stoppedDetour) this.refresh(false);
+      return;
+    }
     // Read BEFORE anything is abandoned: what a cancel MEANS depends on which half of the
     // wait it lands in, and the ticket has moved on by the time the sentence is written.
     // `preparing` is a real cancellation — nothing was sent, so nothing is charged — and
@@ -934,6 +988,134 @@ export class WalkSession {
       );
       this.commit(false);
     });
+  }
+
+  // ── T-7: the detour ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * *Show me an unrelated example* (ACs 1, 2, 5) — the second button beside *Ask*.
+   *
+   * On the chain, like everything else that persists and repaints, and for the sharper reason
+   * `applyDial` gives: a detour WRITES files and OPENS tabs, and two presses racing each other
+   * into one directory is the shape `enqueue` exists to prevent. `DetourSession` guards itself
+   * as well (its `seq`), because serialising is not the same as superseding — a second press
+   * that waits its turn still has to know it is the second.
+   *
+   * The refusals it can answer with are the detour's, not this file's: every one of them
+   * arrives as a sentence already (`refusalSentence`), and it is put in the step's own note so
+   * it lands where the eye is, beside the button that was pressed.
+   */
+  startDetour(): void {
+    const step = currentStep(this.plan, this.progress);
+    if (this.disposed || !step) return;
+    const stepId = step.id;
+    this.enqueue(async () => {
+      const detour = this.detour();
+      if (!detour) {
+        // Honest controls: the capability is genuinely absent, and saying so beats a button
+        // that looks pressable and does nothing.
+        this.setTutorNote(stepId, 'Unrelated examples are not available in this window.');
+        this.refresh(false);
+        return;
+      }
+      // The reference ROOT, not `request.repo`: `DetourSession` derives the folder name from
+      // it the way `tutorContext` does for `AskContext.repo`, so the tutor and the detour name
+      // the learner's project identically — and the raw `repo` field, which can be a URL with
+      // a token in it, never leaves this machine.
+      const result = await detour.start(step, this.plan, this.request?.referenceRoot);
+      if (this.disposed) return;
+      // `note: ''` is a supersede — something newer is already on screen and there is nothing
+      // true to say about the detour that was overtaken.
+      if (!result.started) {
+        if (result.note !== '') this.setTutorNote(stepId, result.note);
+        this.refresh(false);
+        return;
+      }
+      if (result.note !== undefined) this.setTutorNote(stepId, result.note);
+      this.refresh(false);
+    });
+  }
+
+  /**
+   * *Back to my build* (ACs 3, 4) — the way out, from the panel's button or the narrator's.
+   *
+   * The order below is AC3 read literally: the detour's tabs and narrator go and its directory
+   * is deleted (the detour session's job), then the step the learner left is re-revealed AT
+   * THE SAME DIAL — which is what `refresh(true)` does, because `stepDial` resolves the dial
+   * on every build of the view and nothing about a detour touched it — and only then is the
+   * note appended and saved.
+   *
+   * **The note is a `kind: 'note'` turn** (AC4, plan R1). `AskMessage` gained that field for
+   * this one sentence, `sanitizeTranscript` allow-lists exactly that value, and `sentTurns` is
+   * what keeps it off the send path — so the learner reads "detour taken: …" in their
+   * conversation and no model is ever told the assistant said it. Appended through
+   * `appendTurn` like every other turn, so it is stored, sanitised and capped by the same
+   * rules and there is no second transcript writer to keep in step.
+   *
+   * Recorded against the step the detour was TAKEN on, not the step that happens to be
+   * current: a learner who left a detour open and navigated away is still owed the record on
+   * the step it belonged to.
+   */
+  returnFromDetour(): void {
+    if (this.disposed) return;
+    this.enqueue(async () => {
+      const detour = this.detourSession;
+      if (!detour) return;
+      const result = await detour.returnToBuild();
+      if (this.disposed) return;
+      if (!result.returned) {
+        this.setTutorNote(currentStep(this.plan, this.progress)?.id ?? '', result.note);
+        this.refresh(false);
+        return;
+      }
+      this.progress = appendTurn(this.progress, result.stepId, {
+        role: 'assistant',
+        content: `detour taken: ${result.title}`,
+        kind: 'note',
+      });
+      if (result.note !== undefined) this.setTutorNote(result.stepId, result.note);
+      // `commit(true)`: persist, push to every surface, and REVEAL — the learner is coming
+      // back to their own file and should land in it, at the step they left. The one place in
+      // this file where a non-navigating action reveals, and it is a navigation in every sense
+      // that matters to a person.
+      this.commit(true);
+    });
+  }
+
+  /** The narrator's *Next* / *Previous*. Not on the chain: they touch no file and no
+   *  `progress`, and putting them behind a job that may be waiting on a model would make the
+   *  buttons take a model call to work — the same argument `cancelAsk` makes for being
+   *  synchronous. `DetourSession.goto` owns the clamping. */
+  detourNext(): void {
+    if (this.disposed) return;
+    void this.detourSession?.next();
+  }
+
+  detourPrev(): void {
+    if (this.disposed) return;
+    void this.detourSession?.prev();
+  }
+
+  /**
+   * The detour session, built on first use — `undefined` when no detour adapters were wired,
+   * which is an honest "not available in this window" rather than a broken walk.
+   *
+   * The ledger handed in is THIS session's, which is plan R2 made structural: the detour's
+   * paid request and the tutor's are in one set, so `spend()` counts both, *Cancel* stops
+   * both, and `dispose` closes both.
+   */
+  private detour(): DetourSession | undefined {
+    if (this.detourSession) return this.detourSession;
+    const adapters = this.adapters.detour;
+    if (!adapters) return undefined;
+    this.detourSession = new DetourSession({
+      adapters,
+      ledger: this.ledger,
+      settings: () => this.tutorSettingsNow(),
+      refresh: () => { this.refresh(false); },
+      reportUnreachable: (detail) => { this.unreachable = detail; },
+    });
+    return this.detourSession;
   }
 
   /**
@@ -1343,6 +1525,16 @@ export class WalkSession {
     // the scratch directory the provider was launched in. The totals are not reset — `close`
     // is the end of the ledger, not a way to forget what a walk spent.
     this.ledger.close();
+    // T-7: the detour goes with the session — its tabs closed, its narrator disposed and its
+    // directory deleted. Voided with a catch rather than awaited because `dispose` is
+    // synchronous for the three call sites in `src/extension.ts` that depend on it being so,
+    // and because the cleanup is genuinely best-effort: a window closing must not be blocked
+    // on a tab that will not go, and `DetourSession.dispose` swallows each failure on its own
+    // (there is nobody left to tell). The `catch` is belt-and-braces so a future edit to that
+    // method cannot turn this into an unhandled rejection nobody is listening for.
+    const detour = this.detourSession;
+    this.detourSession = undefined;
+    if (detour) void detour.dispose().catch(() => { /* nothing left that could be told */ });
     this.adapters.clearEditor();
     this.adapters.setTree(undefined);
     this.adapters.setPanel(undefined);
@@ -1859,6 +2051,11 @@ export class WalkSession {
     // of these: a learner who navigates away is looking at a different box, and telling that
     // box its draft was accepted would empty a question about another step.
     this.lastAsked = undefined;
+    // T-7: the detour's own sentence, for the identical reason — "the model did not send an
+    // example in time" describes an event, not a step. What does NOT go is the OPEN detour:
+    // navigating with an example still on screen is an ordinary thing to do, and forgetting
+    // it here would leave five tabs and a narrator with nothing left that could close them.
+    this.detourSession?.clearNote();
   }
 
   /** A transient sentence about what just happened, tagged with the step it is about, then
@@ -2050,6 +2247,12 @@ export class WalkSession {
       // repaints on a digest of what is drawn and absent-versus-undefined is exactly the kind
       // of difference that decides whether a repaint happens.
       tutor: this.tutorView(step.id),
+      // T-7. Always present, for the reason `tutor` is: "nothing open, nothing generating" is
+      // the state that puts the button on the page. Asked of the session rather than stored
+      // here, so there is one answer to "is a detour open" and no flag to keep in step. A
+      // walk with no detour adapters answers the empty state, which is what draws the button
+      // as unavailable rather than as broken.
+      detour: this.detourSession?.view(step.id) ?? { generating: false },
     };
   }
 
