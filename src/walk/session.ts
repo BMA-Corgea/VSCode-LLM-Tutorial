@@ -173,7 +173,7 @@
 import type { GitRunner } from '../start/build.js';
 import type { Dial } from '../start/request.js';
 import type { ResolvedRequest } from './store.js';
-import { commitStep, ensureTranscriptIgnored } from '../dial/commit.js';
+import { commitStep, ensureTranscriptIgnored, type CommitResult } from '../dial/commit.js';
 import type { DialCore } from '../dial/core.js';
 import {
   // Aliased for the same reason `markDoneIn`/`setDialIn` are below: this class's own
@@ -468,9 +468,13 @@ export interface WalkAdapters {
    * with no editor anywhere near it.
    */
   confirmOverwrite(relPath: string): Promise<boolean>;
-  /** `git`, for the commit per completed step (AC7). `src/start/build.ts`'s `realGit` wires in
-   *  as-is; `src/dial/commit.ts` is what actually holds the git knowledge, including the rule
-   *  that a missing identity is a refusal and never an invented author. */
+  /** `git`, for the commit per completed step (AC7) and for the tutor's pre-flight diff.
+   *  `src/start/build.ts`'s `realGit` wires in as-is; `src/dial/commit.ts` is what actually
+   *  holds the git knowledge, including the rule that a missing identity is a refusal and never
+   *  an invented author. Every call this session makes takes the runner's SHORT bound — thirty
+   *  seconds, the default (T-13) — because every one of them is a sub-second local operation
+   *  sitting under a control somebody just pressed. The long tier exists for the clone, which
+   *  happens in `src/start/build.ts` and never here. */
   git: GitRunner;
   /** `buildTutorials.commitPerStep`. A getter, read at the moment of the commit rather than
    *  captured at `open`, so a learner who turns it off mid-walk is obeyed on their next step
@@ -1187,6 +1191,22 @@ export class WalkSession {
    * *Ask* looked exactly like a button that did nothing. `TutorView.stage` is what keeps the
    * two states apart, so nothing here claims a model is thinking while a probe is running,
    * and nothing claims money is being spent before any is.
+   *
+   * **And the pre-flight is now BOUNDED as well as visible (T-13).** The other half of that
+   * same finding was that `tutorContext`'s `git diff` had no time limit at all, so on a slow
+   * or enormous tree the ticket could sit in `preparing` forever: the spinner this ticket
+   * raises would be honest about the wait and the wait would never end. Every call the runner
+   * makes now carries the short bound, so the `stopped()` check after `tutorContext` below is
+   * reached within thirty seconds — thirty-five where the subprocess needed the runner's
+   * second signal (`GIT_KILL_GRACE_MS`) — which is what makes *Cancel* a control that really
+   * acts rather than one that acts only if git is feeling cooperative.
+   *
+   * "Whatever git does" is the load-bearing half and it is a property of the RUNNER, not of
+   * git's manners: the first version of this bound was a single `SIGTERM`, and a child that
+   * ignored it left the promise permanently unsettled and this check permanently unreached
+   * (review finding 1, driven). It now settles on the runner's own timer whether the child
+   * dies or not. The one thing that genuinely escapes is a grandchild of a wrapped `git` —
+   * stated in `src/start/build.ts`, and it does not delay this check.
    *
    * The learner's own turn is appended and SAVED before the model is asked, in the same commit
    * that raises the spinner. A window closed mid-ask therefore comes back with the question in
@@ -1973,17 +1993,67 @@ export class WalkSession {
     this.noteFor(step.id, `${step.target.file} was not committed — ${reason}.`);
     if (this.commitReported) return;
     this.commitReported = true;
-    this.adapters.reportError(
-      forWantOfIdentity(reason)
-        ? `Your step was not committed in ${this.target} — ${reason}. The tutorial carries on either `
-          + 'way; set `git config user.name` and `git config user.email` in that folder and the next '
-          + 'completed step will commit normally. (Build Tutorials never commits under a name you '
-          + 'did not choose, and the `buildTutorials.commitPerStep` setting turns this off.)'
-        : `Your step was not committed in ${this.target} — ${reason}. The tutorial carries on either `
-          + 'way and nothing of yours was changed — your file is on disk exactly as this step left '
-          + 'it, and only the bookkeeping commit did not happen. (The `buildTutorials.commitPerStep` '
-          + 'setting turns the per-step commit off if you would rather it did not try.)',
-    );
+    this.adapters.reportError(this.commitNotice(result, reason));
+  }
+
+  /**
+   * The once-per-session sentence about a step that did not commit — THREE of them, because a
+   * refusal, an ordinary failure and a stopped subprocess are three different things to be
+   * told, and the difference is what the learner does next.
+   *
+   * **Branched on `CommitResult.refusal`, never on the reason text** (T-13 review finding 3).
+   * The reason carries git's own argv, and `commitStep`'s argv carries `commitSubject(step)` —
+   * the plan's question and option label, out of a `plan.json` this extension did not write.
+   * Driven: matching on the sentence let a plan whose question read `timed out after 1 second
+   * and was stopped` choose the stopped-git wording for an ordinary exit-1 commit, and one
+   * reading `no git identity configured in this folder` choose the identity advice. The
+   * sentence is still SHOWN — it is the half the learner can act on — it just does not get to
+   * pick which sentence surrounds it.
+   *
+   * The reason itself is carried in all three. What varies is what comes after it.
+   *
+   *   - **A missing identity** is a refusal on principle, and the only one this extension can
+   *     tell them how to fix in a line (code review finding 8 — the advice used to be given
+   *     for every reason there is, including the ones it fixes nothing about).
+   *   - **A git that was STOPPED at its bound** (T-13) is neither a refusal nor a failure of
+   *     theirs, and the ordinary sentence would be subtly false for it: "only the bookkeeping
+   *     commit did not happen" is a claim about a subprocess nobody waited for the end of. So
+   *     it says what IS known — the bound was ours, their file is untouched, the next completed
+   *     step retries — and names the bound as ours, so a slow network drive reads as a wait we
+   *     imposed rather than as git misbehaving.
+   *
+   *     **What it deliberately no longer says is anything about `.git/index.lock`** (review
+   *     finding 2). That advice was here, and it was false for the only signal this extension
+   *     sends: driven, `git` registers its lock files with `sigchain` and removes them on
+   *     `SIGTERM` — lock verified held mid-hook, gone after the runner's own signal, next
+   *     commit fine, and 0 survivors in 12 randomised kills. It survives `SIGKILL`, which the
+   *     runner now does send after its grace period, so a stale lock went from impossible to
+   *     merely rare — and telling every stopped-git learner to delete a file inside `.git/` on
+   *     the strength of the rare case is still the wrong trade. Nothing is lost by dropping it:
+   *     when a lock really does survive, git's own next message says so in full — *"remove the
+   *     file manually to continue"* — and the runner passes git's stderr through verbatim, so
+   *     that advice arrives from git, at the moment it is true, down the branch below.
+   *   - **Anything else** — a stale lock, a `pre-commit` hook, a detached HEAD — keeps the
+   *     wording it has always had, and carries git's own words with it.
+   */
+  private commitNotice(result: CommitResult, reason: string): string {
+    const preamble = `Your step was not committed in ${this.target} — ${reason}.`;
+    if (result.refusal === 'no-identity') {
+      return `${preamble} The tutorial carries on either way; set \`git config user.name\` and `
+        + '`git config user.email` in that folder and the next completed step will commit normally. '
+        + '(Build Tutorials never commits under a name you did not choose, and the '
+        + '`buildTutorials.commitPerStep` setting turns this off.)';
+    }
+    if (result.refusal === 'git-stopped') {
+      return `${preamble} That bound is this extension’s, not git’s — it is there so a git that never `
+        + 'returns cannot leave you pressing a button that does nothing. The tutorial carries on and '
+        + 'your file is on disk exactly as this step left it; nothing of yours was edited. The next '
+        + 'completed step tries again on its own.';
+    }
+    return `${preamble} The tutorial carries on either way and nothing of yours was changed — your `
+      + 'file is on disk exactly as this step left it, and only the bookkeeping commit did not happen. '
+      + '(The `buildTutorials.commitPerStep` setting turns the per-step commit off if you would rather '
+      + 'it did not try.)';
   }
 
 
@@ -2393,21 +2463,6 @@ function messageOf(err: unknown): string {
 function secondsPhrase(ms: number): string {
   const seconds = Math.max(1, Math.round((Number.isFinite(ms) ? ms : 0) / 1000));
   return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
-}
-
-/**
- * Whether a refused commit was refused for want of a git identity — the one reason `commitFor`
- * can actually tell the learner how to fix, and therefore the only one its notice offers the
- * `git config` advice for (code review finding 8).
- *
- * Read off `commitStep`'s own wording rather than a field on `CommitResult`, because a field
- * would exist in `src/dial/commit.ts` for the sole benefit of this sentence — and the pairing
- * is not left to trust: the identity notice's test drives the REAL `commitStep` (a `git config`
- * that refuses is the only thing faked in it), so a reword there fails a test here rather than
- * quietly dropping the advice.
- */
-function forWantOfIdentity(reason: string): boolean {
-  return /no git identity/i.test(reason);
 }
 
 /**

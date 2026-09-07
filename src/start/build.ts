@@ -68,21 +68,280 @@ export function coreFor(loaded: Partial<Record<string, unknown>>): BuildCore {
 
 // ── cloning a GitHub URL, or using a local path as-is ──────────────────────────────────────
 
-/** A plain `git` runner: real by default (`realGit`), swappable in tests. */
-export type GitRunner = (args: string[], cwd?: string) => Promise<string>;
+/**
+ * ## Every git subprocess is bounded, and the bound comes in two sizes (T-13)
+ *
+ * `maxBuffer` bounds MEMORY. It does not bound TIME, and until this ticket nothing did: a
+ * `git` that never returned was never ended, on a path that reaches every feature this
+ * extension has. T-6's security review drove it — a gated git runner in front of the tutor's
+ * pre-flight produced zero pushes, `tutor.thinking` never set and a *Cancel* that did nothing
+ * at all — and the finding then rode across three tickets' fences as a note.
+ *
+ * The owner's decision (2026-09-07) is **two tiers**, not one global bound and not a timeout
+ * per call site:
+ *
+ *   - **`short`, 30 seconds** — the default, and it is the default deliberately. `rev-parse`,
+ *     `init`, `config`, `add`, `commit` and the tutor's `diff --no-index` are sub-second local
+ *     operations; thirty seconds is already far past "something is wrong", and every one of
+ *     them sits under a control a learner has just pressed.
+ *   - **`long`, 10 minutes** — the two operations that can legitimately take minutes on a
+ *     healthy machine: the FULL clone (no `--depth`; the witness needs history) and the
+ *     `fetch --all --tags` that refreshes it. A single bound generous enough for those would
+ *     leave a learner staring at a dead *Check my work* for ten minutes, which closes the
+ *     ticket without fixing the experience.
+ *
+ * A bound at each call site was rejected on the record for the reason this defect exists: a
+ * call site added later gets no bound unless somebody remembers. So the tier is a parameter of
+ * the RUNNER with a working default, which makes "bounded" the thing you get by doing nothing
+ * and the long tier the thing you have to ask for. `gitTimeoutMs` re-checks even that, because
+ * `GitRunner` is handed across a `vscode` boundary where TypeScript's promises stop being
+ * enforced: an unrecognised tier resolves to `short` rather than to `undefined`, which is what
+ * `execFile` reads as "no bound at all".
+ *
+ * **A tier is a number of milliseconds, not a promise that a child dies when asked.** What
+ * turns the number into an actual bound is the escalation in `gitRunnerWith` — read that
+ * before trusting either figure, and read its stated limit before quoting "always".
+ */
+export const GIT_TIMEOUT_MS = {
+  short: 30_000,
+  long: 10 * 60_000,
+} as const;
 
-export const realGit: GitRunner = (args, cwd) =>
-  new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`git ${args.join(' ')} failed: ${(stderr || err.message).trim()}`));
-      else resolve(stdout);
+/** Which of `GIT_TIMEOUT_MS`'s two bounds a call wants. Omitted means `short`. */
+export type GitTier = keyof typeof GIT_TIMEOUT_MS;
+
+/**
+ * The bound for `tier`, and never `undefined` — see `GIT_TIMEOUT_MS`. The cast is the whole
+ * point of the function rather than a shortcut around it: the value TypeScript says cannot
+ * arrive is exactly the one a JavaScript caller, a stale bundle or a hand-written runner can
+ * hand over, and `execFile` treats an absent `timeout` as "run forever".
+ */
+export function gitTimeoutMs(tier: GitTier | undefined): number {
+  const ms = tier === undefined ? undefined : (GIT_TIMEOUT_MS as Record<string, number | undefined>)[tier];
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : GIT_TIMEOUT_MS.short;
+}
+
+/** `30 seconds` / `10 minutes` — a bound as a person would say it, for the sentences below. */
+function durationPhrase(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds >= 60 && seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+  }
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
+}
+
+/**
+ * What a `GitRunner` rejects with when the bound above stopped the subprocess.
+ *
+ * A DISTINCT type, because "git was killed for taking too long" is not "git said no". Every
+ * caller in this repository already reads a `GitRunner` rejection as git's ordinary way of
+ * answering a question — `rev-parse` rejecting means "not a repository", `config` rejecting
+ * means "that key is unset", `diff --no-index` rejecting means "the files differ" — and every
+ * one of those readings is WRONG for a timeout, in the direction that does harm: it would
+ * `git init` a nested repository inside one that already exists, report a perfectly good
+ * identity as missing, and tell a model the learner's file is identical to the author's. So
+ * the shape is recognisable rather than new-and-unannounced.
+ *
+ * `gitTimedOutAfterMs` is a plain own property and `gitTimedOut` duck-types it rather than
+ * using `instanceof`: each esbuild entry point bundles its own copy of this module, so a class
+ * identity does not survive the trip between two of them, and a hand-written test fake can
+ * produce the shape without importing anything.
+ */
+export class GitTimeoutError extends Error {
+  readonly gitTimedOutAfterMs: number;
+  constructor(args: readonly string[], ms: number) {
+    super(`git ${args.join(' ')} timed out after ${durationPhrase(ms)} and was stopped`);
+    this.name = 'GitTimeoutError';
+    this.gitTimedOutAfterMs = ms;
+  }
+}
+
+/**
+ * Whether a `GitRunner` rejection is the timeout above rather than git answering "no".
+ *
+ * The own property is the WHOLE test, and the string form this used to fall through to is gone
+ * (T-13 review finding 3). The runner composes an ordinary failure's message as
+ * `git ${args.join(' ')} failed: …` — **the argv is in it** — and two call sites put text from
+ * `plan.json` into that argv: `commitStep` runs `git commit -m <ordinal: question — label>`,
+ * and `learnerDiffFor` passes the step's own target path. `plan.json` is, in this module's own
+ * words, "a repository someone else pointed the build at". Driven: a plan whose question read
+ * `timed out after 1 second and was stopped` routed an ordinary exit-1 commit into the timeout
+ * branch. A classifier that reads a string carrying untrusted text is not a classifier, so
+ * this one reads a property only the runner can set.
+ */
+export function gitTimedOut(err: unknown): boolean {
+  return typeof err === 'object' && err !== null
+    && typeof (err as { gitTimedOutAfterMs?: unknown }).gitTimedOutAfterMs === 'number';
+}
+
+/** A plain `git` runner: real by default (`realGit`), swappable in tests. */
+export type GitRunner = (args: string[], cwd?: string, tier?: GitTier) => Promise<string>;
+
+/** The handle `exec` hands back, as far as `gitRunnerWith` needs it — every member optional,
+ *  because a hand-written test seam may return nothing at all and the escalation below must
+ *  degrade to "settle anyway" rather than throw on a missing method. */
+export interface SpawnedChild {
+  kill?: (signal?: NodeJS.Signals | number) => boolean;
+  unref?: () => void;
+}
+
+/** The `execFile` shape `gitRunnerWith` needs — one seam, so a test can see the options that
+ *  reach the child process without spawning one, the way `FsWriteOps` does for `fs`. */
+export type ExecFileLike = (
+  file: string,
+  args: readonly string[],
+  options: { cwd?: string; maxBuffer: number; timeout: number; killSignal: NodeJS.Signals },
+  callback: (err: (Error & { killed?: boolean; code?: number | string | null }) | null, stdout: string, stderr: string) => void,
+) => SpawnedChild | undefined;
+
+/**
+ * How long the runner waits, after the bound's own `SIGTERM`, before it stops asking politely
+ * and stops waiting at all. Five seconds is long enough that a healthy `git` finishes its
+ * signal handling — which is how it removes its own `.git/*.lock` files — and short enough
+ * that it is not a second wait a learner can notice on top of the first.
+ */
+export const GIT_KILL_GRACE_MS = 5_000;
+
+/**
+ * The two numbers `gitRunnerWith` would otherwise take as constants, exposed for the same
+ * reason `exec` is: a test that wants to watch the escalation happen cannot sit out thirty
+ * real seconds and then five more, once per case.
+ *
+ * `boundMs` REPLACES the tier's bound rather than shortening it behind the runner's back —
+ * which matters, because the runner now has a timer of its own. A seam that rewrote
+ * `options.timeout` on the way to the child would leave the runner escalating against the
+ * bound it thinks it set and the child dying against a different one, so the test would be
+ * measuring a runner that does not exist. Both numbers are guarded exactly as `gitTimeoutMs`
+ * guards a tier: an override that is not a finite positive number is ignored, so nothing
+ * passed here can produce the "no bound at all" that this ticket exists to remove.
+ */
+export interface GitRunnerTuning {
+  boundMs?: number;
+  killGraceMs?: number;
+}
+
+/** A caller-supplied millisecond override, or `fallback` — never `undefined`, never zero. */
+function positiveMs(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * The one place in `src/` that spawns a git subprocess (pinned by a source scan in
+ * `test/unit/build.test.ts`, because a second one would be unbounded by default and nothing
+ * else would notice). `exec` is injected so the options handed to the child — the `timeout`
+ * above all — are observable without a real process.
+ *
+ * `killed` distinguishes the timeout from git's ordinary non-zero exit, which is the whole
+ * reason the option is safe to add: on a timeout Node sends `SIGTERM`, `stderr` is empty and
+ * `err.message` is a bare `Command failed: git …`, so without this branch a stopped git would
+ * reach three callers wearing the costume of git having answered. `maxBuffer` also kills the
+ * child, so its own error code is excluded by name rather than by hoping it looks different.
+ *
+ * ## The bound is not one signal, and the promise settles whatever the child does (T-13 rev. f1)
+ *
+ * `execFile`'s `timeout` sends `killSignal` **once** and then waits for `close`. The first
+ * version of this ticket stopped there, which meant the bound was only as good as the child's
+ * willingness to die: driven, a `SIGTERM`-ignoring child at a 600 ms bound left this promise
+ * `*** NEVER SETTLED after 6s ***` with the child alive and node itself unable to exit. That
+ * is not a weaker bound than the one advertised, it is *no* bound — and on the walk's
+ * serialised chain it is every other control silent forever, i.e. exactly the T-6 finding this
+ * ticket exists to close. The trigger the ticket names for itself, a network filesystem, is
+ * precisely the case that survives `SIGTERM`: a process in uninterruptible sleep does not
+ * handle a signal until its syscall returns.
+ *
+ * So there are three parts, and the third is the load-bearing one:
+ *
+ *   1. `killSignal: 'SIGTERM'` — stated rather than defaulted, because the next two lines are
+ *      about what it does not do.
+ *   2. `SIGKILL` after `GIT_KILL_GRACE_MS`. `SIGTERM` first and not instead: git registers its
+ *      lock files with `sigchain` and removes them when it is asked politely, and a `SIGKILL`d
+ *      git does not get to. Driven, that is the difference between a repository the learner's
+ *      next commit works in and one holding a stale `.git/index.lock`.
+ *   3. **The promise settles on OUR timer, not on the child's `close`.** This is what makes
+ *      "always settles" true rather than likely: whether the second signal lands, whether the
+ *      child is reapable at all, whether `exec` even returned a handle, at `timeout + grace`
+ *      this promise rejects with the same `GitTimeoutError` and the caller moves on. The
+ *      abandoned child is then `unref`'d, and that call earns its line: driven against a child
+ *      the second signal is withheld from — the shape of a process `SIGKILL` cannot reap
+ *      either — node stayed alive indefinitely without it (killed at 124 by an external
+ *      `timeout`) and exited on its own with it. Not waiting for something is not the same as
+ *      being free of it.
+ *
+ * **The stated limit: a grandchild.** Node signals the child, not its process group, so a
+ * `git` that is a wrapper — a shim script, a credential or `lfs` helper that outlives its
+ * parent — leaves a subprocess running after this promise has correctly rejected. Driven, it
+ * does. Killing the group instead would need `detached: true` at spawn — `process.kill(-pid)`
+ * on a child that is not a group leader is at best an `ESRCH` and at worst a signal to whatever
+ * group has since taken that id — and that trade was declined on purpose: `detached` makes
+ * every git this extension runs survive the extension host's own exit (a ten-minute clone
+ * outliving the window that asked for it), and Node documents that on Windows such a child
+ * "will have its own console window", which cannot then be disabled. Real `git` propagates
+ * signals to its own helpers and unwinds its own destination — driven here, a `clone` killed
+ * mid-transfer left no `git-upload-pack`, no `index-pack` and no partial directory, with both
+ * helpers observed alive beforehand so the check was real — so the exposure is a wrapped `git`,
+ * and it is written down here rather than papered over.
+ */
+export function gitRunnerWith(exec: ExecFileLike, tuning: GitRunnerTuning = {}): GitRunner {
+  const killGraceMs = positiveMs(tuning.killGraceMs, GIT_KILL_GRACE_MS);
+  return (args, cwd, tier) =>
+    new Promise((resolve, reject) => {
+      const timeout = positiveMs(tuning.boundMs, gitTimeoutMs(tier));
+      // Declared before the timer that reads it and assigned after it: the escalation has to be
+      // armed BEFORE the spawn (see below), so this cannot be a `const` initialised by `exec`.
+      let child: SpawnedChild | undefined;
+      let done = false;
+
+      /** First one wins: the child's callback and the escalation timer race by design. */
+      function settle(act: () => void): void {
+        if (done) return;
+        done = true;
+        clearTimeout(escalation);
+        act();
+      }
+
+      // Armed BEFORE the spawn, so a seam that calls back synchronously finds a timer to clear
+      // rather than leaving one running behind a promise that is already settled.
+      const escalation = setTimeout(() => {
+        // `SIGTERM` was sent at `timeout` and did not end it. Stop asking, then stop waiting —
+        // in that order, so the rejection below is not contingent on either call working.
+        try { child?.kill?.('SIGKILL'); } catch { /* it exited between the two signals */ }
+        try { child?.unref?.(); } catch { /* nothing to release */ }
+        settle(() => reject(new GitTimeoutError(args, timeout)));
+      }, timeout + killGraceMs);
+
+      try {
+        child = exec('git', args, { cwd, maxBuffer: 64 * 1024 * 1024, timeout, killSignal: 'SIGTERM' },
+          (err, stdout, stderr) => {
+            if (!err) { settle(() => resolve(stdout)); return; }
+            if (err.killed === true && err.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+              settle(() => reject(new GitTimeoutError(args, timeout)));
+              return;
+            }
+            settle(() => reject(new Error(`git ${args.join(' ')} failed: ${(stderr || err.message).trim()}`)));
+          });
+      } catch (spawnErr) {
+        // A seam, or a `spawn` that refuses the arguments outright, can throw where Node
+        // normally reports through the callback. The promise would settle either way — a throw
+        // inside a `Promise` executor rejects it — but only this clears the escalation timer,
+        // and "settles" is a promise this runner makes about every path, not most of them.
+        settle(() => reject(spawnErr instanceof Error ? spawnErr : new Error(String(spawnErr))));
+      }
     });
-  });
+}
+
+export const realGit: GitRunner = gitRunnerWith(execFile);
 
 /**
  * `repo` is a local path (used as-is — `validateRequest` already confirmed it exists) or a
  * GitHub URL (cloned FULL — no `--depth` — into `<globalStorageRoot>/refs/<owner>-<name>`,
  * the witness needs history; reused with `git fetch` if already cloned there).
+ *
+ * **These two calls, and only these two, take the `long` tier** (`GIT_TIMEOUT_MS`). They are
+ * the only git this extension runs that talks to a network, and a full clone of a large
+ * repository over a slow link legitimately takes minutes — a 30-second bound here would turn
+ * a working clone into a failed build. Everything else stays on the short default, so the
+ * generous bound buys the clone its time without lending it to a `git commit`.
  */
 export async function resolveRepo(
   repo: string,
@@ -96,11 +355,11 @@ export async function resolveRepo(
   const dest = path.join(globalStorageRoot, 'refs', `${gh.owner}-${gh.name}`);
   if (fs.existsSync(path.join(dest, '.git'))) {
     onProgress?.(`fetching the latest history for ${gh.owner}/${gh.name}…`);
-    await git(['-C', dest, 'fetch', '--all', '--tags']);
+    await git(['-C', dest, 'fetch', '--all', '--tags'], undefined, 'long');
   } else {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     onProgress?.(`cloning ${repo}…`);
-    await git(['clone', repo, dest]);
+    await git(['clone', repo, dest], undefined, 'long');
   }
   return dest;
 }
@@ -270,6 +529,27 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
   } catch (err) {
     // Nothing was written yet — there is no marker to leave behind or clean up.
     const reason = err instanceof Error ? err.message : String(err);
+    // The FIRST of the four sentences a stopped git gets, and the only one that is about
+    // waiting rather than about a repository (T-13). `git ${args} timed out after 10 minutes`
+    // is true and unreadable as the whole answer: what the person in front of the form needs
+    // is that the ten minutes were the bound rather than the network's own answer, that
+    // nothing has been written, and that pressing the button again is a reasonable thing to do.
+    //
+    // The learner-facing sentence is right; the reason once given for it here was not (review
+    // finding 5). It said a half-finished clone is reused with `fetch`, so a retry is not a
+    // fresh download. Driven twice — a clone from a path that does not exist, and a real
+    // `file://` clone killed mid-transfer — `git clone` UNWINDS the destination it created:
+    // the directory is gone, so `resolveRepo`'s `fs.existsSync(dest/.git)` is false and the
+    // retry is a full fresh clone. That costs the download again and is worth knowing; what it
+    // does not cost is any cleanup, which is what "Nothing was written" actually promises and
+    // is exactly why git removing its own partial clone is the behaviour we want.
+    if (gitTimedOut(err)) {
+      return {
+        ok: false,
+        reason: `${reason}. Nothing was written, so nothing needs cleaning up — try again when the network is behaving, `
+          + 'or clone the repository yourself and point Build Tutorials at the folder.',
+      };
+    }
     return { ok: false, reason };
   }
 

@@ -53,6 +53,7 @@
  */
 
 import * as assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -61,7 +62,10 @@ import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../src/core.js';
 import { commitSubject } from '../src/dial/commit.js';
 import { dialCoreFor, type DialCore, type FileRecord } from '../src/dial/core.js';
 import type { ExtensionApi } from '../src/extension.js';
-import { buildFromRequest, coreFor, realGit } from '../src/start/build.js';
+import {
+  buildFromRequest, coreFor, gitRunnerWith, GIT_TIMEOUT_MS, GitTimeoutError, realGit,
+  type ExecFileLike,
+} from '../src/start/build.js';
 import { emptyRequest, type BuildRequest, type Dial } from '../src/start/request.js';
 import type { PlanLike, Progress, StepLike } from '../src/walk/model.js';
 import { WalkSession, type WalkAdapters } from '../src/walk/session.js';
@@ -867,5 +871,80 @@ suite('a learner\'s own edit is not overwritten silently', () => {
       'answering Overwrite must leave the reference\'s bytes, not the learner\'s',
     );
     assert.notEqual(fs.readFileSync(path.join(target, 'src/util.ts'), 'utf8'), MINE);
+  });
+});
+
+// ── T-13: the bound holds inside the extension host, not only under plain node ───────────────
+
+/**
+ * `test/unit/build.test.ts` owns this invariant — that no git subprocess is unbounded, that
+ * the clone gets minutes and everything else seconds, and what each caller does with a stopped
+ * git. None of that needs an extension host and none of it is repeated here.
+ *
+ * What only a host can answer is whether the option is honoured where the extension actually
+ * runs. `realGit` is spawned by ELECTRON's Node, not by the `node` binary the unit suite uses:
+ * different runtime, different child-process wiring, and a `timeout` that were silently ignored
+ * here would leave the whole fix inert in production while every unit test stayed green. This
+ * suite is that one question, asked twice — once for a git that hangs, once for a git that
+ * behaves — and nothing else.
+ *
+ * **What it cannot see:** it does not wait out the real thirty-second bound or the real
+ * five-second escalation grace (the seams shorten the WAIT, not the sentence — the literal
+ * 30,000 reaching the child is pinned by a spy under plain node), and it says nothing about
+ * which tier any call site asks for.
+ */
+suite('T-13 — a git that never returns is stopped inside the extension host too', () => {
+  test('a real hanging `git`, spawned by the host, really ends', async function () {
+    this.timeout(15_000);
+    // `git hash-object --stdin` reads stdin to EOF and `execFile` never closes the child's,
+    // so this runs until something stops it. Before this ticket nothing did — and in the host
+    // that meant a learner's button press with no end and no spinner (T-6 finding 5).
+    const impatient: ExecFileLike = (file, args, options, callback) =>
+      // `Math.min`, not a flat 600: if the runner ever stopped supplying a timeout this would
+      // be NaN, and the test would fail rather than quietly proving that `execFile` honours a
+      // number the seam put there itself.
+      execFile(file, args, { ...options, timeout: Math.min(options.timeout, 600) }, callback);
+
+    const err = await gitRunnerWith(impatient)(['hash-object', '--stdin'], os.tmpdir())
+      .then(() => null, (e: unknown) => e);
+
+    assert.ok(err instanceof GitTimeoutError, `expected a GitTimeoutError, got ${String(err)}`);
+    assert.equal(err.gitTimedOutAfterMs, GIT_TIMEOUT_MS.short);
+    assert.match(err.message, /timed out after 30 seconds and was stopped/);
+  });
+
+  test('and a child that ignores SIGTERM is still ended, and still settles, inside the host', async function () {
+    if (process.platform === 'win32') { this.skip(); return; }
+    this.timeout(15_000);
+    // The half `execFile`'s own `timeout` cannot do: it sends one signal and then waits for a
+    // `close` that never comes. The escalation is `child.kill('SIGKILL')` plus a settle on the
+    // runner's own timer, and both go through the host's child-process wiring rather than
+    // plain node's — the same reason this whole suite exists.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-tutorials-host-stubborn-'));
+    const stubborn = path.join(dir, 'stubborn.sh');
+    fs.writeFileSync(stubborn, "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 0.2; done\n");
+    fs.chmodSync(stubborn, 0o755);
+
+    let pid: number | undefined;
+    const substitute: ExecFileLike = (_file, _args, options, callback) => {
+      const spawned = execFile(stubborn, [], options, callback);
+      pid = spawned.pid;
+      return spawned;
+    };
+
+    const err = await gitRunnerWith(substitute, { boundMs: 400, killGraceMs: 400 })(['commit'], os.tmpdir())
+      .then(() => null, (e: unknown) => e);
+
+    assert.ok(err instanceof GitTimeoutError, `the promise must settle in the host too — got ${String(err)}`);
+    await new Promise((r) => setTimeout(r, 250));
+    let alive = true;
+    try { if (pid) process.kill(pid, 0); else alive = false; } catch { alive = false; }
+    assert.equal(alive, false, 'and the escalation really reaches the child through the host’s wiring');
+  });
+
+  test('and an ordinary git in the host is untouched by the option — the discriminator', async () => {
+    // A `timeout` that broke the normal path would be worse than the defect it closes, and the
+    // real commits this file makes elsewhere would fail in ways that read as anything but this.
+    assert.match(await realGit(['--version'], os.tmpdir()), /^git version /);
   });
 });

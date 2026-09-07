@@ -9,16 +9,18 @@
  */
 
 import * as assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import {
   buildDir, buildFromRequest, coreFor, completionMessage, costLine, detectUnsupportedLanguages,
+  GIT_KILL_GRACE_MS, gitRunnerWith, gitTimedOut, gitTimeoutMs, GIT_TIMEOUT_MS, GitTimeoutError,
   languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, resolveRepo,
-  resumeIfMarked, writeJsonAtomic,
+  realGit, resumeIfMarked, writeJsonAtomic,
   type BuildContext, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
-  type FsWriteOps, type GitRunner, type InterpretCostLike,
+  type ExecFileLike, type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
 import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
 
@@ -605,5 +607,552 @@ suite('buildFromRequest — a crash while writing the plan (AC4/AC5, review find
       'the marker is itself renamed into place once per phase — it uses the same helper',
     );
     assert.equal(readMarker(target), null, 'and is removed only once both deliverables are complete');
+  });
+});
+
+// ── T-13: every git subprocess is bounded ───────────────────────────────────────────────────
+
+/**
+ * The invariant this ticket establishes, and `autodev/instructions/invariants-in-handoffs.md`
+ * is why it is pinned rather than written down: *an invariant that is not pinned by a test the
+ * next ticket would break is not an invariant, it is a coincidence that held once.* This
+ * defect exists precisely because a bound was left to whoever remembered.
+ *
+ * The sentence being pinned is **no git subprocess this extension spawns is unbounded**, and
+ * it is deliberately not pinned as a list of call sites — an enumerated list proves the list,
+ * not the property, which was T-7's `stepRenderKey` lesson. It is pinned as two halves that
+ * together leave no way through:
+ *
+ *   1. **`gitRunnerWith` cannot reach `execFile` without a bound** — asserted over the INPUTS
+ *      rather than over the callers, including values TypeScript says cannot arrive. A new
+ *      call site therefore inherits a bound by existing; it does not have to remember one.
+ *   2. **`gitRunnerWith` is the only thing that spawns anything** — a source scan, so a module
+ *      added tomorrow that reaches for `child_process` itself fails here rather than shipping
+ *      a second unbounded family.
+ *
+ * ### What these pins CANNOT see, stated rather than implied
+ *
+ * Reviewed as adversarially as the code, because the first version of this paragraph named
+ * only the exotic miss and not the two nearest ones (T-13 review, lesson 3).
+ *
+ *   - Half 2 is a scan of `src/**` source TEXT, RAW, over every extension esbuild will bundle.
+ *     A spawn reached through a computed module name (`await import('node:child' + '_process')`)
+ *     slips past it. That is a deliberate obfuscation rather than the accident this guards,
+ *     which is somebody writing the obvious import in a new file; catching the former would
+ *     take an evaluator. It errs towards false positives — a prose mention is reported — and
+ *     the fixture test below is what proves it sees the shapes that used to escape.
+ *   - It scans `src/`. `scripts/` and `esbuild.mjs` are build-time and are not in the shipped
+ *     bundle; repo-tour, which this extension loads as a library, spawns `claude` under its own
+ *     rules. The claim is about THIS repository's git, in what ships.
+ *   - Nothing here waits out a real 30-second bound, and nothing waits out the real 5-second
+ *     escalation grace either. That the LITERAL 30,000 reaches the child is proven with a spy;
+ *     that a real `execFile` honours the number it is given, and that the promise settles when
+ *     the child ignores the signal, are proven with real children and a shortened bound and
+ *     grace. The join between them — that Node applies the options it was handed at the scale
+ *     it was handed them — is inspection, not test.
+ *   - **The escalation does not reach a GRANDCHILD.** Node signals the child, not its process
+ *     group, so a `git` that is a wrapper leaves a subprocess running after this promise has
+ *     correctly rejected. `src/start/build.ts` states the trade that was declined to fix it.
+ *     What is pinned here is the promise settling, which is the property the walk depends on;
+ *     the orphan is a stated limit and not an oversight.
+ *   - `commitStep`, `resolveRepo` and `tutorContext` deciding what a timeout MEANS is pinned in
+ *     `test/unit/dial-commit.test.ts`, `test/unit/walk-session.test.ts` and
+ *     `test/unit/tutor-context.test.ts`. This suite only proves the bound exists.
+ */
+suite('T-13 — no git subprocess is unbounded', () => {
+  /** `gitRunnerWith` wired to a spy instead of a process: what the child WOULD have been given. */
+  function spyExec(): { exec: ExecFileLike; calls: Array<{ args: readonly string[]; options: { cwd?: string; maxBuffer: number; timeout: number } }> } {
+    const calls: Array<{ args: readonly string[]; options: { cwd?: string; maxBuffer: number; timeout: number } }> = [];
+    const exec: ExecFileLike = (_file, args, options, callback) => {
+      calls.push({ args, options });
+      callback(null, '', '');
+      return undefined;
+    };
+    return { exec, calls };
+  }
+
+  test('the bound is a property of the RUNNER, so no input at all reaches execFile without one', () => {
+    const { exec, calls } = spyExec();
+    const git = gitRunnerWith(exec);
+
+    // Not a list of call sites: a list of the shapes a TIER can take, which is the only thing
+    // that varies the bound. The last four are values TypeScript rejects and JavaScript does
+    // not — `GitRunner` crosses a `vscode` adapter boundary and is handed to modules bundled
+    // separately, so "the type forbids it" is not the same as "it cannot arrive".
+    const tiers = [...Object.keys(GIT_TIMEOUT_MS), undefined, '', 'medium', null, 0, {}];
+    for (const tier of tiers) {
+      void git(['rev-parse', '--git-dir'], '/somewhere', tier as never);
+    }
+
+    assert.equal(calls.length, tiers.length, 'every one of them reached the spy');
+    for (const [i, call] of calls.entries()) {
+      const ms = call.options.timeout;
+      assert.equal(typeof ms, 'number', `input ${i} produced a non-numeric timeout`);
+      assert.ok(Number.isFinite(ms) && ms > 0,
+        `input ${i} (${JSON.stringify(tiers[i])}) reached execFile with timeout=${String(ms)} — `
+        + 'an absent or zero timeout is how execFile is told to wait forever, which is the defect');
+    }
+  });
+
+  test('and a hostile TUNING override cannot produce "no bound" either', () => {
+    // `GitRunnerTuning` is a second door into the number `execFile` reads as "run forever" when
+    // it is missing, so it is guarded the same way the tier is, and asserted over inputs for
+    // the same reason: a bound that can be switched off by handing it a `0` is not a bound.
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, undefined, null, '600', {}]) {
+      const { exec, calls } = spyExec();
+      void gitRunnerWith(exec, { boundMs: bad as never, killGraceMs: bad as never })(['status']);
+      const ms = calls[0]?.options.timeout;
+      assert.ok(typeof ms === 'number' && Number.isFinite(ms) && ms > 0,
+        `boundMs=${JSON.stringify(bad)} reached execFile with timeout=${String(ms)}`);
+      assert.equal(ms, GIT_TIMEOUT_MS.short, 'an override that is not a usable number falls back to the tier');
+    }
+  });
+
+  test('an unrecognised tier falls back to the SHORT bound rather than to no bound', () => {
+    assert.equal(gitTimeoutMs(undefined), GIT_TIMEOUT_MS.short, 'omitted means short');
+    assert.equal(gitTimeoutMs('medium' as never), GIT_TIMEOUT_MS.short);
+    assert.equal(gitTimeoutMs(null as never), GIT_TIMEOUT_MS.short);
+    assert.equal(gitTimeoutMs('short'), GIT_TIMEOUT_MS.short);
+    assert.equal(gitTimeoutMs('long'), GIT_TIMEOUT_MS.long);
+  });
+
+  /**
+   * Review finding 3, at the classifier. `gitTimedOut` used to fall through to a regex over
+   * `err.message`, and the runner composes an ordinary failure's message as
+   * `git ${args.join(' ')} failed: …` — argv included. Two call sites put `plan.json` text into
+   * that argv: `commitStep`'s `-m <ordinal: question — label>` and `learnerDiffFor`'s target
+   * path. Driven with real git and a real exit-1: a plan whose question read `timed out after
+   * 1 second and was stopped` routed an ordinary commit failure into the timeout branch.
+   *
+   * The pin is the property, not the regex's absence: **the sentence never decides.** Only
+   * something the runner itself set can say a subprocess was stopped.
+   */
+  test('a rejection that merely SAYS it timed out is not classified as one — the plan does not get a vote', () => {
+    const forged = new Error(
+      'git commit -q -m 3: timed out after 1 second and was stopped — Option A -- src/x.ts '
+      + 'failed: nothing to commit, working tree clean',
+    );
+    assert.equal(gitTimedOut(forged), false,
+      'this is an ordinary exit-1 whose message carries the plan’s own question. Classifying it as a '
+      + 'timeout is a `plan.json` choosing which sentence a learner is shown');
+
+    assert.equal(gitTimedOut(new GitTimeoutError(['commit'], GIT_TIMEOUT_MS.short)), true,
+      'and the real one, which carries the property, still is — otherwise this passes by classifying nothing');
+    assert.equal(gitTimedOut({ gitTimedOutAfterMs: 30_000 }), true, 'the duck-type survives the bundle split');
+    assert.equal(gitTimedOut({ gitTimedOutAfterMs: '30000' }), false, 'a string is not the property');
+    assert.equal(gitTimedOut('timed out after 30 seconds and was stopped'), false, 'nor is a bare string rejection');
+  });
+
+  test('the escalation grace is a real, finite, positive second wait — not zero and not forever', () => {
+    // Zero would make the SIGTERM pointless (git would never get to remove its own lock files);
+    // absent or infinite would put the settle back where finding 1 found it.
+    assert.ok(Number.isFinite(GIT_KILL_GRACE_MS) && GIT_KILL_GRACE_MS > 0,
+      `the grace between SIGTERM and SIGKILL is ${String(GIT_KILL_GRACE_MS)}`);
+    assert.ok(GIT_KILL_GRACE_MS < GIT_TIMEOUT_MS.short,
+      'and it is a tail on the bound rather than a second bound the learner would notice');
+  });
+
+  test('the default is the SHORT tier, and it is the owner’s 30 seconds', () => {
+    const { exec, calls } = spyExec();
+    void gitRunnerWith(exec)(['commit', '-q', '-m', 'x'], '/target');
+    assert.equal(calls[0]?.options.timeout, 30_000,
+      'a control a learner just pressed waits 30 seconds, not ten minutes (decision form Q3, option A)');
+    assert.ok(GIT_TIMEOUT_MS.long > GIT_TIMEOUT_MS.short, 'and the long tier is the longer of the two');
+  });
+
+  /**
+   * The funnel. Half 1 above is only worth anything while `gitRunnerWith` is the only thing
+   * that starts a process — the next unbounded git would not be a missing tier, it would be a
+   * new file with its own `execFile` and nobody the wiser.
+   */
+  suite('and one file spawns; the rest ask it to', () => {
+    /** Where a subprocess is legitimately started in `src/`, and why. Anything else is new. */
+    const ALLOWED: Array<[string, string]> = [
+      ['src/start/build.ts', 'gitRunnerWith — the one spawner, and the one place the bound is applied'],
+    ];
+
+    const SPAWNERS = /\b(?:execFile|execFileSync|execSync|spawnSync|spawn|fork)\s*\(|\bchild_process\b/;
+
+    /**
+     * Every extension esbuild will resolve and bundle, not just `.ts` (T-13 review finding 4).
+     * Driven, `src/telemetry.js` holding `require('node:child_process')` and imported by the
+     * real `src/doctor.ts` was bundled into `dist/doctor.js` and the scan stayed GREEN — a
+     * real, shipping, unbounded spawner the pin could not see. `.mts` and `.tsx` slipped past
+     * identically. `tsc` happened to catch the `.js` case on an implicit `any`, which is a rule
+     * that exists for an unrelated reason and that one `@ts-expect-error` removes; a pin that
+     * is quietly relying on another layer is still broken.
+     */
+    const SOURCE_FILE = /\.[cm]?[jt]sx?$/;
+
+    function sources(dir: string, out: string[] = []): string[] {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) sources(full, out);
+        else if (SOURCE_FILE.test(entry.name)) out.push(full);
+      }
+      return out;
+    }
+
+    /**
+     * The scan itself, over RAW text — no comment-stripping, which is the other half of finding
+     * 4. The stripper this used to run, `replace(/\/\*[\s\S]*?\*\//g, '')`, knows nothing about
+     * strings: one unbalanced `/*` inside a template literal, closed by a later real doc
+     * comment, blanks every line between them. The fixture test below exhibits that on real
+     * bytes rather than asserting it.
+     *
+     * **Measured on this tree, rather than taken from the review**, because the review's own
+     * figure for how common that is did not reproduce and the honest number is the one you can
+     * check. Today the stripper deletes no real statement in any of the 35 `src/**.ts` files,
+     * and hides no spawner — so this is a latent hazard, not a live one. What is thin is the
+     * margin: the stripper keeps 11% of `src/walk/paths.ts`, under 30% of 15 of the 35 files,
+     * and a median of 32%. A pin whose input is mostly deleted before it is read is one webview
+     * literal away from seeing nothing, and the failure direction is the silent one.
+     *
+     * Raw text errs the other way, and that is the whole reason to prefer it: a file that only
+     * MENTIONS `execFile` in prose is reported, which is a loud false positive somebody fixes
+     * in a minute, rather than a silent false negative that ships. Measured on this tree, no
+     * file in `src/` does — the one file that names these words is the one on the allow-list.
+     */
+    function spawnersUnder(root: string): string[] {
+      const offenders: string[] = [];
+      for (const file of sources(root)) {
+        const rel = path.relative(root, file).split(path.sep).join('/');
+        if (SPAWNERS.test(fs.readFileSync(file, 'utf8'))) offenders.push(rel);
+      }
+      return offenders.sort();
+    }
+
+    test('nothing outside the allow-list starts a subprocess of its own', () => {
+      const root = process.cwd();
+      assert.ok(fs.existsSync(path.join(root, 'src')),
+        `src/ should be readable from the repository root, not ${root}`);
+
+      const offenders = spawnersUnder(root)
+        .filter((rel) => rel.startsWith('src/'))
+        .filter((rel) => !ALLOWED.some(([allowed]) => allowed === rel));
+
+      assert.deepEqual(
+        offenders, [],
+        'a module outside `src/start/build.ts` starts its own subprocess, or names one in a comment. '
+        + 'A second spawner is a second place a time bound has to be remembered, which is exactly how '
+        + 'T-13 happened — take a `GitRunner` instead, or add the file here with the reason it needs '
+        + 'its own process. (This is a RAW text scan: a prose mention is reported too, on purpose.)',
+      );
+    });
+
+    /**
+     * The scan's own reach, proved on a fixture tree instead of on `src/`. The review broke the
+     * real tree inside a `mktemp -d` copy to find the gaps; this is that reproduction inverted,
+     * and it runs on every commit rather than once.
+     */
+    test('and the scan can actually SEE the shapes that used to slip past it', () => {
+      const root = tmpDir('build-tutorials-scan-fixture-');
+      const write = (rel: string, body: string): void => {
+        fs.mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
+        fs.writeFileSync(path.join(root, rel), body);
+      };
+
+      write('telemetry.js', "const cp = require('node:child_process');\nmodule.exports = cp;\n");
+      write('nested/deep/probe.mts', "import { spawn } from 'node:child_process';\nspawn('git');\n");
+      write('widget.tsx', "import { execFile } from 'node:child_process';\nexecFile('git', []);\n");
+      // The comment-stripper's blind spot, and it is written to actually EXHIBIT it rather than
+      // to gesture at it: an unbalanced `/*` inside a template literal, and the next real doc
+      // comment's `*/` closing it — so the non-greedy `replace(/\/\*[\s\S]*?\*\//g, '')` deletes
+      // everything between, the spawner included. Measured on exactly these bytes: raw text
+      // contains a spawner, the stripped text does not.
+      write('webview.ts', [
+        'export const CSS = `',
+        '  .box { color: red } /* an unbalanced comment marker, inside a template literal',
+        '`;',
+        "import { execSync } from 'node:child_process';",
+        "execSync('git status');",
+        '/** A real doc comment, whose closing marker ends the one opened in the literal above. */',
+        'export const after = 1;',
+        '',
+      ].join('\n'));
+      // The discriminator: an ordinary module is not reported.
+      write('quiet.ts', 'export const two = 1 + 1;\n');
+
+      assert.deepEqual(
+        spawnersUnder(root),
+        ['nested/deep/probe.mts', 'telemetry.js', 'webview.ts', 'widget.tsx'],
+        'the extension filter and the raw-text scan together have to see all four — a `.js` bundled '
+        + 'by esbuild, a `.mts` in a subdirectory, a `.tsx`, and a spawner a comment-stripper would '
+        + 'have blanked. Missing any one of them is a shipping unbounded subprocess nobody is told about',
+      );
+
+      // And the last of those four is not a hypothetical: the stripper this scan used to run
+      // really does remove it. Asserting the mechanism rather than describing it is the point —
+      // a comment claiming a stripper would have missed this file, without checking, would be
+      // the same class of thing every other finding on this ticket was.
+      const webview = fs.readFileSync(path.join(root, 'webview.ts'), 'utf8');
+      assert.match(webview, SPAWNERS, 'the raw file spawns');
+      assert.doesNotMatch(
+        webview.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''), SPAWNERS,
+        'and after the old comment-stripper it does not — which is why this scan reads raw text. '
+        + 'No file in `src/` is hidden this way today; what makes it worth guarding is that the stripper '
+        + 'already deletes 89% of `src/walk/paths.ts` before anything reads it',
+      );
+    });
+
+    /**
+     * The allow-list's staleness check. It used to be `assert.match(code, /timeout/)` against
+     * the whole file, which is satisfied by the forty lines of comment ABOUT timeouts that file
+     * now carries — delete the option, keep the docs, stay green (review finding 7). It now
+     * asserts the option is in the options object literal handed to the spawn, which no amount
+     * of prose produces.
+     *
+     * It is still a smoke check and is labelled one: the property "every call reaches
+     * `execFile` with a finite positive `timeout`" is pinned behaviourally by the input-shape
+     * test at the top of this suite, over the space of inputs rather than over this file's
+     * text. This one only says the allow-list is not describing a file that has moved on.
+     */
+    test('and the allow-list is not stale — the file on it still spawns, and still passes the option (smoke)', () => {
+      for (const [rel, why] of ALLOWED) {
+        const abs = path.join(process.cwd(), rel);
+        assert.ok(fs.existsSync(abs), `${rel} is on the allow-list and is not there any more (${why})`);
+        const code = fs.readFileSync(abs, 'utf8');
+        assert.match(code, SPAWNERS, `${rel} no longer spawns anything — drop it from the list`);
+
+        const call = /\bexec\(\s*'git'[\s\S]{0,200}?\{([^{}]*)\}/.exec(code);
+        assert.ok(call, `${rel} no longer calls exec('git', …) with an options object — this check has drifted`);
+        assert.match(call[1] ?? '', /\btimeout\b/,
+          `${rel} spawns git without putting a timeout in the options it hands the child. The word `
+          + 'appearing somewhere in the file is not the same thing, which is what this used to accept');
+        assert.match(call[1] ?? '', /\bkillSignal\b/,
+          `${rel} no longer states its killSignal — the escalation in gitRunnerWith is built on it`);
+      }
+    });
+  });
+
+  /**
+   * The end of the wire. Everything above is about the number handed over; this is about a real
+   * `git` that never returns, a real `execFile`, and `gitRunnerWith`'s own translation of what
+   * comes back — the reproduction from T-6 security finding 5 with the signs flipped.
+   *
+   * The exec seam shortens the WAIT and not the sentence: the bound the runner reports is still
+   * `GIT_TIMEOUT_MS.short`, which is what the spy tests above pin. A suite that sat out the real
+   * thirty seconds would prove the same thing and cost thirty seconds on every run.
+   */
+  suite('a real git that never returns is really stopped', () => {
+    const impatient: ExecFileLike = (file, args, options, callback) =>
+      // `Math.min`, not a flat 600: if the runner ever stopped supplying a timeout this would
+      // be NaN, and the test would fail rather than quietly proving that `execFile` honours a
+      // number the seam put there itself.
+      execFile(file, args, { ...options, timeout: Math.min(options.timeout, 600) }, callback);
+
+    test('`git hash-object --stdin` — which reads stdin forever — rejects as a timeout', async function () {
+      this.timeout(10_000);
+      // execFile never closes the child's stdin, so this process runs until something stops it.
+      // Before this ticket, nothing did: the test hung, and mocha's own process could not exit
+      // afterwards because the orphan kept the event loop alive.
+      const err = await gitRunnerWith(impatient)(['hash-object', '--stdin'], os.tmpdir())
+        .then(() => null, (e: unknown) => e);
+
+      assert.ok(err instanceof GitTimeoutError, `expected a GitTimeoutError, got ${String(err)}`);
+      assert.equal(err.gitTimedOutAfterMs, GIT_TIMEOUT_MS.short, 'and it reports the tier’s bound');
+      assert.ok(gitTimedOut(err), 'the predicate every caller branches on agrees');
+      assert.match(err.message, /timed out after 30 seconds and was stopped/);
+    });
+
+    /**
+     * The property the whole ticket rests on, and the one the first version did not have:
+     * **the promise ALWAYS settles.** `execFile`'s `timeout` is a single `SIGTERM` and nothing
+     * more — a child that ignores it, or one blocked in an uninterruptible syscall on the hung
+     * network mount this ticket names as its own trigger, never reaches `close`, so
+     * `execFile`'s callback never fires and the promise never resolves or rejects. On the
+     * walk's serialised chain that is `step:check`, `dial:set`, `tutor:clear` and every other
+     * queued control silent for good: T-6 finding 5 and T-7 finding 3, reopened by the fix
+     * meant to close them.
+     *
+     * Driven before the fix, at a 600 ms bound: `*** NEVER SETTLED after 6s ***`, the child
+     * still alive, and node itself unable to exit (124 under an external `timeout 20`).
+     *
+     * The assertion is deliberately about the PROMISE and not about the signal: escalating is
+     * how it is done today, but what a person would say is *a bound that cannot be ignored*,
+     * and that stays true if the mechanism is ever replaced.
+     */
+    test('a child that IGNORES SIGTERM still settles the promise — one signal is not a bound', async function () {
+      if (process.platform === 'win32') { this.skip(); return; }
+      this.timeout(20_000);
+
+      const stubborn = path.join(tmpDir('build-tutorials-stubborn-'), 'stubborn.sh');
+      // `trap '' TERM` is the portable spelling of the case that matters: a process the first
+      // signal does not move. A D-state process on a hung NFS mount cannot be simulated in a
+      // test — this is the same shape from the runner's side, which is all the runner can see.
+      fs.writeFileSync(stubborn, "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 0.2; done\n");
+      fs.chmodSync(stubborn, 0o755);
+
+      // The seam only substitutes the BINARY — `gitRunnerWith` always asks for `git`, and a
+      // `git` that survives its own SIGTERM is exactly what is being stood in for. The options
+      // are passed through untouched, `timeout` and `killSignal` included, so what is under
+      // test is the runner's own numbers rather than the seam's.
+      let childPid: number | undefined;
+      const stubbornExec: ExecFileLike = (_file, _args, options, callback) => {
+        const spawned = execFile(stubborn, [], options, callback);
+        childPid = spawned.pid;
+        return spawned;
+      };
+
+      // Both numbers overridden together, which is the point of `GitRunnerTuning`: the seam
+      // used by the tests above rewrites the CHILD's timeout only, and against a runner that
+      // now keeps a timer of its own that would be measuring a runner that does not exist.
+      const started = Date.now();
+      const err = await gitRunnerWith(stubbornExec, { boundMs: 400, killGraceMs: 400 })(
+        ['commit', '-q', '-m', 'x'], os.tmpdir(),
+      ).then(() => null, (e: unknown) => e);
+      const elapsed = Date.now() - started;
+
+      assert.ok(err instanceof GitTimeoutError,
+        `the promise must settle even though the child ignored the signal — got ${String(err)}`);
+      assert.equal(err.gitTimedOutAfterMs, 400, 'and it reports the bound it was actually given');
+      assert.ok(elapsed >= 400,
+        `it settled after ${elapsed}ms — before the bound, which would mean nothing was really waited for`);
+      assert.ok(elapsed < 10_000,
+        `it settled after ${elapsed}ms. The bound plus one grace is the whole wait; anything near mocha’s `
+        + 'patience means the promise is again waiting on a child that will not close');
+
+      // The settle is the property; this is the escalation doing its other job. A promise that
+      // settled while leaving the process running would still be an improvement, and would
+      // still be leaking one `git` per bound on a machine where git has stopped answering.
+      assert.ok(childPid, 'the seam should have spawned something');
+      await new Promise((r) => setTimeout(r, 250)); // the kernel's turn, not ours
+      let alive = true;
+      try { process.kill(childPid, 0); } catch { alive = false; }
+      assert.equal(alive, false,
+        `the child ignored SIGTERM and is still running after the runner gave up on it (pid ${String(childPid)}). `
+        + 'SIGTERM first is deliberate — it is how git gets to remove its own lock files — but it cannot be '
+        + 'the only signal');
+    });
+
+    test('git’s ordinary non-zero exit is NOT read as a timeout — the discriminator', async () => {
+      const outside = tmpDir('build-tutorials-not-a-repo-');
+      const err = await realGit(['rev-parse', '--git-dir'], outside).then(() => null, (e: unknown) => e);
+
+      assert.ok(err instanceof Error, 'a non-repository is still a rejection');
+      assert.equal(err instanceof GitTimeoutError, false);
+      assert.equal(gitTimedOut(err), false,
+        'exit 128 is git ANSWERING. Reading it as a timeout would make every caller’s new branch '
+        + 'the one that fires on the ordinary case');
+      assert.match(err.message, /not a git repository/i, 'and git’s own words survive, as before');
+    });
+
+    test('a resolved run is untouched by any of it', async () => {
+      const version = await realGit(['--version'], os.tmpdir());
+      assert.match(version, /^git version /);
+    });
+  });
+
+  // ── the second pin the ticket asks for by name: the long tier reaches clone and fetch ──────
+
+  /**
+   * The regression this exists to catch is a legitimate clone dying at thirty seconds. It is
+   * asserted as the NUMBER that reaches the child process rather than as the tier's name, so
+   * renaming or restructuring the tiers cannot satisfy it while breaking the property: what
+   * a person would say is *a clone gets minutes, not seconds*, and that is true or false
+   * regardless of how the bound is spelled.
+   */
+  suite('the clone and the fetch get minutes; everything else gets seconds', () => {
+    const TEN_MINUTES = 10 * 60_000;
+
+    test('a fresh clone is given at least ten minutes', async () => {
+      const { exec, calls } = spyExec();
+      const storage = tmpDir('storage-');
+      await resolveRepo('https://github.com/BMA-Corgea/repo-tour', storage, gitRunnerWith(exec));
+
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0]?.args[0], 'clone');
+      assert.ok((calls[0]?.options.timeout ?? 0) >= TEN_MINUTES,
+        `the clone reached execFile with timeout=${String(calls[0]?.options.timeout)}. A FULL clone of a `
+        + 'large repository over a slow link legitimately takes minutes; the short default would turn a '
+        + 'working clone into a failed build');
+    });
+
+    test('and so is the fetch that refreshes one', async () => {
+      const { exec, calls } = spyExec();
+      const storage = tmpDir('storage-');
+      fs.mkdirSync(path.join(storage, 'refs', 'BMA-Corgea-repo-tour', '.git'), { recursive: true });
+      await resolveRepo('https://github.com/BMA-Corgea/repo-tour', storage, gitRunnerWith(exec));
+
+      assert.equal(calls.length, 1);
+      assert.ok(calls[0]?.args.includes('fetch'));
+      assert.ok((calls[0]?.options.timeout ?? 0) >= TEN_MINUTES,
+        'a fetch --all --tags talks to a network too');
+    });
+
+    test('a local path clones nothing, so it is bounded by not happening', async () => {
+      const { exec, calls } = spyExec();
+      const result = await resolveRepo('/some/local/repo', tmpDir('storage-'), gitRunnerWith(exec));
+      assert.equal(result, '/some/local/repo');
+      assert.deepEqual(calls, []);
+    });
+  });
+
+  // ── what a stopped clone means to the caller: the first of the four sentences ─────────────
+
+  suite('a clone that was stopped is reported as a wait, not as a broken repository', () => {
+    function timingOutGit(): GitRunner {
+      return (args) => Promise.reject(new GitTimeoutError(args, GIT_TIMEOUT_MS.long));
+    }
+
+    test('buildFromRequest returns the bound, says nothing was written, and leaves no marker', async () => {
+      const target = tmpDir('build-tutorials-target-');
+      const outcome = await buildFromRequest(
+        requestFor('https://github.com/BMA-Corgea/repo-tour', target),
+        baseContext({ git: timingOutGit() }),
+      );
+
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.reason ?? '', /timed out after 10 minutes and was stopped/,
+        'the bound is named, so ten minutes reads as ours rather than as the network’s answer');
+      assert.match(outcome.reason ?? '', /Nothing was written/);
+      assert.match(outcome.reason ?? '', /point Build Tutorials at the folder/,
+        'and it offers the thing they can actually do next');
+      assert.equal(readMarker(target), null, 'no marker exists yet at that point, so there is none to resume');
+    });
+
+    /**
+     * Review finding 5. The comment behind that sentence used to justify it with *"a
+     * half-finished clone is reused with `fetch`, so a retry is not a fresh download"*, and
+     * driven — on a real `file://` clone of a large local source killed mid-transfer — git
+     * REMOVES the destination it created, so `resolveRepo`'s `fs.existsSync(dest/.git)` is
+     * false and the retry is a full fresh clone.
+     *
+     * This is the same unwind on the fast path: a source that does not exist. What it pins is
+     * the half the learner-facing sentence actually promises — *"Nothing was written, so
+     * nothing needs cleaning up"* — which is true precisely BECAUSE git takes its own partial
+     * clone with it. The killed-mid-transfer case is the same code in git and is not waited
+     * out here; it was driven in the review and is recorded there.
+     */
+    test('a failed clone leaves no destination behind — which is what "nothing to clean up" rests on', async () => {
+      const storage = tmpDir('storage-');
+      const dest = path.join(storage, 'refs', 'BMA-Corgea-repo-tour');
+      const missing = path.join(tmpDir('build-tutorials-no-such-source-'), 'not-a-repository');
+
+      // `resolveRepo` only takes the clone branch for a GitHub URL, so the real `git clone` is
+      // driven directly with the same shape: a destination git has to create for itself.
+      const err = await realGit(['clone', missing, dest]).then(() => null, (e: unknown) => e);
+
+      assert.ok(err instanceof Error, 'cloning something that is not there fails');
+      assert.equal(fs.existsSync(dest), false,
+        'git unwinds the directory it created. A comment claiming the partial clone is kept and '
+        + 'refreshed with `fetch` was wrong about this, and the retry advice has to be true for the '
+        + 'reason it is actually true: nothing is left, so nothing needs cleaning up');
+      assert.equal(fs.existsSync(path.join(dest, '.git')), false,
+        'and `resolveRepo` tests exactly this path, so the next press clones fresh rather than fetching');
+    });
+
+    test('an ordinary clone failure keeps the wording it always had', async () => {
+      const target = tmpDir('build-tutorials-target-');
+      const outcome = await buildFromRequest(
+        requestFor('https://github.com/BMA-Corgea/repo-tour', target),
+        baseContext({ git: () => Promise.reject(new Error('git clone failed: Repository not found.')) }),
+      );
+
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.reason ?? '', /Repository not found/);
+      assert.doesNotMatch(outcome.reason ?? '', /Nothing was written/,
+        'the timeout advice would be noise on a repository that does not exist');
+    });
   });
 });

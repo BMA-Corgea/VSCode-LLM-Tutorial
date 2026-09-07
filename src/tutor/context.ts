@@ -76,9 +76,14 @@
  * `a/reference/src/parse.ts` and three that read `a/home/<someone>/Coding Projects/…` — a
  * shorter prompt, and the learner's home directory not sent to a third party to be billed.
  *
- * ── Six ways there is no diff, and six different sentences ──────────────────────────────────
+ * ── Seven ways there is no diff, and FIVE different sentences ───────────────────────────────
  *
- * "No diff" is never one state, and collapsing them would leave the tutor guessing:
+ * "No diff" is never one state, and collapsing them would leave the tutor guessing. Five of
+ * the seven get a sentence; two are said with SILENCE, and the count is written this way round
+ * because the earlier version of this line said "seven sentences" and there were never seven
+ * (T-13 review finding 8). In this file the sentence count IS the design, so a number here
+ * that disagrees with the list below is a defect in the same way a wrong constant would be —
+ * `test/unit/tutor-context.test.ts` now fails when they drift apart.
  *
  *   - **They have not written the file yet** — `NO_FILE_YET`, in plain words. The ordinary
  *     state of every step in manual mode (`src/dial/writer.ts`: the extension writes nothing
@@ -104,6 +109,12 @@
  *   - **Git could not do the comparison** — the field is omitted. A reference file that is no
  *     longer there is the common cause; there is nothing to say about it that a learner or a
  *     tutor could act on, and an ask is not worth failing over.
+ *   - **Git was STOPPED before it finished** — `DIFF_TIMED_OUT` (T-13). Split off from the
+ *     line above on purpose: "git could not" is an answer git gave, and a subprocess killed at
+ *     its bound gave none. Read as the previous case it would be silent, and the silence would
+ *     be the harmful one — this is the state a slow disk or a network filesystem produces, so
+ *     it recurs on every ask, and a model that is never told the comparison was abandoned will
+ *     answer as though the learner's file were fine.
  *
  * ── `Outbound`: the one thing that decides what reaches a paid third party ───────────────────
  *
@@ -171,7 +182,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { GitRunner } from '../start/build.js';
+import { gitTimedOut, type GitRunner } from '../start/build.js';
 import type { OptionLike, StepLike, WhySource } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
 import type { AskContext } from './core.js';
@@ -214,6 +225,23 @@ export const NOT_ONE_FILE =
 export function tooBigToDiff(bytes: number): string {
   return `One of the two copies of this file is ${bytes} bytes, which is too large for this tutor to diff: git would have to write the whole comparison to disk to show you a few thousand characters of it. Ask the learner about one part of the file instead.`;
 }
+
+/**
+ * What `learnerDiff` says when the comparison was STOPPED at its bound rather than finished
+ * (T-13). The seventh state, and it earns a sentence for the same reason the other four do:
+ * the field's absence is read by the model as "nothing to see", and a tutor that quietly
+ * believes a stuck learner has written nothing gives a confidently wrong answer.
+ *
+ * It also wins over whatever bytes are sitting in the `--output` box, and that is the point
+ * rather than caution. Git writes the diff as it goes, so a killed `git diff` leaves a
+ * TRUNCATED one behind — and this module has no way to tell a truncated diff from a complete
+ * small one. Sending it would tell the model "here is the difference between their file and
+ * the author's" about a comparison that never finished, which is exactly the forgeable-clip-
+ * marker failure the security review's finding 8 named: a diff that lies about its own
+ * completeness. So the partial answer is dropped and the reason is sent instead.
+ */
+export const DIFF_TIMED_OUT =
+  'Comparing the learner’s file against the author’s took too long and was stopped, so no diff of their work is available here — this says nothing about whether they have written it or what is in it. Ask them what they have so far, or about one part of the file.';
 
 /**
  * The largest `learnerDiff` this module will send, the tutor's own note line included —
@@ -680,8 +708,10 @@ function readDiffOutput(file: string): { text: string; bytes: number; whole: boo
 }
 
 /**
- * Which of the header's six sentences a refusal is — or `undefined` for the two states that
- * are said with silence, because there is nothing a learner or a tutor could act on.
+ * Which of the header's five sentences a refusal is — or `undefined`, which is how one of its
+ * two silences is said: the AUTHOR's file being gone is nothing a learner or a tutor could act
+ * on. The other silence, a path that escapes its tree, never reaches here — `learnerDiffFor`
+ * answers it before building a `DiffRefusal` at all.
  *
  * The learner's own missing file is NOT one of these: it is `NO_FILE_YET`, the ordinary state
  * of every step in manual mode, and its caller answers it before asking this.
@@ -698,9 +728,10 @@ function refusalSentence(refusal: DiffRefusal): string | undefined {
 }
 
 /**
- * The learner's file against the author's, or one of the four "no diff" answers the header
- * lists. Never throws: this builds a prompt, and no failure to describe a file is worth
- * refusing to answer a stuck learner's question over.
+ * The learner's file against the author's, or one of the five "no diff" SENTENCES the header
+ * lists, or `undefined` for the two states it says with silence. Never throws: this builds a
+ * prompt, and no failure to describe a file is worth refusing to answer a stuck learner's
+ * question over.
  */
 async function learnerDiffFor(
   step: StepLike,
@@ -734,16 +765,25 @@ async function learnerDiffFor(
   try {
     let stdout = '';
     let exitedZero = true;
+    let timedOut = false;
     try {
       stdout = await git(
         ['diff', '--no-index', `--output=${output}`, '--', path.relative(cwd, reference), path.relative(cwd, learner)],
         cwd,
       );
-    } catch {
+    } catch (err) {
       // Exit 1 — "they differ" — is the case this whole module exists for, and it arrives
       // here as a rejection. What git actually produced is in the output file either way.
-      exitedZero = false;
+      //
+      // A rejection because git was STOPPED is the one that must not be read that way (T-13):
+      // "they differ" is an answer git gave, and a killed subprocess gave none. Read as exit 1
+      // it would hand the model a truncated diff as though it were the whole comparison, or —
+      // on the far commoner case of an empty box — return `undefined` and let the tutor answer
+      // a stuck learner with no idea it was never shown their work.
+      if (gitTimedOut(err)) timedOut = true;
+      else exitedZero = false;
     }
+    if (timedOut) return DIFF_TIMED_OUT;
 
     const written = readDiffOutput(output);
     if (written.text.length > 0) return Outbound.diff(written.text, written.bytes, written.whole);

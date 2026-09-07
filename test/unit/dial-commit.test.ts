@@ -40,7 +40,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { realGit, type GitRunner } from '../../src/start/build.js';
+import { GIT_TIMEOUT_MS, GitTimeoutError, realGit, type GitRunner } from '../../src/start/build.js';
 import {
   commitStep,
   commitSubject,
@@ -93,6 +93,19 @@ function fixtureStep(overrides: Partial<StepLike> = {}): StepLike {
     witness: { sha: null, date: null, subject: null },
     ...overrides,
   };
+}
+
+/** Every path under `target` except `.git/`, with its bytes — what "nothing of YOURS was
+ *  edited" is a claim about. `.git/` is excluded on purpose: this module writes there, and the
+ *  file's header spends a paragraph on why that is not the learner's content. */
+function snapshotOutsideGit(target: string, rel = '', out: Record<string, string> = {}): Record<string, string> {
+  for (const entry of fs.readdirSync(path.join(target, rel), { withFileTypes: true })) {
+    if (entry.name === '.git') continue;
+    const next = rel ? `${rel}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) snapshotOutsideGit(target, next, out);
+    else out[next] = fs.readFileSync(path.join(target, next), 'utf8');
+  }
+  return out;
 }
 
 function writeFile(target: string, rel: string, contents = 'export const x = 1;\n'): void {
@@ -165,6 +178,21 @@ function countingGit(): { git: GitRunner; calls: string[][] } {
 function failingOn(subcommand: string, message: string): GitRunner {
   return async (args, cwd) => {
     if (args[0] === subcommand) throw new Error(message);
+    return realGit(args, cwd);
+  };
+}
+
+/**
+ * The real `git` for everything except one subcommand, which is STOPPED at its bound (T-13).
+ *
+ * The rejection is built rather than provoked, and that is the honest trade: provoking a real
+ * one means a subprocess that really hangs and a suite that really waits thirty seconds. What
+ * a real one looks like coming out of the runner is pinned in `test/unit/build.test.ts`
+ * against a real hanging `git` — so what is faked here is only the WAIT.
+ */
+function timingOutOn(subcommand: string): GitRunner {
+  return async (args, cwd) => {
+    if (args[0] === subcommand) throw new GitTimeoutError(args, GIT_TIMEOUT_MS.short);
     return realGit(args, cwd);
   };
 }
@@ -303,7 +331,9 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
 
     const result = await commitStep(target, step, [step.target.file], realGit);
 
-    assert.deepEqual(result, { committed: false, reason: 'no git identity configured in this folder' });
+    assert.deepEqual(result, {
+      committed: false, reason: 'no git identity configured in this folder', refusal: 'no-identity',
+    }, 'the reason is the sentence to show; the refusal is the value callers branch on (T-13 finding 3)');
     await assert.rejects(realGit(['rev-parse', 'HEAD'], target), 'the repository genuinely has no commit yet');
   });
 
@@ -427,7 +457,7 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
 
     const result = await commitStep(target, step, ['../../../etc/passwd'], realGit);
 
-    assert.deepEqual(result, { committed: false, reason: 'no files to stage' });
+    assert.deepEqual(result, { committed: false, reason: 'no files to stage', refusal: 'nothing-to-stage' });
     await assert.rejects(realGit(['rev-parse', 'HEAD'], target), 'nothing was ever committed');
   });
 
@@ -436,7 +466,7 @@ suite('commitStep — the learner\'s commit, or an honest reason there is not on
 
     const result = await commitStep(target, fixtureStep(), [], realGit);
 
-    assert.deepEqual(result, { committed: false, reason: 'no files to stage' });
+    assert.deepEqual(result, { committed: false, reason: 'no files to stage', refusal: 'nothing-to-stage' });
   });
 
   test('a git failure at the commit step becomes a CommitResult, never a rejection', async () => {
@@ -622,5 +652,202 @@ suite('ensureTranscriptIgnored — the tutor conversation is uncommittable by de
     const exploding: GitRunner = () => Promise.reject(new Error('git: command not found'));
 
     await assert.doesNotReject(() => ensureTranscriptIgnored(tmpDir(), exploding));
+  });
+});
+
+// ── T-13: a git that was STOPPED is not a git that said no ──────────────────────────────────
+
+/**
+ * `src/dial/commit.ts` reads a `GitRunner` rejection as git's ordinary ANSWER in two places —
+ * `rev-parse` rejecting means "not a repository yet", `config` rejecting means "that key is
+ * unset at every level" — and both readings are false for a subprocess that was killed. These
+ * pin the difference from the outside: what ends up on disk, and what the learner is told.
+ *
+ * **What they cannot see.** They do not wait out a real thirty seconds — the rejection is
+ * constructed, and `test/unit/build.test.ts` is where a real hanging `git` proves the runner
+ * really produces that shape.
+ *
+ * What this paragraph used to say is worth keeping as a warning: it claimed the panel's
+ * `.git/index.lock` sentence was "git's behaviour under SIGTERM, checked by inspection and by
+ * git's own documentation". Driven, git does the OPPOSITE — it registers its lock files with
+ * `sigchain` and removes them on `SIGTERM`. The sentence is gone (T-13 review finding 2), and
+ * an honest "checked by inspection" is not a licence: it says what you are holding, and what
+ * this one was holding was wrong.
+ */
+suite('T-13 — a timed-out git is never mistaken for git answering', () => {
+  test('a stopped `rev-parse` does NOT init a second repository inside the learner’s own', async () => {
+    const outer = tmpDir();
+    await ensureRepo(outer, realGit);
+    const target = path.join(outer, 'learner', 'tutorial');
+    fs.mkdirSync(target, { recursive: true });
+    writeFile(target, 'seed.ts');
+
+    const result = await commitStep(target, fixtureStep(), ['seed.ts'], timingOutOn('rev-parse'));
+
+    assert.equal(result.committed, false);
+    assert.equal(
+      fs.existsSync(path.join(target, '.git')), false,
+      'reading the timeout as "not a repository" would git init here — and every later step would '
+      + 'commit into a nested repo the learner’s own git log never shows',
+    );
+    assert.match(result.reason ?? '', /timed out after 30 seconds and was stopped/,
+      'and it says what actually happened instead of a claim about their repository');
+    assert.equal(result.refusal, 'git-stopped',
+      'and the caller is handed a VALUE for it, so no sentence has to be matched to find out');
+  });
+
+  test('a stopped `git config` is not reported as a missing identity', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+    writeFile(target, 'seed.ts');
+
+    const result = await commitStep(target, fixtureStep(), ['seed.ts'], timingOutOn('config'));
+
+    assert.equal(result.committed, false);
+    assert.doesNotMatch(result.reason ?? '', /no git identity/,
+      'their identity is configured perfectly well; nobody found out, which is a different sentence — '
+      + 'and the advice attached to that one would send them to fix something that is not broken');
+    assert.match(result.reason ?? '', /timed out after 30 seconds and was stopped/);
+  });
+
+  test('a stopped `git commit` comes back as a reason, never as a rejected promise', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+    writeFile(target, 'seed.ts');
+
+    const result = await commitStep(target, fixtureStep(), ['seed.ts'], timingOutOn('commit'));
+
+    assert.equal(result.committed, false);
+    assert.match(result.reason ?? '', /timed out after 30 seconds and was stopped/);
+    assert.match(result.reason ?? '', /^git commit /, 'the runner’s own sentence, carried whole');
+    assert.equal(result.refusal, 'git-stopped');
+  });
+
+  test('identityConfigured lets a stopped `config` through rather than answering false', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+
+    await assert.rejects(
+      () => identityConfigured(target, timingOutOn('config')),
+      /timed out after 30 seconds/,
+      'this function answers a yes/no question, and "nobody asked in time" is neither — the rejection '
+      + 'is caught by commitStep’s single try, which is where every git outcome becomes a value',
+    );
+  });
+
+  test('and the ordinary unset key still reads as false — the discriminator', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await clearLocalIdentity(target);
+    assert.equal(await identityConfigured(target, realGit), false,
+      'git’s non-zero exit for an unset key is still git ANSWERING, and still means no identity');
+  });
+
+  /**
+   * Review finding 3, driven the way the review drove it: real `git`, a real ordinary failure
+   * (nothing to commit, exit 1), and a plan whose QUESTION is one of this extension's own
+   * sentences. `commitStep` runs `git commit -q -m <commitSubject(step)>` and the runner puts
+   * the whole argv into the message, so the forged sentence really is in `reason` — what must
+   * not happen is any caller reading it as the classification.
+   */
+  test('a plan that names itself after a timeout does not become one — the classifier is a value, not a sentence', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+    writeFile(target, 'seed.ts');
+    // Committed once already, so the second commit of the same unchanged path is a real exit 1.
+    await commitStep(target, fixtureStep(), ['seed.ts'], realGit);
+
+    const forging = fixtureStep({
+      decision: {
+        ...fixtureStep().decision,
+        question: 'timed out after 1 second and was stopped',
+      },
+    });
+    const result = await commitStep(target, forging, ['seed.ts'], realGit);
+
+    assert.equal(result.committed, false, 'nothing changed, so git refuses — an ordinary failure');
+    assert.match(result.reason ?? '', /timed out after 1 second and was stopped/,
+      'the plan’s text really does reach the reason, through git’s own argv — this is the input, not the bug');
+    assert.equal(result.refusal, 'git-failed',
+      'git ANSWERED. A plan.json — "a repository someone else pointed the build at" — must not be able to '
+      + 'make this extension say a subprocess was stopped when none was');
+  });
+
+  test('and one that names itself after a missing identity does not become one either', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+    writeFile(target, 'seed.ts');
+    await commitStep(target, fixtureStep(), ['seed.ts'], realGit);
+
+    const forging = fixtureStep({
+      decision: { ...fixtureStep().decision, question: 'no git identity configured in this folder' },
+    });
+    const result = await commitStep(target, forging, ['seed.ts'], realGit);
+
+    assert.equal(result.refusal, 'git-failed',
+      'this half of the hole pre-dates T-13 and the same field closes it: their identity is set, and the '
+      + 'advice attached to `no-identity` would send them to fix what is not broken');
+  });
+
+  /**
+   * Review finding 6. The header used to justify the learner-facing "nothing of yours was
+   * edited" with *"this module only ever stages and commits; it writes nothing"*, three lines
+   * below an `fs.mkdirSync` + `fs.appendFileSync` and a `git init`. The learner-facing sentence
+   * survives; the absolute did not, and this is the precise version of it: every write this
+   * module makes is inside `.git/`.
+   */
+  test('a stopped commit leaves everything outside `.git/` byte-for-byte — the claim the notice actually makes', async () => {
+    const target = tmpDir();
+    fs.mkdirSync(path.join(target, 'src'), { recursive: true });
+    writeFile(target, 'seed.ts', 'export const mine = 1;\n');
+    fs.writeFileSync(path.join(target, 'src', 'untouched.ts'), 'export const theirs = 2;\n');
+
+    const before = snapshotOutsideGit(target);
+    const result = await commitStep(target, fixtureStep(), ['seed.ts'], timingOutOn('commit'));
+
+    assert.equal(result.committed, false);
+    assert.deepEqual(snapshotOutsideGit(target), before,
+      'not one byte of the learner’s own tree changed — which is what "nothing of yours was edited" claims, '
+      + 'and is a narrower claim than "it writes nothing" because this module DOES write: `git init` and '
+      + '`.git/info/exclude`, both inside `.git/`');
+    assert.ok(fs.existsSync(path.join(target, '.git', 'info', 'exclude')),
+      'and it really did write one of them, so the test above is discriminating rather than vacuous');
+  });
+
+  /**
+   * The other end of the sentence that was removed from `src/walk/session.ts` (finding 2): a
+   * stale `.git/index.lock` is rare rather than impossible, and when it happens the learner is
+   * told what to do — by GIT, verbatim, because the runner passes its stderr through. Nothing
+   * in this extension has to guess at the advice, which is why it no longer offers it blind.
+   */
+  test('a stale `.git/index.lock` comes back carrying git’s OWN advice about it', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+    writeFile(target, 'seed.ts');
+    fs.writeFileSync(path.join(target, '.git', 'index.lock'), '');
+
+    const result = await commitStep(target, fixtureStep(), ['seed.ts'], realGit);
+
+    assert.equal(result.committed, false);
+    assert.equal(result.refusal, 'git-failed', 'git answered — nothing here was stopped by us');
+    assert.match(result.reason ?? '', /index\.lock/, 'git names the file');
+    assert.match(result.reason ?? '', /remove the file manually/i,
+      'and gives the advice itself, at the moment it is true. That is why `commitNotice` no longer gives it '
+      + 'to every stopped git on a premise that, driven, does not hold');
+  });
+
+  test('a stopped `rev-parse --git-dir` inside ensureTranscriptIgnored is still swallowed', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    // Deliberate, and the one exception in that file: this hardening step asks nothing of the
+    // learner and reports nothing on any path, so a bound it hit is not a different kind of
+    // "could not". What it costs — thirty seconds of their wait — is stated in the code.
+    await assert.doesNotReject(() => ensureTranscriptIgnored(target, timingOutOn('rev-parse')));
   });
 });

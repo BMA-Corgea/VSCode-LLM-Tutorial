@@ -56,7 +56,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { GitRunner } from '../../src/start/build.js';
+import { GIT_TIMEOUT_MS, GitTimeoutError, type GitRunner } from '../../src/start/build.js';
 import type { Dial } from '../../src/start/request.js';
 import type { ResolvedRequest } from '../../src/walk/store.js';
 import type { CheckReport, DialCore, StubQuestion } from '../../src/dial/core.js';
@@ -171,6 +171,9 @@ interface FakeOptions {
   noGitIdentity?: boolean;
   /** Make `git commit` reject, the way a stale lock file or an unchanged tree does. */
   gitFails?: string;
+  /** Make one git subcommand reject the way the runner's own bound does (T-13) — a subprocess
+   *  that was STOPPED, which is not the same rejection as git answering "no". */
+  gitTimesOut?: string;
 
   // ── T-6 ─────────────────────────────────────────────────────────────────────────────────
 
@@ -271,6 +274,11 @@ function fakeCore(log: Call[], options: FakeOptions): DialCore {
 function fakeGit(log: Call[], options: FakeOptions): GitRunner {
   return (args, cwd) => {
     log.push({ fn: 'git', args, cwd });
+    // Checked FIRST, and before `config`'s branch in particular: a stopped `git config` is
+    // exactly the case that used to be indistinguishable from an unset identity (T-13).
+    if (options.gitTimesOut !== undefined && args[0] === options.gitTimesOut) {
+      return Promise.reject(new GitTimeoutError(args, GIT_TIMEOUT_MS.short));
+    }
     if (args[0] === 'config') {
       // git's own way of saying "not set at any level" is a non-zero exit, which `GitRunner`
       // surfaces as a rejection — not an empty string.
@@ -278,7 +286,11 @@ function fakeGit(log: Call[], options: FakeOptions): GitRunner {
       return Promise.resolve(args[1] === 'user.name' ? 'A Learner\n' : 'learner@example.com\n');
     }
     if (args[0] === 'commit' && options.gitFails !== undefined) {
-      return Promise.reject(new Error(options.gitFails));
+      // Shaped exactly as `gitRunnerWith` shapes an ordinary failure — `git <argv> failed: …`
+      // — because the ARGV is the point (T-13 review finding 3). `commitStep` puts
+      // `commitSubject(step)` in there, which is the plan's own question and option label, so
+      // a fake that dropped the argv would hide the very text that used to steer the branch.
+      return Promise.reject(new Error(`git ${args.join(' ')} failed: ${options.gitFails}`));
     }
     return Promise.resolve('');
   };
@@ -526,6 +538,23 @@ function planTargeting(file: string): PlanLike {
     ...plan,
     steps: plan.steps.map((step) => (
       step.id === 'st-2-file-parse' ? { ...step, target: { ...step.target, file } } : step
+    )),
+  };
+}
+
+/**
+ * `fixturePlan()` with the current step's QUESTION rewritten — the field `commitSubject(step)`
+ * interpolates into `git commit -m …`, and therefore into the reason of any ordinary commit
+ * failure (T-13 review finding 3). `plan.json` comes out of "a repository someone else pointed
+ * the build at", so a question that reads like one of this extension's own sentences is input,
+ * not a hypothetical.
+ */
+function planAsking(question: string): PlanLike {
+  const plan = fixturePlan();
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => (
+      step.id === 'st-2-file-parse' ? { ...step, decision: { ...step.decision, question } } : step
     )),
   };
 }
@@ -1750,6 +1779,173 @@ suite('the dial, the check and the commit (T-5)', () => {
       assert.match(message, /index\.lock/, 'the reason is the half they can act on, so it is carried either way');
       assert.doesNotMatch(message, /git config/,
         '"set git config user.name" is an instruction that fixes nothing here, and it points them away from the sentence that says what actually happened');
+    });
+
+    // ── T-13: the third sentence, and it is a third for reasons the other two cannot carry ──
+
+    /**
+     * The walk's own sentence for a git that was STOPPED.
+     *
+     * **The `.git/index.lock` advice that used to be here is gone, and its absence is asserted**
+     * (T-13 review finding 2). The sentence said *"If a later commit complains about
+     * `.git/index.lock`, a stopped git is why — delete that file when no git is running"*, and
+     * a test in this file asserted `/index\.lock/`, so a falsehood had a test defending it.
+     * Driven: `git` registers its lock files with `sigchain` and removes them on `SIGTERM` —
+     * a lock verified held mid-hook was gone after the signal, the next commit succeeded, and
+     * a 12-run randomised kill hunt found 0 survivors. It survives `SIGKILL`, which the runner
+     * now sends after its grace, so a stale lock went from impossible to rare — and telling
+     * every stopped-git learner to delete a file inside `.git/` on the strength of the rare
+     * case is still wrong. Nothing is lost: git says it itself when it is true, and the test
+     * below is the pin for that.
+     *
+     * What it cannot see: the thirty seconds are not waited out (the bound reaching a real
+     * process is pinned in `test/unit/build.test.ts`).
+     */
+    test('a git stopped at its bound gets its own sentence, not the ordinary-failure one', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded', gitTimesOut: 'commit' });
+      session.runCheck();
+      await session.settled();
+
+      assert.equal(fake.stored()?.steps['st-2-file-parse']?.status, 'done', 'the step passed; only the bookkeeping was stopped');
+      assert.match(session.getView()?.writeNote ?? '', /timed out after 30 seconds and was stopped/);
+
+      const message = pick(fake, 'reportError')[0]?.message ?? '';
+      assert.equal(pick(fake, 'reportError').length, 1, 'still once per session, not once per step');
+      assert.match(message, /bound is this extension’s, not git’s/,
+        'the wait was ours to impose, so a slow network drive does not read as git misbehaving');
+      assert.match(message, /nothing of yours was edited/,
+        'the one claim about their machine this branch is entitled to make');
+      assert.match(message, /next completed step tries again/, 'and what happens without them doing anything');
+      assert.doesNotMatch(message, /index\.lock/,
+        'driven: git removes its own lock on SIGTERM, so this advice was false for the only signal this '
+        + 'extension sent. It is advice to delete a file inside `.git/`, and it must not be given on a '
+        + 'premise that does not hold — git gives it itself, correctly, when a lock really does survive');
+      assert.doesNotMatch(message, /git config/, 'nothing here is fixed by configuring an identity');
+      assert.doesNotMatch(message, /only the bookkeeping commit did not happen/,
+        'that claim is about a subprocess nobody waited for the end of — it is the sentence this branch exists to avoid');
+    });
+
+    /**
+     * The other half of dropping that sentence: when a lock really does survive, the advice
+     * still reaches the learner — from git, at the moment it is true, through the ordinary
+     * branch, because the runner passes git's own stderr through verbatim. Driven, git's
+     * message for a stale lock ends *"remove the file manually to continue"*.
+     */
+    test('and when a lock really IS in the way, git’s own advice reaches them through the ordinary branch', async () => {
+      const { session, fake } = await walking({
+        dial: 'scaffolded',
+        gitFails: "fatal: Unable to create '.git/index.lock': File exists.\n\nAnother git process seems to be "
+          + 'running in this repository. If it still fails, a git process may have crashed in this repository '
+          + 'earlier:\nremove the file manually to continue.',
+      });
+      session.runCheck();
+      await session.settled();
+
+      const message = pick(fake, 'reportError')[0]?.message ?? '';
+      assert.match(message, /index\.lock/, 'git named the file');
+      assert.match(message, /remove the file manually to continue/,
+        'and git gave the advice, in full, which is why this extension does not have to guess at it');
+      assert.doesNotMatch(message, /bound is this extension’s/, 'this was git answering, not us stopping it');
+    });
+
+    test('a stopped `git config` is not reported to the learner as a missing identity', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded', gitTimesOut: 'config' });
+      session.runCheck();
+      await session.settled();
+
+      const message = pick(fake, 'reportError')[0]?.message ?? '';
+      assert.equal(pick(fake, 'reportError').length, 1);
+      assert.match(message, /timed out after 30 seconds and was stopped/);
+      // The REASON necessarily echoes git's own argv, `config user.name` included, so the thing
+      // to assert the absence of is the ADVICE — which is what would send them off to fix
+      // something that is not broken.
+      assert.doesNotMatch(message, /set `git config user\.name`/,
+        'their identity is configured; nobody found out. Telling them to set one sends them to fix what is not broken');
+      assert.match(message, /bound is this extension’s, not git’s/,
+        'it took the stopped-git branch, not the identity one');
+    });
+
+    // ── T-13 review finding 3: the plan does not get to choose which sentence is shown ──────
+
+    /**
+     * The reproduction the review drove, inverted into a pin. `commitStep` runs
+     * `git commit -q -m <commitSubject(step)>`, and `commitSubject` is `"<ordinal>: <question>
+     * — <label>"` straight out of `plan.json`; the runner puts the whole argv into an ordinary
+     * failure's message. While `commitNotice` matched on that message, a plan could pick its
+     * own branch — including the one that used to tell the learner to delete a file in `.git/`.
+     *
+     * The assertion is the property, not the mechanism: **an ordinary git failure gets the
+     * ordinary sentence, whatever the plan calls its steps.**
+     */
+    test('a plan whose question forges the timeout sentence still gets the ordinary-failure notice', async () => {
+      const { session, fake } = await walking({
+        dial: 'scaffolded',
+        plan: planAsking('timed out after 1 second and was stopped'),
+        gitFails: 'nothing to commit, working tree clean',
+      });
+      session.runCheck();
+      await session.settled();
+
+      const message = pick(fake, 'reportError')[0]?.message ?? '';
+      assert.match(message, /timed out after 1 second and was stopped/,
+        'the plan’s text is still SHOWN — it is inside git’s own argv, and hiding it would hide what ran');
+      assert.match(message, /only the bookkeeping commit did not happen/,
+        'but the sentence around it is the ordinary one, chosen from `CommitResult.refusal` and not from prose');
+      assert.doesNotMatch(message, /bound is this extension’s, not git’s/,
+        'nothing was stopped by this extension; a plan claiming otherwise must not be believed');
+    });
+
+    test('and a plan forging the identity sentence does not summon the `git config` advice either', async () => {
+      const { session, fake } = await walking({
+        dial: 'scaffolded',
+        plan: planAsking('no git identity configured in this folder'),
+        gitFails: 'nothing to commit, working tree clean',
+      });
+      session.runCheck();
+      await session.settled();
+
+      const message = pick(fake, 'reportError')[0]?.message ?? '';
+      assert.match(message, /only the bookkeeping commit did not happen/, 'the ordinary sentence');
+      assert.doesNotMatch(message, /set `git config user\.name`/,
+        'this half of the same hole pre-dates T-13 and is closed by the same field: advice that sends a '
+        + 'learner to fix a perfectly good identity must not be reachable from a string');
+    });
+
+    // ── T-13 review finding 9: the aggregate wait, as a number rather than a paragraph ──────
+
+    /**
+     * `ensureTranscriptIgnored`'s comment now prices the learner's wait as an AGGREGATE, and a
+     * comment is a record: this is the shape that sum is computed from, asserted rather than
+     * left as prose (T-13 review finding 9). One *Check my work* press is a SERIAL chain of
+     * git calls, so a machine where git has stopped answering pays one bound per link — 30 s
+     * each, 35 s where the subprocess needed the runner's second signal.
+     *
+     * The one place that is NOT serial is the pair this test drives, and that is the load-
+     * bearing half of the count: `identityConfigured` runs `user.name` and `user.email` in
+     * `Promise.all`, so four calls cost three bounds and not four. If they were ever awaited
+     * one after the other, the first rejection here would abort before the second was issued
+     * and this log would be one call shorter — which is the assertion below.
+     */
+    test('the calls a Check press makes are serial, except the two that share a bound (finding 9’s arithmetic)', async () => {
+      const { session, fake } = await walking({ dial: 'scaffolded', gitTimesOut: 'config' });
+      session.runCheck();
+      await session.settled();
+
+      const calls = pick(fake, 'git').map((call) => call.args.slice(0, 2).join(' '));
+      assert.deepEqual(
+        calls,
+        ['rev-parse --is-inside-work-tree', 'init -q', 'rev-parse --git-dir', 'config user.name', 'config user.email'],
+        'the chain the aggregate is computed from. `init -q` is here only because this fake’s `rev-parse` '
+        + 'answers "not a repository"; on a learner’s real folder that step is skipped and the press is the '
+        + 'four calls / three bounds ≈ 90 s the comment in `src/dial/commit.ts` states. With the `add` '
+        + 'stopped as well it is five calls and four bounds ≈ 120 s — five, not six, because a stopped '
+        + '`add` throws and the `commit` never runs',
+      );
+
+      assert.equal(calls.filter((c) => c.startsWith('config ')).length, 2,
+        'BOTH config calls were issued even though the first rejects — they are awaited together, which is '
+        + 'exactly why four calls cost three bounds. Awaiting them in sequence would make this one call, '
+        + 'and would quietly add thirty seconds to every press on a machine where git has stopped answering');
     });
   });
 
