@@ -54,6 +54,31 @@
  * requirement — it is deliberately not the reference file — so this is left exactly as the
  * core produces it instead of being "corrected" behind the core's back.)
  *
+ * ## AC6 has a SECOND exception since T-12, and it is a real one
+ *
+ * **A withheld `reproduce` entry is a file the reference has and the target never will, so
+ * `diff -r` reports it — and AC6, read literally, is conditionally false.** `withheldReason`
+ * (below `reproduceEntries`) refuses to copy a file whose NAME says it carries credentials or
+ * configures an agent that would then run in the learner's folder, which means a fully walked
+ * target cannot come back clean against any reference carrying one. **repo-tour is such a
+ * reference** — it commits `.claude/settings.json` — so this is the default demo path and not
+ * a corner: measured, repo-tour's real reproduce list is 27 entries with exactly one withheld,
+ * and this repository's is 22 with two.
+ *
+ * The criterion still means what it was written to mean, and the exact restatement is: *a
+ * fully walked target reproduces the reference byte for byte, except for the entries the
+ * withholding rule refuses, each of which is named to the learner as it is refused.* That is a
+ * deliberate, announced subtraction rather than a silent one — there is a problem line per
+ * refusal and the learner is told to copy the file in if they want it — but a reader checking
+ * AC6 with `diff -r` against a repository like repo-tour will see output, and must not read it
+ * as a regression.
+ *
+ * `test/dial.test.ts`'s AC6 pair still passes unmodified, and the reason is worth knowing
+ * rather than relying on: its fixture's never-taught files (`data/seed.bin`, `data/seed.json`,
+ * `src/generated.ts`) happen to carry no withheld name. That is a property of the fixture, not
+ * a property of the criterion. **The AC6 text itself needs this same note**; it is stated here
+ * because this is the file that makes the exception.
+ *
  * ## Containment, on BOTH ends of every copy
  *
  * `step.target.file` and every `plan.reproduce` entry come out of `plan.json`, which is
@@ -100,6 +125,19 @@
  * A symlinked TARGET stays legitimate, and deliberately so — `/tmp` is a symlink on macOS and
  * `os.tmpdir()` sits under one, so a learner building in a temp folder is the ordinary case,
  * not the attack. The target is realpath'd too, and only links BELOW it are refused.
+ *
+ * ## Containment answers WHERE. It never asks WHAT
+ *
+ * Everything above is about the destination and the source: does this path stay inside the two
+ * roots, on the disk as well as in the string. Both halves are sound and both were re-verified
+ * — and a file can pass every one of them and still be a file that has no business being copied
+ * into somebody's project. `plan.reproduce` is generated from a repository the learner merely
+ * pointed us at, repo-tour classifies anything it cannot parse as `data`, and `data` is the
+ * reproduce bucket, so a reference repo's committed `.env`, `.mcp.json` or `.claude/settings.json`
+ * arrives here looking exactly like a lockfile. `withheldReason`, below `reproduceEntries`, is
+ * the check that asks the other question, and its own comment carries the rule in prose. This
+ * paragraph exists because the last time this header described a defence it stopped one step
+ * short and said so with confidence, and that sentence cost more than the missing code did.
  *
  * ## A refusal is a VALUE, never a throw
  *
@@ -317,6 +355,30 @@ function insideRealRoot(root: string, absPath: string): boolean {
   const realRoot = realOrNull(root);
   if (realRoot === null) return false;
   return resolveInsideTarget(realRoot, realPath) !== null;
+}
+
+/**
+ * The name `absPath` really has inside `root` — the path its symlinks resolve to, expressed
+ * relative to the root, or `null` when either end will not resolve.
+ *
+ * The read-side twin of `insideRealRoot` asks WHERE a path lands; this asks WHAT it is called
+ * once it has landed, and the two are different questions about the same `realpath`. It exists
+ * for one job: `reproduceFiles` judges an entry by its name, and a reference repository is free
+ * to commit `config.json -> .env`, at which point the name the plan spells and the name of the
+ * file it delivers are not the same string. Both stay inside the reference, so containment is
+ * satisfied and silent.
+ *
+ * `null` on any failure, for the same reason `realOrNull` gives one: the caller's own read is
+ * about to fail on an unresolvable path and will say so in better words. A caller must treat
+ * `null` as "no second opinion", never as "cleared".
+ */
+function realNameInside(root: string, absPath: string): string | null {
+  const realPath = realOrNull(absPath);
+  const realRoot = realOrNull(root);
+  if (realPath === null || realRoot === null) return null;
+  if (resolveInsideTarget(realRoot, realPath) === null) return null;
+  const relative = path.relative(realRoot, realPath);
+  return relative.length === 0 ? null : relative;
 }
 
 // ── reading the reference ───────────────────────────────────────────────────────────────────
@@ -609,6 +671,435 @@ export function reproduceEntries(plan: PlanLike): string[] {
   return entries.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
 }
 
+// ── what the entry IS, which containment never asks (T-12) ──────────────────────────────────
+
+/**
+ * **THE RULE, in prose, because everything below is an example of it and not the thing itself:**
+ *
+ *   A `reproduce` entry is withheld when its NAME says the file carries credentials, or that
+ *   it configures an agent, editor or tool that would then run in the folder the learner is
+ *   building in. Everything else is copied.
+ *
+ * That sentence is the specification. The predicates under it are how far it has been written
+ * down so far, and **the next file in the category will have a name nobody here has thought
+ * of** — so a reader extending this should ask "does this file carry a secret, or does it tell
+ * something that runs in that folder what to do?" and add it, rather than pattern-matching on
+ * the examples. Each predicate carries its own note saying what its boundary is and why, which
+ * is the part that makes it extendable; a single regular expression matching today's names
+ * would be shorter and would not survive its first surprise.
+ *
+ * ## Why a name check belongs in a function that already proves containment
+ *
+ * Every path here is checked twice over, lexically and against the filesystem, and both halves
+ * are sound: the entry really is inside the reference repository and the copy really does land
+ * inside the learner's folder. **Containment answers WHERE. It never asks WHAT**, and until
+ * T-12 nothing else did either.
+ *
+ * The gap is not hypothetical and it is not a stranger's repository. repo-tour is the
+ * reference repo this extension is defined against — the sibling checkout, the source of the
+ * core, the thing anyone would point it at first — and repo-tour itself commits
+ * `.claude/settings.json`. repo-tour's walker descends dot-directories (it skips only `.git`),
+ * `.json` is not `PARSEABLE`, so it falls through to `data`, and `data` IS the reproduce
+ * bucket. The default demo path therefore copies a reference repository's agent configuration
+ * into a folder the learner did not put it in. It is a copy and not a transmission — that file
+ * was already readable to anyone who cloned that repo — but it is a copy nobody asked for, into
+ * the one folder this extension has been teaching the learner to trust.
+ *
+ * ## Over-refusing is the other way to be wrong
+ *
+ * `reproduce` exists precisely to deliver the files no step names — the lockfiles, the vendored
+ * bundles, the binary assets — and AC6's byte-for-byte `diff -r` can only come back clean
+ * because those and the `file` steps together cover the whole inventory. A rule that eats
+ * `.gitignore`, `id_rsa.pub` or `.github/workflows/ci.yml` breaks that to buy nothing. This is
+ * why the fix is a rule rather than a blocklist and why every predicate below draws its
+ * boundary explicitly: the public half of a key pair is not key material, a certificate is not
+ * a private key, a signature is not a secret, a directory merely named `keys` is not `.ssh`,
+ * a committed `.env.example` is a placeholder rather than the secret it is a template for, and
+ * a CI WORKFLOW runs on a build server somewhere else rather than in the folder in front of
+ * the learner — which is a statement about `.github/workflows/` and not about `.github/`,
+ * whose agent-configuration files are caught by their own names instead.
+ *
+ * **This half is not symmetric with the other one, and that is why it is measured rather than
+ * reasoned about.** Under-refusal is found by asking "what gets through", which every security
+ * instinct already does; over-refusal is found only by running the finished rule over a REAL
+ * inventory and reading the whole list rather than the matches — because the files it eats
+ * (`.env.example`, `dist/app.tar.gz.asc`) are files a project commits ON PURPOSE, and no
+ * adversarial test would ever plant one. Both of T-12's over-refusals were found that way and
+ * neither would have been found any other.
+ *
+ * The cost this rule DOES accept, so the next reader does not re-audit it: `.vscode` is a
+ * DIRECTORY judgement with a per-file price. A learner rebuilding this very extension does not
+ * get `.vscode/launch.json`, because `.vscode` is in the set for `tasks.json`'s sake and
+ * `launch.json` rides along with the directory. Measured on this repository the whole cost is
+ * two entries of twenty-two, and on repo-tour — the default demo path — it is one of twenty-seven.
+ * A per-file `.vscode` split would be a second rule to maintain for one file's convenience; the
+ * refusal names the file and tells the learner to copy it in, which is the better trade.
+ *
+ * ## What this is NOT
+ *
+ * It is not a content scan. Nothing here opens the file, and a `config.json` genuinely full of
+ * live API keys is copied exactly as before — the honest boundary of a name rule, worth stating
+ * so the next reader does not mistake this for more than it is (T-5's finding 1 cost more in
+ * its comment than in its code). A `config.json` that is a LINK to `.env` is a different case
+ * and is refused, because that is still a question about a name: the one the file has once the
+ * link is followed, which `reproduceFiles` asks separately. It also does not touch `planWrite`: a file the plan turns into a
+ * taught STEP is a different decision, made where a learner is being asked to write it.
+ */
+
+/** The three reasons, as predicate phrases — each one completes "refused — it …". */
+const AGENT_CONFIG_REASON = 'is configuration for an agent, editor or tool that would then run in the folder you are building in';
+const CREDENTIAL_REASON = 'is shaped like a credentials file';
+const KEY_MATERIAL_REASON = 'is shaped like private key material';
+
+/**
+ * Dot-directories an agent, editor or tool reads **out of its working directory**, which is
+ * exactly the folder this function is copying into. That is the whole membership test, and
+ * every name below is here because something reads it from `.` and then acts in `.`:
+ *
+ *   - `.vscode` and `.idea` are in for the same reason `.claude` is, not by analogy: a
+ *     committed `tasks.json` can carry `"runOn": "folderOpen"`, so opening the folder runs it
+ *     — in the very editor this extension lives in;
+ *   - `.husky` is a hook MANAGER's directory, in a folder where `buildTutorials.commitPerStep`
+ *     defaults to true and `src/dial/commit.ts` runs `git commit` once per completed step with
+ *     no `--no-verify`. It needs one more link than the rest (husky's `prepare` script has to
+ *     point `core.hooksPath` at it) and it is a path git carries in a tree without complaint,
+ *     which is why it arrives through the ordinary pipeline;
+ *   - `.git` is the one T-5's security review named by name. A `.git/config` carries
+ *     `core.fsmonitor`, `core.hooksPath` and aliases — commands git runs in that folder — and
+ *     `.git/hooks/` is the same category `.husky` is. Its reachability is narrow and worth
+ *     stating rather than implying: repo-tour's walker skips `.git` outright, and git refuses
+ *     a `.git` path component inside a tree, so no cloned reference can carry one. It takes a
+ *     shipped `.repo-tour/build/plan.json` over a non-git reference folder — itself gated by
+ *     Workspace Trust, since `package.json` sets `untrustedWorkspaces.supported: false`. It is
+ *     one word here and it closes a write that was confirmed to land, so it is one word here.
+ *
+ * **`.github` is deliberately absent, and the reason is about `workflows/` rather than about
+ * the directory.** A workflow file configures a build server somewhere else, `.github/` is a
+ * large and load-bearing part of ordinary projects, and refusing it whole would cost a learner
+ * their CI for no gain here. What that argument does NOT cover is
+ * `.github/copilot-instructions.md`, which is agent configuration read in the editor, in that
+ * folder — so it is caught by its own NAME below instead, and the directory keeps landing.
+ * A reader extending this should keep the two apart: a directory joins this set only when
+ * everything in it is read from `.`.
+ */
+const AGENT_DIRECTORIES = new Set([
+  'claude', 'cursor', 'aider', 'continue', 'codeium', 'copilot', 'windsurf', 'gemini',
+  'opencode', 'cline', 'roo', 'goose', 'vscode', 'idea', 'devcontainer',
+  'codex', 'zed', 'junie', 'kiro', 'trae', 'amazonq', 'qodo', 'helix',
+  'husky', 'git',
+]);
+
+/**
+ * Dot-directories whose entire job is to hold credentials for a tool. These belong in a home
+ * directory and are startling in a repository — which is the point: if one has been committed,
+ * everything under it is a secret, `known_hosts` and `config` included.
+ */
+const CREDENTIAL_DIRECTORIES = new Set([
+  'ssh', 'gnupg', 'gpg', 'aws', 'azure', 'gcloud', 'kube', 'docker', 'chef',
+]);
+
+/**
+ * Single files that ARE an agent's or a tool's configuration, with no directory to give them
+ * away. `.mcp.json` is the one confirmed present in repo-tour's real reproduce list; the rest
+ * are its kin, and `isAgentManifest` below covers the `.local` spellings besides.
+ *
+ * Three of these are worth a sentence each, because each one is a boundary:
+ *
+ *   - **`.envrc`** is direnv's configuration and it is SHELL — direnv executes it on entering
+ *     the directory. It is one letter past the `.env` family it is named after and belongs to
+ *     a different category than the family does: not a file that holds a secret, a file that
+ *     runs. It is in `plan.reproduce` through the ordinary pipeline.
+ *   - **`copilot-instructions.md`** is caught here rather than by a directory precisely so
+ *     that `.github/` can keep landing whole. It is agent configuration wherever it sits.
+ *   - **`.clinerules`, `.roomodes` and `opencode.json`** are the single-file spellings of
+ *     agents whose directories (`.cline`, `.roo`, `opencode`) this rule already withholds.
+ *     The set had already decided those agents count; these are the same decision, spelled the
+ *     other way.
+ */
+const AGENT_MANIFESTS = new Set([
+  '.mcp.json', 'mcp.json', '.clauderc', '.cursorrules', '.windsurfrules', '.aiderrc',
+  '.aider.conf.yml', '.goosehints', 'claude.md', 'agents.md', 'gemini.md',
+  '.envrc', 'copilot-instructions.md', '.clinerules', '.roomodes', 'opencode.json',
+]);
+
+/**
+ * Name ENDINGS that make a file agent configuration wherever it sits — the three formats VS
+ * Code reads as instructions to an agent (`.github/instructions/*.instructions.md` and its
+ * siblings), and Sublime's project files, which carry `build_systems` with a `cmd` that runs
+ * in the folder they sit in.
+ *
+ * A suffix rather than a directory for the same reason `copilot-instructions.md` is a name:
+ * these live under `.github/`, which stays deliverable. The known cost is a prose document
+ * that happens to end `.prompt.md` and is not one; the refusal names it and says to copy it in.
+ */
+const AGENT_FILE_SUFFIXES = [
+  '.instructions.md', '.prompt.md', '.chatmode.md', '.sublime-project', '.sublime-workspace',
+];
+
+/**
+ * Files named after the credential store they are, rather than after a secret-sounding word.
+ * `.nvmrc` is not here and `.npmrc` is: the difference is one letter and the whole point of an
+ * exact set rather than a prefix. `.yarnrc` is Yarn v1's, which carries `_auth`, and
+ * `.yarnrc.yml` is Yarn v2's, which carries `npmAuthToken` — two files, one job, both here.
+ */
+const CREDENTIAL_FILES = new Set([
+  '.npmrc', '.yarnrc', '.yarnrc.yml', '.netrc', '_netrc', '.pgpass', '.htpasswd', '.git-credentials',
+  '.dockercfg', '.pypirc', '.boto', '.s3cfg', '.terraformrc', 'credentials', '.credentials',
+  'auth.json',
+]);
+
+/**
+ * Words that say a file's JOB is to hold a secret, matched anywhere in the base name so
+ * `db-password.txt`, `ops/secrets.yml` and `aws_credentials.ini` are all caught without three
+ * entries each. Every one of them is unambiguous in the middle of a word, which is the test
+ * for this list and the reason it is short.
+ */
+const SECRET_WORDS = ['secret', 'credential', 'password', 'passwd', 'apikey'];
+
+/**
+ * Words that say the same thing only when they are a WHOLE word — bounded by `-`, `_`, `.` or
+ * the edge of the name.
+ *
+ * The naked-substring test these were once kept out of really would have eaten
+ * `tokenizer.json` (a file in this repo's own fixture), `authors.txt`, `authentication.md`,
+ * `keyboard.json`, `monkey.txt` and `i18n/keys.json` — the evidence for excluding them was
+ * right. The conclusion drawn from it was not: `SECRET_WORDS` had already reached for the
+ * answer one line above by spelling `apikey`, `api-key` and `api_key` three times. Bounding
+ * the match instead keeps every one of those near-misses AND catches `github_token.txt`,
+ * `access_token.json`, `auth.json`, `gcp-key.json` and `id_token` — and it lets the three
+ * `api*key` spellings collapse back into one, since `api-key` is now just `key` with a
+ * delimiter in front of it.
+ *
+ * The question a word has to answer to be here is about the MATCH, not about the word: not
+ * "is a file carrying this more likely a secret than not", which `key` fails and which is what
+ * kept it out, but "is a file whose name contains this as a whole word more likely a secret
+ * than not", which `key` passes. The cost is real and bounded — `auth-provider.ts` and
+ * `key-map.json` are refused with a sentence that names them — and it is the trade the review
+ * asked for by measuring it in both directions.
+ */
+const SECRET_SEGMENT_WORDS = ['token', 'auth', 'key'];
+
+/**
+ * Two-word names for a credential file, matched with the delimiters taken OUT, so
+ * `service-account.json`, `service_account.json` and `serviceAccountKey.json` are one entry
+ * here rather than six. Separate from `SECRET_WORDS` on purpose: removing delimiters can join
+ * two innocent words into a third (`bypass-words.txt` squashes to something containing
+ * `password`), so only the phrases that need it are matched that way.
+ *
+ * The known miss this leaves is the camelCase spelling of a SINGLE bounded word — `authToken.json`
+ * squashes to `authtokenjson`, which no phrase here covers. Splitting camelCase into
+ * delimiters would catch it and would also eat `AuthProvider.ts` and `KeyMap.ts`, which is a
+ * worse trade; it is written down rather than left to be rediscovered.
+ */
+const SECRET_PHRASES = ['serviceaccount'];
+
+/**
+ * Extensions that are private key material by definition. The PUBLIC halves are deliberately
+ * not here — `.pub`, `.crt`, `.cer`, `.der` and `.asc` are meant to be handed out, and a
+ * repository that ships a certificate or a signature for its own release should keep shipping
+ * it. `.asc` is the ASCII-ARMORED format, so in a repository it is overwhelmingly a detached
+ * signature (`dist/app.tar.gz.asc`) or an exported public key (`KEYS.asc`); it sat on the
+ * wrong side of the sentence directly above until T-12's review drove it.
+ *
+ * `.key` is the one knowingly imperfect member (a Keynote deck ends in it too). In a source
+ * repository a `.key` is a private key far more often than a slide deck, the refusal names the
+ * file, and the learner can copy a deck in by hand; the reverse mistake cannot be undone.
+ */
+const KEY_EXTENSIONS = new Set(['.pem', '.key', '.p12', '.pfx', '.jks', '.keystore', '.gpg', '.pgp', '.ppk']);
+
+/**
+ * The env-file family: `.env`, `.env.local`, `.env.production.local`, and the `prod.env`
+ * spelling — minus the placeholders, which are a different file with a different job.
+ */
+function isEnvFile(base: string): boolean {
+  if (isEnvPlaceholder(base)) return false;
+  return base === '.env' || base.startsWith('.env.') || base.endsWith('.env');
+}
+
+/**
+ * `.env.example` and its family — the file a project commits **on purpose**.
+ *
+ * This is the over-refusal half of the rule and it is not a near-miss dreamed up for a test.
+ * A placeholder exists to be committed: it is the one document that tells the next person
+ * which variables the build wants, it is present in a large fraction of real repositories, and
+ * it is exactly the "files no step names" scaffolding `reproduce` exists to deliver. A prefix
+ * test cannot tell it from the secret it is a template for, so this is an exact set of the
+ * words a placeholder is spelled with — the same "an exact set rather than a prefix" argument
+ * `.nvmrc` versus `.npmrc` makes one list up.
+ *
+ * Either end of the name counts, because both spellings are in the wild: `.env.example` and
+ * `example.env`, and `.env.production.example` for a project with stages. `.env.local` and
+ * `deploy/prod.env` are neither, and stay withheld.
+ *
+ * The cost, stated: a project that puts a real secret in a file called `.env.template` gets it
+ * copied. That is a file lying about what it is, and the alternative — withholding every
+ * placeholder from every learner — was measured and is worse.
+ */
+const ENV_PLACEHOLDER_WORDS = new Set(['example', 'sample', 'template', 'dist', 'defaults', 'placeholder']);
+
+/**
+ * The leading spelling is a SMALLER set than the trailing one, and the two names it leaves out
+ * are why it is separate: `.env.dist` and `.env.defaults` are placeholder conventions, while
+ * `dist.env` and `defaults.env` read as "the env file for the dist build" — a real one. Where
+ * a word is ambiguous by position, the withheld reading wins.
+ */
+const ENV_PLACEHOLDER_PREFIXES = new Set(['example', 'sample', 'template', 'placeholder']);
+
+function isEnvPlaceholder(base: string): boolean {
+  const parts = base.split('.').filter((part) => part.length > 0);
+  if (parts.length < 2) return false;
+  return ENV_PLACEHOLDER_WORDS.has(parts[parts.length - 1] ?? '') || ENV_PLACEHOLDER_PREFIXES.has(parts[0] ?? '');
+}
+
+/** An agent's or a tool's configuration with no directory to give it away. The `.mcp.` prefix
+ *  is there because `.mcp.local.json` and its siblings keep being invented, and `.local` is
+ *  stripped for the same reason: `CLAUDE.local.md` is `CLAUDE.md` with the same power. */
+function isAgentManifest(base: string): boolean {
+  if (AGENT_MANIFESTS.has(base) || base.startsWith('.mcp.')) return true;
+  if (AGENT_FILE_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true;
+  const withoutLocal = base.replace(/\.local(?=\.[^.]+$)/, '');
+  return withoutLocal !== base && AGENT_MANIFESTS.has(withoutLocal);
+}
+
+/** A file whose JOB is to hold a secret — by exact name, by a word in the name, or by a whole
+ *  word between delimiters. See each list above for which match it gets and why. */
+function isCredentialStore(base: string): boolean {
+  if (CREDENTIAL_FILES.has(base)) return true;
+  if (SECRET_WORDS.some((word) => base.includes(word))) return true;
+  const squashed = base.replace(/[-_.]+/g, '');
+  if (SECRET_PHRASES.some((phrase) => squashed.includes(phrase))) return true;
+  return base.split(/[-_.]+/).some((segment) => SECRET_SEGMENT_WORDS.includes(segment));
+}
+
+/**
+ * A private key, by SSH's naming shape or by extension.
+ *
+ * The last clause is not redundant: `path.extname` calls a leading dot no extension at all, so
+ * `.pem` comes back as the empty string, and a file spelled that way would otherwise walk
+ * straight through a set that contains `.pem`.
+ */
+function isKeyMaterial(base: string): boolean {
+  return isSshPrivateKey(base) || KEY_EXTENSIONS.has(path.extname(base)) || KEY_EXTENSIONS.has(base);
+}
+
+/**
+ * OpenSSH writes a private key as `id_<type>` with **no extension** and its public half as
+ * `id_<type>.pub`. Testing the shape rather than listing `id_rsa`, `id_dsa`, `id_ecdsa`,
+ * `id_ed25519` covers the key type invented after this was written, which is the point; the
+ * "no dot" half is what keeps `id_rsa.pub` — and `id_map.json` — deliverable.
+ *
+ * `id_token` matches this shape and is a JWT rather than key material, which is why
+ * `isCredentialStore` is asked FIRST in `withheldReason`: the refusal is right either way and
+ * the reason a learner is given should be the true one.
+ */
+function isSshPrivateKey(base: string): boolean {
+  return base.startsWith('id_') && !base.includes('.');
+}
+
+/** A path segment that is one of the dot-directories in `set` — `.claude`, `.ssh`, and so on. */
+function isDotDirectoryIn(segment: string, set: ReadonlySet<string>): boolean {
+  return segment.startsWith('.') && set.has(segment.slice(1));
+}
+
+/**
+ * One path segment as the filesystem it lands on would understand it, lower-cased.
+ *
+ * Case is folded because the answer must not depend on the filesystem the copy happens to
+ * land on — macOS and Windows treat `.ENV` and `.env` as the same file, and a rule that
+ * disagreed with the filesystem about that would be a hole on exactly two of the three
+ * platforms this runs on.
+ *
+ * The other two normalisations are Windows' and are the same argument one step further. NTFS
+ * resolves `name::$DATA` (and `name:stream:$DATA`) to the file's default stream, and Win32
+ * strips trailing dots and spaces from a component before it ever reaches the filesystem — so
+ * `.env `, `.npmrc.`, `id_rsa.`, `.claude./` and `.env::$DATA` all DENOTE the withheld file
+ * there, and a rule that read them literally would be a hole on the platform this file's own
+ * comment names as one of the three it runs on.
+ *
+ * On POSIX those names are genuinely different files, so this over-refuses there — in the safe
+ * direction, with a sentence that names the entry, and knowingly, which is the same trade the
+ * `\` in the split below makes.
+ */
+function windowsName(segment: string): string {
+  return segment
+    .replace(/:{1,2}[^:]*:?\$data$/i, '')
+    .replace(/[. ]+$/, '')
+    .toLowerCase();
+}
+
+/**
+ * The segments an entry actually denotes: separators folded, `.` and `..` resolved, each
+ * segment normalised.
+ *
+ * `..` is resolved rather than left alone because the rule is about the file the entry names,
+ * not about the string: `.claude/../.env` is `.env`, and reporting it as agent configuration —
+ * which is what walking through the `.claude` segment did — is a right refusal for a wrong
+ * reason. An entry that climbs out of its root entirely keeps its leading `..`, and never
+ * reaches here in `reproduceFiles` anyway: containment refuses it two checks earlier.
+ *
+ * The split takes `\` as well as `/` because on Windows it IS a separator. A POSIX file
+ * genuinely named `.claude\settings.json` is one legal filename and is refused as a directory
+ * match — over-refusal, in the safe direction, on a name nobody has created.
+ */
+function pathSegments(entry: string): string[] {
+  const out: string[] = [];
+  for (const piece of entry.split(/[\\/]+/)) {
+    // `.` and `..` are recognised BEFORE the Windows normalisation below, which would
+    // otherwise strip `..` down to nothing and leave the directory it was cancelling in place.
+    // Trailing spaces come off first because Windows takes `.. ` for `..` as well.
+    const raw = piece.replace(/ +$/, '');
+    if (raw.length === 0 || raw === '.') continue;
+    if (raw === '..') {
+      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
+      else out.push('..');
+      continue;
+    }
+    const segment = windowsName(raw);
+    // A segment that normalises away entirely — `...`, a bare stream name — is dropped rather
+    // than treated as a `..`, which errs toward keeping the directory above it in the list.
+    if (segment.length === 0) continue;
+    out.push(segment);
+  }
+  return out;
+}
+
+/**
+ * Why this entry will not be copied, or `null` for the ordinary case — a lockfile, a vendored
+ * bundle, a binary asset, which is nearly everything and must stay that way.
+ *
+ * Answered from a NAME with no filesystem at all, and asked by `reproduceFiles` before the
+ * file is opened or a directory is created for it, so an entry in the category is refused
+ * without ever being read. It is asked twice there: once about the entry as the plan spells
+ * it, and once about the name the entry resolves to, which is not always the same file.
+ *
+ * Exported for `src/walk/session.ts`, which needs the same answer without doing the copy: the
+ * panel's offer counts `reproduceEntries` and the overwrite prompt filters it, and both are
+ * now wrong by exactly the entries this function withholds (T-12 review, findings 1 and 8).
+ *
+ * Every segment is examined by the two DIRECTORY tests, not just the base name, because
+ * `.claude/settings.json` gives itself away in the directory — the leaf is an innocent
+ * `settings.json` — and a repository is free to put one at
+ * `packages/api/.claude/settings.local.json`. The three tests below them read the BASE NAME
+ * only, and that is the boundary that makes a bounded `auth` affordable: `src/auth/index.ts`
+ * and everything else under an ordinary `auth/` directory keeps landing, because a directory
+ * named after a subject is not a file named after a secret.
+ *
+ * The order of the last three lines is the one place a right refusal can carry a wrong reason,
+ * so it is chosen rather than incidental: a credential-shaped name is asked about before an
+ * SSH-shaped one, because `id_token` matches both and is a JWT.
+ */
+export function withheldReason(entry: string): string | null {
+  const segments = pathSegments(entry);
+  const base = segments[segments.length - 1] ?? '';
+
+  if (segments.some((s) => isDotDirectoryIn(s, AGENT_DIRECTORIES))) return AGENT_CONFIG_REASON;
+  if (segments.some((s) => isDotDirectoryIn(s, CREDENTIAL_DIRECTORIES))) return CREDENTIAL_REASON;
+  if (isAgentManifest(base)) return AGENT_CONFIG_REASON;
+  if (isEnvFile(base) || isCredentialStore(base)) return CREDENTIAL_REASON;
+  if (isKeyMaterial(base)) return KEY_MATERIAL_REASON;
+  return null;
+}
+
 /**
  * Copies every `plan.reproduce` entry from the reference into the target, byte for byte,
  * creating directories as it goes. Returns the PROBLEMS — one shown-to-a-person line per
@@ -621,6 +1112,11 @@ export function reproduceEntries(plan: PlanLike): string[] {
  * because the `file` steps and this list together cover every file the inventory saw. Skipping
  * them would not merely leave the project un-runnable; it would make byte-for-byte
  * reproduction impossible in principle.
+ *
+ * **Every entry `withheldReason` refuses is an exception to that sentence**, and against a
+ * reference that commits one — repo-tour does — `diff -r` will report it. This file's header
+ * states the exception in full, under "AC6 has a SECOND exception since T-12"; it is named
+ * here as well because this is the function the criterion is actually about.
  *
  * Bytes, never a string: this is the one path that carries files that are not text at all, so
  * a `Buffer` goes in at one end and out at the other with no decode in between.
@@ -645,6 +1141,51 @@ export function reproduceFiles(plan: PlanLike, refRoot: string, target: string):
     // perfectly ordinary project walks in through.
     if (!insideRealRoot(refRoot, from)) {
       problems.push(`${label(entry)}: refused — it leaves the reference repository through a symlink`);
+      continue;
+    }
+    // WHAT the file is — the question every check above this one leaves unasked (T-12). It
+    // runs AFTER the three containment checks above and BEFORE the file is opened or a
+    // directory is made for it, and BOTH halves of that position are chosen rather than
+    // incidental. Above: those three name a plan escaping its roots, which is a worse thing
+    // than a secret-shaped name and is the message a containment regression would announce
+    // itself in, so an entry that is both an escape AND a bad name is reported as the escape.
+    // Below: `prepareDirectory` is the FOURTH containment check and it sits under this one, so
+    // an entry with a withheld name whose destination escapes through a symlink planted in the
+    // TARGET is reported as the polite name refusal instead — driven, and deliberate, because
+    // nothing may be created on disk for an entry that is never going to be copied, and
+    // running the name check last would `mkdir` the learner's `.claude` to say so. There is no
+    // security loss in either arrangement: nothing is written and nothing outside the target is
+    // touched. Only the sentence differs, and this comment now claims exactly as much as the
+    // ordering delivers — the same file, one ticket after a comment that claimed a defence was
+    // complete when three quarters of it were.
+    //
+    // It is asked TWICE, and the second ask is the one a symlink cannot walk past. The first
+    // reads the entry as the plan spells it; the second reads the name the entry RESOLVES to,
+    // because a reference repo carrying `config.json -> .env` delivers the secret verbatim
+    // under an innocent name, and `settings/settings.json` where `settings -> .claude`
+    // delivers the agent configuration. Containment has nothing to say about either — both
+    // links stay inside the reference, which is exactly what `insideRealRoot` just proved —
+    // and the rule's own sentence is about the name of the file, which under an alias is a
+    // name the plan never wrote down. Its reachability is narrow and is written here rather
+    // than left implied: repo-tour's walker skips symlinks unless `followSymlinks` is set, so
+    // this needs a shipped `.repo-tour/build/plan.json`, itself gated by Workspace Trust. It
+    // was confirmed at the copy, it costs one `realpath` on a list that is already doing one
+    // per entry, and the alternative was recording a known hole.
+    //
+    // What neither ask does is open the file. A `config.json` genuinely full of live API keys
+    // is copied exactly as before — the honest boundary of a NAME rule, and the reason the
+    // second ask is a resolution rather than a ban on links: an alias for a lockfile is a
+    // lockfile, and still lands.
+    const withheld = withheldReason(entry);
+    // Lazy on purpose: an entry already refused by its own name never has its path resolved,
+    // so the promise that nothing in the category is touched on disk holds exactly.
+    const aliased = withheld === null ? realNameInside(refRoot, from) : null;
+    const withheldAlias = aliased !== null && aliased !== entry ? withheldReason(aliased) : null;
+    if (withheld !== null || withheldAlias !== null) {
+      // Advice the containment refusals do not offer, because this refusal is different in
+      // kind: those name an attack, this one can land on a file somebody genuinely wants.
+      const reason = withheld !== null ? `it ${withheld}` : `it is a link to a file that ${withheldAlias}`;
+      problems.push(`${label(entry)}: refused — ${reason}; copy it in yourself if you want it`);
       continue;
     }
     let bytes: Buffer;

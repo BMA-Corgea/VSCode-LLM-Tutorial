@@ -1001,6 +1001,386 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
   });
 });
 
+// ── what the file IS, which containment never asks (T-12) ───────────────────────────────────
+
+/**
+ * T-12: `reproduceFiles` proves WHERE every entry lands and never asked WHAT it is.
+ *
+ * The trigger is not hypothetical and not a stranger's repository — it is the default demo
+ * path. repo-tour is the reference repo this extension is defined against, repo-tour itself
+ * commits `.claude/settings.json`, repo-tour's walker descends dot-directories, and `.json`
+ * is not `PARSEABLE`, so it falls through to `data` — which IS the reproduce bucket. Point
+ * this extension at the sibling checkout, the most likely first action anyone takes, and that
+ * file is copied into the learner's folder.
+ *
+ * Both directions are pinned here on purpose, because the fix has two ways to be wrong.
+ * Under-refusing is the bug. OVER-refusing is a real failure of its own: `reproduce` exists to
+ * scaffold the files no step names, so a rule that eats `.gitignore` or `id_rsa.pub` breaks
+ * AC6's byte-for-byte reproduction to buy nothing. Every case below therefore says which
+ * entries are withheld AND which ones must still arrive, and asserts the bytes on disk rather
+ * than only the sentences.
+ */
+
+/**
+ * Writes a reference tree containing exactly `names` (on top of the ordinary fixture), points
+ * a plan's `reproduce` at them, and runs the copy for real into a fresh target.
+ */
+function reproduceDrive(names: string[]): { refRoot: string; target: string; problems: string[] } {
+  const refRoot = referenceTree();
+  const target = tmpDir('dial-writer-target-');
+  for (const rel of names) {
+    const abs = path.join(refRoot, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, `contents of ${rel}\n`);
+  }
+  const plan = referencePlan();
+  plan['reproduce'] = names;
+  return { refRoot, target, problems: reproduceFiles(plan, refRoot, target) };
+}
+
+/**
+ * Drives `names` and checks every one of them in the direction it belongs: the ones in
+ * `expectRefused` produce exactly one problem line that names them and never reach the disk;
+ * every other name produces no problem at all and arrives byte for byte.
+ */
+function assertReproduce(names: string[], expectRefused: string[]): void {
+  const { refRoot, target, problems } = reproduceDrive(names);
+  const refused = new Set(expectRefused);
+  for (const rel of names) {
+    const mine = problems.filter((problem) => problem.startsWith(`${rel}: `));
+    const landed = path.join(target, rel);
+    if (refused.has(rel)) {
+      assert.equal(mine.length, 1, `${rel} should have been withheld; the problems were ${JSON.stringify(problems)}`);
+      assert.match(mine[0] ?? '', /^.+: refused — it .+/, `${rel}'s refusal must name it and say why`);
+      assert.equal(fs.existsSync(landed), false, `${rel} was reported as refused and copied anyway`);
+    } else {
+      assert.equal(mine.length, 0, `${rel} should have been delivered; got ${JSON.stringify(mine)}`);
+      assert.ok(
+        fs.existsSync(landed) && fs.readFileSync(landed).equals(fs.readFileSync(path.join(refRoot, rel))),
+        `${rel} should have arrived byte for byte — over-refusing breaks AC6 as surely as under-refusing breaks this`,
+      );
+    }
+  }
+  assert.equal(problems.length, expectRefused.length, `unexpected extra problems: ${JSON.stringify(problems)}`);
+}
+
+suite('reproduceFiles — what the file IS, not only where it lands (T-12)', () => {
+  test('repo-tour’s own .claude/settings.json — the default demo path — is withheld, and everything beside it still lands', () => {
+    const refRoot = referenceTree();
+    const target = tmpDir('dial-writer-target-');
+    fs.mkdirSync(path.join(refRoot, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(refRoot, '.claude', 'settings.json'), '{"hooks":{"PreToolUse":[]}}\n');
+    const plan = referencePlan();
+    plan['reproduce'] = ['.claude/settings.json', 'package-lock.json', 'vendor/bundle.min.js', 'data/blob.bin'];
+
+    const problems = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
+    assert.match(problems[0] ?? '', /^\.claude\/settings\.json: refused — it /);
+    assert.equal(fs.existsSync(path.join(target, '.claude')), false, 'the agent configuration directory was created in the learner’s folder');
+    // Not vacuous, and this is the half that matters as much as the refusal: the three files
+    // the learner is actually owed still arrived, byte for byte.
+    for (const rel of ['package-lock.json', 'vendor/bundle.min.js', 'data/blob.bin']) {
+      assert.ok(
+        fs.readFileSync(path.join(target, rel)).equals(fs.readFileSync(path.join(refRoot, rel))),
+        `${rel} did not arrive — one refusal must never abort the reproduce`,
+      );
+    }
+  });
+
+  test('the three entries repo-tour’s REAL inventory puts in plan.reproduce are all withheld', () => {
+    // Confirmed against repo-tour's real classifier in T-6's security review, finding 3:
+    //   .claude/settings.json  data  [data-ext:.json]
+    //   .mcp.json              data  [data-ext:.json]
+    //   .env                   data  [data-no-ext]
+    assertReproduce(
+      ['.claude/settings.json', '.mcp.json', '.env', 'package-lock.json'],
+      ['.claude/settings.json', '.mcp.json', '.env'],
+    );
+  });
+
+  test('a withheld entry FIRST in the list does not abort the rest', () => {
+    assertReproduce(['.env', 'vendor/bundle.min.js', 'package-lock.json'], ['.env']);
+  });
+
+  test('the .env family, including spellings nobody wrote down', () => {
+    assertReproduce(
+      ['.env', '.env.local', '.env.production.local', 'services/api/.env.staging', 'deploy/prod.env', 'package-lock.json'],
+      ['.env', '.env.local', '.env.production.local', 'services/api/.env.staging', 'deploy/prod.env'],
+    );
+  });
+
+  test('private key material and credential stores, at any depth', () => {
+    const names = [
+      'id_rsa', 'id_ed25519', 'certs/server.pem', 'certs/.pem', 'tls/server.key', 'signing/release.p12',
+      '.npmrc', '.netrc', '.git-credentials', 'config/credentials.json', 'ops/secrets.yml',
+      'db-password.txt', '.ssh/known_hosts', '.aws/config',
+      'package-lock.json',
+    ];
+    assertReproduce(names, names.filter((n) => n !== 'package-lock.json'));
+  });
+
+  test('agent, editor and container configuration, wherever it sits in the tree', () => {
+    const names = [
+      '.claude/settings.json', '.claude/hooks/on-start.sh', '.claude/agents/reviewer.md',
+      '.mcp.json', '.cursor/rules/house.md', '.cursorrules', '.windsurfrules',
+      '.vscode/tasks.json', '.idea/workspace.xml', '.devcontainer/devcontainer.json',
+      'packages/api/.claude/settings.local.json',
+      'package-lock.json',
+    ];
+    assertReproduce(names, names.filter((n) => n !== 'package-lock.json'));
+  });
+
+  test('case does not get past it — the filesystem this lands on may not care about case', () => {
+    assertReproduce(
+      ['.Claude/Settings.json', 'src/.ENV', 'ID_RSA', 'package-lock.json'],
+      ['.Claude/Settings.json', 'src/.ENV', 'ID_RSA'],
+    );
+  });
+
+  test('an entry that is BOTH credential-shaped and an escape is reported as the ESCAPE, and nothing lands outside', () => {
+    const refRoot = referenceTree();
+    const sandbox = tmpDir('dial-writer-sandbox-');
+    const target = path.join(sandbox, 'project');
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(sandbox, 'stolen.env'), 'API_KEY=nope\n');
+    const plan = referencePlan();
+    plan['reproduce'] = ['../.env', '/etc/passwd', 'package-lock.json'];
+
+    const problems = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(problems.length, 2, `expected two refusals, got ${JSON.stringify(problems)}`);
+    // The ordering is deliberate and this pins it: a plan trying to climb out of its roots is
+    // a worse thing than a secret-shaped name, so the containment sentence is the one shown —
+    // which also means a containment regression cannot hide behind the name rule.
+    for (const problem of problems) assert.match(problem, /refused — it points outside/);
+    assert.ok(fs.existsSync(path.join(target, 'package-lock.json')), 'the ordinary entry beside them should still land');
+    assert.deepEqual(fs.readdirSync(sandbox).sort(), ['project', 'stolen.env'], 'something was written outside the target');
+  });
+
+  // ── the other direction: over-refusing breaks the thing reproduce exists for ──────────────
+
+  test('the ordinary reproduce list is untouched by the rule', () => {
+    const refRoot = referenceTree();
+    const target = tmpDir('dial-writer-target-');
+    assert.deepEqual(reproduceFiles(referencePlan(), refRoot, target), [], 'the rule must not touch an ordinary list');
+    for (const rel of ['package-lock.json', 'vendor/bundle.min.js', 'data/blob.bin']) {
+      assert.ok(fs.readFileSync(path.join(target, rel)).equals(fs.readFileSync(path.join(refRoot, rel))));
+    }
+  });
+
+  test('near-miss names still land — the rule is a rule, not a substring grep over the path', () => {
+    // Every one of these contains a word from the category and is not in it: the public half
+    // of a key pair, a certificate, a directory merely NAMED keys, and four ordinary files.
+    assertReproduce(
+      [
+        'id_rsa.pub', 'certs/server.crt', 'keys/README.md', 'envelope.json', 'environment.md',
+        'src/tokenizer.json', 'donkey.txt', 'keyboard.json', 'package-lock.json',
+      ],
+      [],
+    );
+  });
+
+  test('ordinary dotfiles and CI config still land — the category is what runs HERE', () => {
+    // `.github/workflows/ci.yml` configures a build server somewhere else, not an agent in
+    // the folder the learner is building in, and `.nvmrc` is not `.npmrc`.
+    assertReproduce(
+      ['.gitignore', '.gitattributes', '.editorconfig', '.prettierrc', '.eslintrc.json', '.nvmrc', '.github/workflows/ci.yml'],
+      [],
+    );
+  });
+
+  test('the problem line names the entry, says why, and says what the learner can do', () => {
+    const { problems } = reproduceDrive(['.claude/settings.json', '.env', 'id_rsa']);
+    assert.equal(problems.length, 3, JSON.stringify(problems));
+    const joined = problems.join('\n');
+    assert.match(joined, /\.claude\/settings\.json: refused — it is configuration for an agent/);
+    assert.match(joined, /\.env: refused — it is shaped like a credentials file/);
+    assert.match(joined, /id_rsa: refused — it is shaped like private key material/);
+    // Every one of them tells the learner the copy is theirs to make if they meant it: this
+    // refusal, unlike the containment ones, can land on a file somebody genuinely wants.
+    for (const problem of problems) assert.match(problem, /copy it in yourself if you want it/);
+  });
+
+  // ── the review's reproductions, each one pinned in the direction it belongs ───────────────
+
+  /**
+   * Every test below this line reproduces a finding from T-12's machine review, and each one
+   * failed before the predicate it names was corrected. They are grouped by the two ways this
+   * rule can be wrong rather than by finding number, because that is the pair that matters:
+   * under-refusal delivers a secret, over-refusal costs a learner a file they are owed, and
+   * only the second is invisible to a test somebody would write adversarially.
+   */
+
+  test('the committed PLACEHOLDER is delivered and the secret beside it is not (review finding 3)', () => {
+    // `.env.example` is the file a project commits ON PURPOSE — the one document that tells
+    // the next person which variables the build wants. Withholding it hands the learner
+    // missing scaffolding in the middle of a tutorial, which is the failure this rule exists
+    // on the other side of.
+    assertReproduce(
+      [
+        '.env.example', '.env.sample', '.env.template', '.env.dist', '.env.defaults',
+        'example.env', 'sample.env', '.env.production.example', 'services/api/.env.example',
+        '.env', '.env.local', '.env.production.local', 'services/api/.env.staging', 'deploy/prod.env',
+        // Ambiguous by POSITION rather than by word: `.env.dist` is a placeholder convention,
+        // `dist.env` reads as the env file FOR the dist build. The withheld reading wins.
+        'dist.env', 'defaults.env',
+      ],
+      [
+        '.env', '.env.local', '.env.production.local', 'services/api/.env.staging', 'deploy/prod.env',
+        'dist.env', 'defaults.env',
+      ],
+    );
+  });
+
+  test('the six kinds the ordinary pipeline delivered are withheld, and .github is still a directory the rule leaves alone (review finding 2)', () => {
+    // All six reach a learner's folder through repo-tour's real `digest()` → `buildPlan()`:
+    // no crafted plan, no symlink, no untracked file. Every one of them answers "withhold" to
+    // the rule's own sentence, which is how the review found them.
+    assertReproduce(
+      [
+        '.envrc', '.husky/pre-commit', '.github/copilot-instructions.md',
+        '.codex/config.toml', '.zed/settings.json', 'auth.json',
+        '.junie/guidelines.md', '.kiro/steering.md', '.trae/rules.md', '.amazonq/mcp.json', '.helix/languages.toml',
+        // The distinction that is the whole point: `.github` is NOT an agent directory — a
+        // workflow configures a build server somewhere else — and the agent-configuration
+        // files that live inside it are caught by their own names instead.
+        '.github/workflows/ci.yml', '.github/ISSUE_TEMPLATE/bug.md', '.github/dependabot.yml', '.github/CODEOWNERS',
+      ],
+      [
+        '.envrc', '.husky/pre-commit', '.github/copilot-instructions.md',
+        '.codex/config.toml', '.zed/settings.json', 'auth.json',
+        '.junie/guidelines.md', '.kiro/steering.md', '.trae/rules.md', '.amazonq/mcp.json', '.helix/languages.toml',
+      ],
+    );
+  });
+
+  test('single-file spellings of agents already in the directory set (review finding 10)', () => {
+    assertReproduce(
+      [
+        '.clinerules', '.roomodes', 'opencode.json', 'CLAUDE.local.md', 'opencode.local.json',
+        // Near misses that must keep landing: a rules directory nobody's agent reads, a
+        // changelog, and an ordinary JSON file with a similar shape.
+        'rules.md', 'CHANGELOG.md', 'codes.json',
+      ],
+      ['.clinerules', '.roomodes', 'opencode.json', 'CLAUDE.local.md', 'opencode.local.json'],
+    );
+  });
+
+  test('the secret words are bounded by delimiters, which keeps the near-misses AND catches the real ones (review finding 11)', () => {
+    assertReproduce(
+      [
+        'github_token.txt', 'access_token.json', 'auth.json', 'gcp-key.json', 'service-account.json',
+        'serviceAccountKey.json', 'api-key.txt', 'src/id_token',
+        // The three names the naked substring would have eaten, plus the four the review drove.
+        'src/tokenizer.json', 'authors.txt', 'authentication.md', 'keyboard.json',
+        'monkey.txt', 'donkey.txt', 'i18n/keys.json', 'authorization-guide.md',
+      ],
+      [
+        'github_token.txt', 'access_token.json', 'auth.json', 'gcp-key.json', 'service-account.json',
+        'serviceAccountKey.json', 'api-key.txt', 'src/id_token',
+      ],
+    );
+  });
+
+  test('ASCII-armored .asc is a signature or a PUBLIC key, and rides on the same side of the line as .pub (review finding 6)', () => {
+    assertReproduce(
+      ['dist/app.tar.gz.asc', 'KEYS.asc', 'release.asc', 'signing/private.gpg', 'certs/server.pem'],
+      ['signing/private.gpg', 'certs/server.pem'],
+    );
+  });
+
+  test('Windows strips trailing dots and spaces and resolves ::$DATA, so those names denote the withheld file (review finding 9)', () => {
+    assertReproduce(
+      [
+        '.claude./settings.json', '.claude /settings.json', '.env ', '.npmrc.', 'id_rsa.', '.env::$DATA',
+        'package-lock.json', 'notes.md ',
+      ],
+      ['.claude./settings.json', '.claude /settings.json', '.env ', '.npmrc.', 'id_rsa.', '.env::$DATA'],
+    );
+  });
+
+  test('the refusal names the right reason, not merely a right refusal (review finding 13)', () => {
+    const { problems } = reproduceDrive(['src/id_token', '.claude/../.env']);
+    assert.equal(problems.length, 2, JSON.stringify(problems));
+    const joined = problems.join('\n');
+    // A JWT is not key material — it matches `id_<type>`'s shape and is a credential.
+    assert.match(joined, /src\/id_token: refused — it is shaped like a credentials file/);
+    // And the file this entry denotes is `.env`, whatever directory the path walks through.
+    assert.match(joined, /\.claude\/\.\.\/\.env: refused — it is shaped like a credentials file/);
+  });
+
+  test('an entry that RESOLVES to a withheld file is withheld under whatever name it is given (review finding 4)', () => {
+    const refRoot = referenceTree();
+    const target = tmpDir('dial-writer-target-');
+    fs.writeFileSync(path.join(refRoot, '.env'), 'OPENAI_API_KEY=sk-live-DO-NOT-COPY\n');
+    fs.mkdirSync(path.join(refRoot, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(refRoot, '.claude', 'settings.json'), '{"hooks":{"PreToolUse":[{"command":"curl evil"}]}}\n');
+    // Both links stay INSIDE the reference, so containment is doing its job and has nothing to
+    // say; the entry that names the file honestly is the only one the old rule ever saw.
+    fs.symlinkSync('.env', path.join(refRoot, 'config.json'));
+    fs.symlinkSync('.claude', path.join(refRoot, 'settings'));
+    fs.symlinkSync('package-lock.json', path.join(refRoot, 'alias-lock.json'));
+    const plan = referencePlan();
+    plan['reproduce'] = ['config.json', 'settings/settings.json', 'alias-lock.json'];
+
+    const problems = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(problems.length, 2, `expected two refusals, got ${JSON.stringify(problems)}`);
+    for (const problem of problems) assert.match(problem, /refused — it is a link to a file that /);
+    assert.equal(fs.existsSync(path.join(target, 'config.json')), false, 'the secret arrived under an innocent name');
+    assert.equal(fs.existsSync(path.join(target, 'settings', 'settings.json')), false, 'the agent configuration arrived through an alias');
+    // And the other direction, which is the reason this is a resolution and not a ban on links:
+    // an alias for an ordinary file is an ordinary file.
+    assert.ok(
+      fs.readFileSync(path.join(target, 'alias-lock.json')).equals(fs.readFileSync(path.join(refRoot, 'package-lock.json'))),
+      'a link to an ordinary file must still deliver',
+    );
+  });
+
+  test('.git/ — the directory T-5 finding 3 named — is withheld, and .gitignore beside it is not (review finding 7)', () => {
+    assertReproduce(
+      ['.git/config', '.git/hooks/pre-commit', '.gitignore', '.gitattributes', '.github/workflows/ci.yml'],
+      ['.git/config', '.git/hooks/pre-commit'],
+    );
+  });
+
+  test('a target-side escape under a withheld name reports the NAME refusal, and that is what the ordering comment now says (review finding 5)', () => {
+    // `prepareDirectory` is the fourth containment check and it sits BELOW the name check, so
+    // this entry reports the polite refusal rather than the escape. There is no security loss
+    // — the victim outside is byte-identical afterwards and nothing was created — and the
+    // position is deliberate: nothing may be made on disk for an entry that is never copied.
+    const refRoot = referenceTree();
+    fs.mkdirSync(path.join(refRoot, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(refRoot, '.claude', 'settings.json'), '{"hooks":{}}\n');
+    const sandbox = tmpDir('dial-writer-sandbox-');
+    const outside = path.join(sandbox, 'OUTSIDE');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'victim.txt'), 'ORIGINAL');
+    const target = path.join(sandbox, 'project');
+    fs.mkdirSync(target);
+    fs.symlinkSync(outside, path.join(target, '.claude'));
+    const plan = referencePlan();
+    plan['reproduce'] = ['.claude/settings.json', 'vendor/bundle.min.js'];
+
+    const problems = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
+    assert.match(problems[0] ?? '', /refused — it is configuration for an agent/);
+    assert.equal(fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8'), 'ORIGINAL', 'something was written through the planted link');
+    assert.deepEqual(fs.readdirSync(outside), ['victim.txt'], 'something was created outside the folder the learner named');
+    assert.ok(fs.existsSync(path.join(target, 'vendor', 'bundle.min.js')), 'the ordinary entry beside it should still land');
+  });
+
+  test('a POSIX file genuinely named with a backslash is over-refused, deliberately and in the safe direction (review finding 14)', () => {
+    // One legal filename on this filesystem, one path on Windows. The rule splits on both
+    // separators because it must be right on the platform where the name is a directory, and
+    // the cost is that a POSIX file nobody has ever created is refused with a sentence that
+    // names it. Pinned rather than fixed, so the next reader knows it was decided.
+    assertReproduce(['.claude\\settings.json', 'package-lock.json'], ['.claude\\settings.json']);
+  });
+});
+
 // ── the write primitive ─────────────────────────────────────────────────────────────────────
 
 suite('writeTextAtomic — durable, and unreachable by a pre-planted name', () => {
