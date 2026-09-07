@@ -128,6 +128,19 @@
           "type": "boolean",
           "default": true,
           "description": "Commit each completed step in the tutorial folder, with the message “<ordinal>: <question> — <the option the author chose>”. The commits are yours: they use that folder’s own git identity, and if none is configured no commit is made and the panel says so rather than inventing an author."
+        },
+        "buildTutorials.tutorModel": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Model the TUTOR asks, kept separate from buildTutorials.llmModel on purpose. The build model is chosen for what interpreting a whole repository costs, once, in the background; the tutor is one question from one person at the moment they are stuck. Empty means the provider’s strongest model rather than its default — the right way round for the only place a wrong answer is read by someone already confused."
+        },
+        "buildTutorials.tutorTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "How long to wait for a tutor answer before giving up, between 5 seconds and an hour. A timeout is reported as a reply in the panel, never as a spinner that does not end. The maximum is not a preference: past about 2,147,483 seconds the deadline overflows a 32-bit timer, Node fires it after one millisecond, and every ask would report a timeout instantly while the model kept running and kept billing. The extension bounds this again where the timer is armed, so a hand-edited settings file cannot get past it either."
         }
       }
     }

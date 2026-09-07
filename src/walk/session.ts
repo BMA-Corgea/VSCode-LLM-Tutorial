@@ -125,12 +125,55 @@
  * trailing newline added here, no line-ending translation, no re-encoding. Walking every step
  * in automated mode has to reproduce the reference byte-for-byte, and `diff -r` is not a
  * metaphor.
+ *
+ * ## T-6 — the tutor (spec §5.5; ACs 2, 3, 4)
+ *
+ * The walk gains the one thing that costs the learner money, and three of its rules are
+ * unlike anything above them:
+ *
+ *   - **An ask is NOT on the serialised chain; only its delivery is.** Everything T-5 added
+ *     goes through `enqueue` because two writes racing one file is the failure that matters
+ *     there. An ask writes nothing until it answers, and it can sit with a model for two
+ *     minutes — so serialising it would mean a learner who asked a question could not have the
+ *     next step's file written until the answer came back. It runs beside the chain and hands
+ *     its outcome back to `enqueue`, which keeps every mutation of `progress` in one order
+ *     while keeping the wait out of everyone else's way. `settled()` closes the gap that
+ *     opens; see there.
+ *   - **No spinner is ever left running** — AC4, entire. `asking` is the single answer to "is
+ *     something in flight", `TutorView.thinking` is derived from it rather than tracked beside
+ *     it, and `deliverAsk` clears it before it looks at the outcome, so no branch that exists
+ *     and no branch anybody adds later can end with a spinner and nothing behind it.
+ *   - **`AskLedger` is what stops a runaway billed request** — a name, not a list. One ledger
+ *     per session owns every ask this walk starts: `beginAsk` opens a TICKET at the press
+ *     (which is what puts the pre-flight on camera and makes *Cancel* able to stop it before
+ *     anything is sent), the ledger bounds the deadline, chooses the neutral directory the
+ *     provider runs in, and sums what came back. `cancelAsk` goes through
+ *     `AskLedger.abandonAll()` rather than through the one ticket this object happens to hold,
+ *     so the control reaches a live ask on any step; `TutorView.spend` and
+ *     `TutorView.elsewhere` are read off the same ledger, which is why neither can be stale.
+ *     Nothing here reaches a provider by any other route.
+ *   - **Cancel detaches; it does not kill.** repo-tour's `killLlmChildren` kills every live
+ *     child, so cancelling one question would kill a background build. `AskTicket.abandon()`
+ *     severs delivery instead: the answer to a question the learner walked away from can never
+ *     reach their transcript, the request is still finishing, and the panel says so — including
+ *     that it is still being billed, which the ledger counts rather than merely asserting.
+ *     Before the send there is nothing to detach from, so a cancel there is a real
+ *     cancellation and the sentence says that instead. `dispose()` closes the ledger.
+ *   - **A refusal never eats the question.** Four of the answers below are decided AFTER the
+ *     press, so the page cannot know from the press alone whether the learner's text is safe
+ *     to throw away. `TutorView.accepted` is the host naming the question it really sent, and
+ *     its absence is what leaves a minute of somebody's typing where they left it.
+ *
+ * The durable half is the transcript: one per step in `progress.steps[id].transcript`, written
+ * through the same atomic `saveProgress` as everything else, and read back ONLY through
+ * `getTranscript`. The transient half — thinking, the unreachable line, the note about a
+ * timeout — is this object's and dies with it, exactly like `writeNote` and the check reports.
  */
 
 import type { GitRunner } from '../start/build.js';
 import type { Dial } from '../start/request.js';
 import type { ResolvedRequest } from './store.js';
-import { commitStep } from '../dial/commit.js';
+import { commitStep, ensureTranscriptIgnored } from '../dial/commit.js';
 import type { DialCore } from '../dial/core.js';
 import {
   // Aliased for the same reason `markDoneIn`/`setDialIn` are below: this class's own
@@ -149,6 +192,17 @@ import {
   writeTextAtomic,
   type FileShape,
 } from '../dial/writer.js';
+import {
+  AskLedger,
+  checkReachable,
+  type AskOutcome,
+  type AskSettings,
+  type AskSpend,
+  type AskTicket,
+} from '../tutor/ask.js';
+import { tutorContext } from '../tutor/context.js';
+import type { AskMessage, TutorCore } from '../tutor/core.js';
+import { appendTurn, clearTranscript, getTranscript } from '../tutor/transcript.js';
 import {
   currentStep,
   nextStepId,
@@ -225,6 +279,94 @@ export interface WalkView {
    * an offer of nothing. `done` is `progress.reproduced`, which survives a reload.
    */
   reproduce?: { count: number; done: boolean };
+  /**
+   * T-6 (AC2): THIS step's conversation with the tutor, oldest turn first.
+   *
+   * Read only through `src/tutor/transcript.ts`'s `getTranscript`, never off
+   * `progress.steps[id].transcript` directly, and that is not a style preference — `store.ts`
+   * validates `check` and passes `transcript` through untouched, so `getTranscript` is the one
+   * place anything decides what is safe to render back to a learner as their own words. A
+   * caller that reached past it would be handing the panel whatever a hand-edited
+   * `progress.json` happened to contain.
+   *
+   * Required rather than optional: a step nobody has asked about has an empty conversation,
+   * which is a real state the page draws, and `undefined` would be a second spelling of it.
+   */
+  transcript: AskMessage[];
+  /** T-6 (AC4): what the tutor is doing, as opposed to what it has said — see `TutorView`. */
+  tutor?: TutorView;
+}
+
+/**
+ * The tutor's transient state: never in `progress.json`, and every field of it is about the
+ * MOMENT rather than about the step (contrast `transcript`, which is the durable half).
+ *
+ * `thinking` is the one AC4 turns on. The session clears its in-flight ask BEFORE it decides
+ * what to say about the outcome, so a spinner cannot outlive the request that raised it — not
+ * on a reply, not on a timeout, not on a failure, and not on an outcome nobody anticipated.
+ * "No spinner is ever left running" is the whole of that criterion, and it is a property of
+ * the ORDER those two lines are written in, which is why they are commented where they sit.
+ *
+ * `unreachable` carries the PROVIDER's own sentence ("not found on PATH") rather than a house
+ * phrasing, and outlives one ask: a `claude` that is not installed is not installed for the
+ * rest of the session, and the line belongs beside the input the whole time.
+ *
+ * `note` is a sentence about the conversation that is deliberately not a turn in it. The
+ * distinction is the plan's, made explicitly: `AskMessage` stays pure, so a timeout is never
+ * stored as something the tutor said and never sent back to a model as though it were.
+ */
+export interface TutorView {
+  thinking: boolean;
+  unreachable?: string;
+  note?: string;
+  /**
+   * WHICH half of the wait `thinking` is about — the sentence only.
+   *
+   * `thinking` stays the single answer to "is a spinner on screen"; both are derived from
+   * `this.asking` in the same expression, so the two cannot drift. The distinction is worth
+   * drawing because the two halves are different promises to the learner: `preparing` is the
+   * availability probe and the diff, during which nothing has been sent and nothing is
+   * charged, and `sending` is a request with a provider that is billing right now. Saying
+   * "thinking…" through a fifteen-second `claude --version` would be a small lie told at the
+   * exact moment a learner is deciding whether the button worked.
+   */
+  stage?: 'preparing' | 'sending';
+  /**
+   * An ask that is live on a DIFFERENT step (code review finding 3).
+   *
+   * `thinking` is per-step by design — a learner who navigates away must not find a spinner on
+   * the step they arrived at — and the consequence was that navigating away left a billing
+   * request with no control anywhere in the UI to stop it, under a note telling them to press
+   * a *Cancel* that was on the page they had left. The tutor section now says where the ask
+   * is and offers to stop it from wherever the learner is standing.
+   */
+  elsewhere?: { stepId: string; stage: 'preparing' | 'sending' };
+  /**
+   * What this walk has spent, and what is spending right now (code review finding 5).
+   *
+   * `AskCost` was computed on every reply, carried through `AskOutcome` and read nowhere —
+   * in a module whose header argues that "a tutor that quietly bills is not honest". This is
+   * the observable half: it comes off `AskLedger.spend()`, which is complete by construction
+   * because the ledger is the only thing that starts a paid request. Rendered on every step,
+   * because it is the WALK's spend rather than the step's.
+   */
+  spend?: AskSpend;
+  /**
+   * The question the session has just accepted and sent — the page's signal that its draft
+   * became a turn (code review findings 1, 2 and 3's shared root).
+   *
+   * The client script used to empty the box on the press, so the four refusals that are
+   * decided AFTER the press — provider unreachable, no `request.json`, no core, one ask
+   * already in flight — each destroyed the learner's question: gone from the box, gone from
+   * the saved blob, and deliberately not in the transcript. It was nowhere. Now the page keeps
+   * its draft until the host says it took it, and this is the host saying so: the script drops
+   * the draft only when it matches this, so a refusal leaves the question exactly where the
+   * learner typed it, with the reason beside it.
+   *
+   * Tagged to a step by construction (it is only ever set for the step the ask was made on)
+   * and cleared when the walk moves, like `note`.
+   */
+  accepted?: string;
 }
 
 /**
@@ -321,6 +463,41 @@ export interface WalkAdapters {
    *  captured at `open`, so a learner who turns it off mid-walk is obeyed on their next step
    *  instead of on their next window. */
   commitPerStep(): boolean;
+
+  // ── T-6: the tutor ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * The tutor's slice of repo-tour, lazily — a promise for the same reason `core()` is one,
+   * and `undefined` when repo-tour is not loadable at all.
+   *
+   * **OPTIONAL, unlike every adapter above it, and that is a decision rather than an
+   * oversight.** The tutor is the one capability of this walk that can be entirely absent: a
+   * session driven with no tutor wired is a walk with no *Ask* — every other surface works, no
+   * position of the dial changes, and nothing is silently degraded. Requiring it would force
+   * every adapter set that has nothing to do with a model to stub one, including
+   * `test/dial.test.ts`'s, which exists to prove a learner's bytes survive a real write path
+   * and has no business naming a provider to do it. An absent adapter and a `tutorCore()` that
+   * resolves `undefined` are answered identically here — a sentence in the panel, never a
+   * broken walk — so the optionality costs nothing in behaviour.
+   *
+   * Kept apart from `core()` because the two answer different questions: the dial's core is
+   * reached on every navigation and its absence stops writes; this one is reached only when
+   * somebody asks.
+   */
+  tutorCore?(): Promise<TutorCore | undefined>;
+  /**
+   * `buildTutorials.llmProvider`, `buildTutorials.tutorModel` and
+   * `buildTutorials.tutorTimeoutSeconds`, as of RIGHT NOW.
+   *
+   * A getter for the reason `commitPerStep` is one: a learner who switches provider or raises
+   * the deadline mid-walk is obeyed on their next question rather than on their next window.
+   * `model` may be the empty string, and empty means UNSET, which `resolveTutorChoice` reads
+   * as the provider's strongest model — the right way round for the only place in this
+   * extension where a wrong answer is read by a person who is already confused. Optional for
+   * the same reason `tutorCore` is, and the two are asked for together: half a tutor is not a
+   * tutor.
+   */
+  tutorSettings?(): { provider: string; model: string; timeoutMs: number };
 }
 
 /**
@@ -384,6 +561,45 @@ export class WalkSession {
    *  with the step it belongs to, which is how both stop being shown when the walk moves. */
   private shape: { stepId: string; shape: FileShape } | undefined;
   private note: { stepId: string; text: string } | undefined;
+  /**
+   * T-6: the ask in flight, and the step it belongs to. `undefined` means nothing is waiting
+   * on a model, which is exactly what `TutorView.thinking` reports — so there is ONE answer to
+   * "is a spinner on screen" and it is this field, rather than a boolean somebody has to
+   * remember to clear beside it (AC4).
+   *
+   * Tagged with a step for the same reason `note` and `shape` are: an ask belongs to the
+   * conversation it was asked in, and a learner who navigates away while the model is thinking
+   * must not find a spinner on the step they arrived at. The ask itself keeps running and its
+   * answer still lands in the transcript it belongs to — the same rule `applyDial` states for
+   * an entry pass, and for the same reason: the learner asked for it.
+   */
+  private asking: { stepId: string; ticket: AskTicket } | undefined;
+  /**
+   * T-6: the one thing that owns a live paid request — every ask this session starts, the
+   * bound on its deadline, the neutral directory it runs in, and what it all cost.
+   *
+   * There is exactly one, it is created with the session and closed with it, and nothing here
+   * reaches a provider except through it. That is what makes `spend()` complete and what makes
+   * *Cancel* reach an ask on any step: see `AskLedger`, which argues the whole case.
+   */
+  private readonly ledger = new AskLedger();
+  /** T-6: a sentence ABOUT the conversation — unreachable, timed out, failed, cancelled —
+   *  tagged with its step so it stops being shown when the walk moves, exactly like `note`.
+   *  Never a turn in the transcript; see `TutorView`. */
+  private tutorNote: { stepId: string; text: string } | undefined;
+  /** T-6: the last question this session actually SENT, and the step it was sent on — the
+   *  page's signal that its draft became a turn. See `TutorView.accepted`, which is the whole
+   *  argument; cleared when the walk moves, like `tutorNote`. */
+  private lastAsked: { stepId: string; text: string } | undefined;
+  /** T-6 (security review finding 12): whether this session has already made `.repo-tour/`
+   *  uncommittable in the learner's repository. Once per session — the rule is idempotent, but
+   *  a `git rev-parse` and a file read per ask is work on the one path that must stay fast. */
+  private ignoreEnsured = false;
+  /** T-6 (AC4): the provider's own reason it cannot be run here, once something has asked.
+   *  A standing condition rather than an event, so unlike `tutorNote` it is NOT cleared when
+   *  the walk moves — a `claude` that is not installed is not installed on the next step
+   *  either, and the line belongs beside the input for as long as that holds. */
+  private unreachable: string | undefined;
 
   private constructor(
     public readonly target: string,
@@ -599,9 +815,447 @@ export class WalkSession {
     });
   }
 
+  // ── T-6: the tutor ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * One question for the tutor (spec §5.5; ACs 2, 3, 4).
+   *
+   * Fire-and-forget from the panel's point of view, exactly as `runCheck` and `goTo` are — and
+   * here the reason is at its sharpest. This is called from a webview message listener, with
+   * no `await` above it and nobody to catch anything, and what it starts waits on a MODEL for
+   * as long as the learner's `tutorTimeoutSeconds` allows. An escaping rejection there is an
+   * unhandled rejection in the extension host and a panel stuck on "thinking…" — which is the
+   * one thing AC4 forbids by name. So the session owns the whole asynchronous life of the ask,
+   * and `enqueue` routes anything that throws to `reportError`.
+   *
+   * **Nothing here runs synchronously, including the refusal**, and that is load-bearing
+   * rather than tidy. `handleStepMessage` returns a state the panel adopts only if nothing
+   * overtook it while the effects ran (`step-panel.ts`'s identity guard), so an effect that
+   * refreshed on its way out would make the panel drop the very sentence this message came
+   * back with. Every answer this method has goes through the chain and arrives as a push.
+   *
+   * `text` has already been trimmed and length-checked by `handleStepMessage`; what is checked
+   * again here is only what this object knows and the protocol cannot — whether there is a
+   * step, a reference, a core, and nothing already in flight.
+   */
+  ask(text: string): void {
+    const step = currentStep(this.plan, this.progress);
+    if (this.disposed || !step) return;
+    this.enqueue(() => this.beginAsk(step.id, text));
+  }
+
+  /**
+   * Stop waiting (AC4) — and be honest about what stopping does and does not do.
+   *
+   * SYNCHRONOUS, deliberately, and the only public tutor method that is: the whole promise of
+   * *Cancel* is that the spinner goes NOW, and putting it on a chain whose head is a job that
+   * may sit behind a two-minute model call would make the button take two minutes to work.
+   * There is nothing to serialise anyway — this touches no file and no `progress`.
+   *
+   * `detach()` is not a kill and this method does not pretend otherwise. repo-tour's
+   * `killLlmChildren()` kills EVERY live child rather than one, so pressing *Cancel* on a
+   * tutor question while a build ran in the background would kill the build (`src/tutor/
+   * ask.ts` argues it in full, and the plan named it as the risk to write ahead of). What
+   * detaching buys is the safety property that actually matters: the answer to a question the
+   * learner walked away from can never appear in their transcript minutes later. The request
+   * itself is still running and still costing money, and the note says so — a cancel that
+   * quietly kept billing would be the dishonest version of the same mechanism.
+   */
+  cancelAsk(): void {
+    if (this.disposed) return;
+    const asking = this.asking;
+    // Nothing in flight is an ordinary outcome, not an error: the answer landed while the
+    // press was in the air, and the page it was pressed on is already a repaint out of date.
+    // There is nothing to say about a wait that has already ended, and the reply the learner
+    // is now looking at says more than any sentence about it could.
+    if (!asking) return;
+    // Read BEFORE anything is abandoned: what a cancel MEANS depends on which half of the
+    // wait it lands in, and the ticket has moved on by the time the sentence is written.
+    // `preparing` is a real cancellation — nothing was sent, so nothing is charged — and
+    // saying "you will still be billed" there would be a lie in the learner's favour's
+    // opposite direction. Only `sending` is still costing money.
+    const wasSending = asking.ticket.phase === 'sending';
+    // Cleared BEFORE the abandon and before anything is said, so `thinking` is already false
+    // by the time any surface is pushed to — and so `deliverAsk`'s identity check refuses the
+    // outcome when it eventually arrives (see there).
+    this.asking = undefined;
+    // Through the LEDGER rather than through the one ticket this session happens to be holding:
+    // *Cancel* is the control that stops every live request, from whatever step it is pressed
+    // on, which is what code review finding 3 asked for. Today there is at most one and the
+    // two are the same call; the difference is that this one cannot go stale.
+    this.ledger.abandonAll();
+    this.setTutorNote(
+      asking.stepId,
+      wasSending
+        ? 'You stopped waiting. The model is still finishing that question and you will still be billed for it — '
+          + 'its answer will not appear here.'
+        : 'You stopped before the question was sent, so nothing was asked and nothing was charged.',
+    );
+    this.refresh(false);
+  }
+
+  /**
+   * Forget this step's conversation (code review finding 6; security review finding 12).
+   *
+   * `clearTranscript` shipped exported, with six unit tests and no caller in `src/` — a
+   * capability with a test suite attached and no way for a learner to reach it. It is wired
+   * here rather than deleted because the thing it does is the one control a stored
+   * conversation owes somebody: `progress.json` holds their questions and a model's answers,
+   * in a folder this extension `git init`s for them, and "you can delete this" is not
+   * something a panel may only imply.
+   *
+   * It is NOT the whole answer to that exposure, and must not be mistaken for one — a
+   * retention control somebody has to remember to press is not a retention policy. The default
+   * is `ensureTranscriptIgnored`, which makes `.repo-tour/` uncommittable without anybody
+   * pressing anything. This is the other half: the learner's own copy, on their own disk,
+   * removed when they say so.
+   *
+   * On the chain, because it persists and repaints. An ask in flight for this step is
+   * abandoned first: the answer to a question whose conversation the learner has just deleted
+   * must not arrive a second later and re-create it.
+   */
+  clearConversation(): void {
+    const step = currentStep(this.plan, this.progress);
+    if (this.disposed || !step) return;
+    const stepId = step.id;
+    this.enqueue(() => {
+      if (this.asking?.stepId === stepId) {
+        this.asking = undefined;
+        this.ledger.abandonAll();
+      }
+      const had = getTranscript(this.progress, stepId).length;
+      this.progress = clearTranscript(this.progress, stepId);
+      this.lastAsked = undefined;
+      this.setTutorNote(
+        stepId,
+        had === 0
+          ? 'There was nothing in this conversation to forget.'
+          : `This conversation is gone — ${had} ${had === 1 ? 'turn' : 'turns'} deleted from this tutorial's progress file. What it already cost is still counted below.`,
+      );
+      this.commit(false);
+    });
+  }
+
+  /**
+   * The ask itself: probe, record the question, start the model, and hand delivery back to the
+   * chain. Everything that can refuse does so BEFORE the thinking state is entered.
+   *
+   * **The order is AC4.** The availability probe comes first, before a prompt is built and
+   * before a runner is reached for, so a machine with no provider on it gets the honest answer
+   * in the time it takes to `access()` a file, and the panel never enters the SENDING state at
+   * all: it says "getting ready to ask", and then it says why it stopped. Probing after the
+   * send would show "thinking…" for as long as the provider took to fail and then a failure
+   * that reads like the model's fault. (`askTutor` probes again on its own way in — it is
+   * contracted to, and this file does not edit it. One extra `--version` per ask is a fraction
+   * of a second against a model call, and the duplication buys the thing that matters: the
+   * panel decides whether to say anything is being SPENT before it says so.)
+   *
+   * **What changed, and why it is not a weakening of AC4.** The ticket is opened at the top,
+   * before any of it, because the pre-flight is not free: the probe budgets fifteen seconds
+   * for a `claude --version` and `tutorContext` shells out to `git diff`, and all of it used
+   * to run with `this.asking` unset — no spinner, and a *Cancel* that early-returned and said
+   * nothing (security review finding 5). AC4's letter survived that (no spinner was left
+   * running, because none was ever raised) and the honest-controls rule did not: pressing
+   * *Ask* looked exactly like a button that did nothing. `TutorView.stage` is what keeps the
+   * two states apart, so nothing here claims a model is thinking while a probe is running,
+   * and nothing claims money is being spent before any is.
+   *
+   * The learner's own turn is appended and SAVED before the model is asked, in the same commit
+   * that raises the spinner. A window closed mid-ask therefore comes back with the question in
+   * the conversation and no answer under it, which is what really happened; recording it only
+   * on success would lose questions exactly when a learner most wants to know what they asked.
+   */
+  private async beginAsk(stepId: string, text: string): Promise<void> {
+    const step = this.plan.steps.find((s) => s.id === stepId);
+    if (!step) return;
+    if (this.asking) {
+      // NOT unreachable, and the comment that used to say it was is the finding. The view does
+      // remove *Ask* while an ask is in flight — but it keys on `this.asking`, which is now set
+      // at the top of this method rather than after three awaits, so the window in which *Ask*
+      // is still on the page has gone from "a dynamic import, a `claude --version` spawn with a
+      // fifteen-second budget, and a `git diff`" down to one chain hop. Small is not zero, so
+      // this branch stays, and it no longer points at a control that is not on the page: the
+      // page has *Cancel* on it for the whole of that window now.
+      //
+      // The learner's text is NOT lost either — `accepted` was never set for this press, so the
+      // page keeps its draft (see `TutorView.accepted`).
+      this.setTutorNote(stepId, 'One question is already with the tutor. Wait for that answer, or press Cancel — your question is still in the box.');
+      this.refresh(false);
+      return;
+    }
+
+    // ── The ticket is opened HERE, at the press, and that is security review finding 5 ──────
+    //
+    // Everything below this line used to run with nothing on screen: `TutorView.thinking` is
+    // derived from `this.asking`, which was set AFTER the availability probe (`claude
+    // --version`, a fifteen-second budget of its own) and after `tutorContext`'s `git diff` —
+    // so pressing *Ask* looked exactly like a button that did nothing, and `cancelAsk`
+    // early-returned on `!asking` and said nothing either. AC4's letter survived (no spinner
+    // was left running, because none was ever raised) but the honest-controls rule did not.
+    //
+    // A ticket is `preparing` until `send`: the panel draws the wait, *Cancel* really stops it,
+    // and nothing has been sent, so a cancel here is a genuine cancellation rather than a
+    // detachment from something that goes on billing.
+    const ticket = this.ledger.open(stepId);
+    this.asking = { stepId, ticket };
+    this.tutorNote = undefined;
+    // `accepted` describes THIS ask and nothing earlier, and clearing it at the press is what
+    // makes that true. Without this, a learner who asks the same question twice — a retry
+    // after a failure is the obvious way to get there — would have their second draft dropped
+    // by the FIRST ask's signal, even on a press the host went on to refuse. It is cleared
+    // after the already-in-flight guard above deliberately: that branch refuses a SECOND
+    // question while the first is still live, and the first one's signal is still true.
+    this.lastAsked = undefined;
+    // The push that raises the spinner, and it is CAUGHT rather than allowed to escape.
+    // `enqueue` reports a throw and moves on, which would leave `this.asking` set, `thinking`
+    // true and no request behind it to ever take it down — a spinner that runs until the
+    // window closes, which is the one thing AC4 forbids by name. It is also the wrong answer
+    // on its own terms: a surface that threw while a spinner was going up is not a reason to
+    // refuse a question the learner asked. So it is reported and the ask carries on, and the
+    // answer's own repaint is what clears the state (the same argument the delivery hook below
+    // makes, one push earlier).
+    try {
+      this.refresh(false);
+    } catch (err) {
+      this.adapters.reportError(messageOf(err));
+    }
+
+    /** The ticket is over and nothing is left spinning about it. Idempotent, and the only way
+     *  this method ends a ticket it did not send. */
+    const close = (): void => {
+      ticket.abandon();
+      if (this.asking?.ticket === ticket) this.asking = undefined;
+    };
+
+    /** Every refusal below ends the same way: the ticket is over, the spinner comes off, and
+     *  the page is told — while `accepted` stays unset, so the learner's question is still in
+     *  the box where they typed it (code review findings 1 and 2). */
+    const refuse = (note: string): void => {
+      close();
+      this.setTutorNote(stepId, note);
+      this.refresh(false);
+    };
+
+    /**
+     * Should this pre-flight stop, and has it left anything behind if so?
+     *
+     * The disposed half is LIVENESS, and the same rule every other await on this chain follows
+     * — `enqueue` re-guards a job that has not STARTED, and only the job can guard itself once
+     * it has; a disposed session's target may already belong to the session that replaced it.
+     * The abandoned half is new and is what makes the pre-flight interruptible: a *Cancel*
+     * pressed during the probe stops the ask rather than merely stopping the spinner, because
+     * `abandon()` before `send` means nothing is ever sent.
+     *
+     * It CLOSES on the way out rather than only answering, so that no exit from this method
+     * can leave a `preparing` ticket live with `thinking` true and nothing behind it. Today
+     * both callers of `abandon` already clear `this.asking` first, so this is a second lock on
+     * a door that is shut — which is exactly the standard the rest of this lifecycle is held
+     * to.
+     */
+    const stopped = (): boolean => {
+      if (!this.disposed && !ticket.abandoned) return false;
+      close();
+      return true;
+    };
+
+    // No `request.json` means no reference root, and the tutor's context is built AGAINST the
+    // reference — the author's file, and the diff of the learner's against it. Asking without
+    // it would spend the learner's money on a question with half its context missing. The same
+    // answer `applyCheck` gives for the same folder, in the same words.
+    const refRoot = this.request?.referenceRoot;
+    if (refRoot === undefined) {
+      refuse('This tutorial has no reference repository recorded, so there is nothing for the tutor to read. Nothing was asked, and your question is still in the box.');
+      return;
+    }
+
+    const settings = await this.tutorSettingsNow();
+    // The first of four, one after every await. See `stopped`.
+    if (stopped()) return;
+    if (!settings) {
+      this.reportCoreMissing();
+      refuse('repo-tour could not be loaded, so there is nobody to ask. Nothing was sent, nothing was charged, and your question is still in the box.');
+      return;
+    }
+
+    const availability = await checkReachable(settings);
+    if (stopped()) return;
+    if (!availability.ok) {
+      // The provider's OWN words, carried through rather than replaced by a house phrasing
+      // that says less: "not found on PATH" tells a learner what to do and "the tutor is
+      // unavailable" does not. Recorded in `unreachable` as well as in the note, because it is
+      // a standing condition — the line belongs beside the input from now on, not only under
+      // the question that discovered it.
+      this.unreachable = availability.detail;
+      refuse(`The tutor could not be reached, so nothing was asked and nothing was charged — ${availability.detail}. Your question is still in the box.`);
+      return;
+    }
+    // A provider that answers again after a spell of not answering clears the line rather than
+    // leaving a stale complaint beside a working input.
+    this.unreachable = undefined;
+
+    const ctx = await tutorContext(step, refRoot, this.target, this.adapters.git);
+    if (stopped()) return;
+
+    // Security review finding 12, and it goes here because THIS is the moment the exposure is
+    // created: the next two lines write a learner's own words into a folder this extension
+    // `git init`s for them. The rule is idempotent and this session only ever writes it once;
+    // it is awaited rather than fired off because a transcript must not reach the disk before
+    // the thing that keeps it out of a commit.
+    await this.ensureTranscriptIgnoredOnce();
+    if (stopped()) return;
+
+    this.progress = appendTurn(this.progress, stepId, { role: 'user', content: text });
+    // The page's signal that its draft became a turn — set on the ONE path that really sends,
+    // and on none of the four that refuse. See `TutorView.accepted`.
+    this.lastAsked = { stepId, text };
+    // Sent BEFORE the commit, so the push that raises the spinner is made with the request
+    // already live — there is no window in which the page says "thinking…" and nothing is.
+    // `getTranscript` re-reads what was just appended, which is the sanitising round trip the
+    // stored transcript owes: what the model is shown is what the panel will draw.
+    ticket.send(settings, ctx, getTranscript(this.progress, stepId));
+
+    // Registered BEFORE the commit, and the order is the last of AC4's locks. `commit`
+    // persists and then pushes to four surfaces, any of which is an adapter that can throw —
+    // and a throw here escapes to `enqueue`, which reports it and moves on, leaving
+    // `this.asking` set and `thinking` true with nothing left to take it down. Hooking
+    // delivery first means the answer (or the timeout, which always comes) still arrives, still
+    // clears the ask and still repaints, whatever the push did. No spinner is ever left
+    // running, including on the paths nobody planned for.
+    //
+    // `delivered` is a one-shot promise that only ever RESOLVES (`src/tutor/ask.ts` builds it
+    // by hand), so the rejection arm exists only so a future edit to that file cannot turn
+    // this into an unhandled rejection nobody is listening for. Delivery goes back through
+    // `enqueue` rather than being acted on here: it persists and repaints, and those belong on
+    // the one serialised chain with everything else that does.
+    void ticket.delivered.then(
+      (outcome) => { this.enqueue(() => { this.deliverAsk(stepId, ticket, outcome); }); },
+      (err: unknown) => { this.adapters.reportError(messageOf(err)); },
+    );
+
+    this.commit(false);
+  }
+
+  /**
+   * Make `.repo-tour/` uncommittable in the learner's repository, once per session (security
+   * review finding 12).
+   *
+   * `progress.json` now holds free text — the learner's questions and a model's answers — at
+   * `<target>/.repo-tour/build/progress.json`, in a folder this extension `git init`s. The
+   * dial's own commit is pathspec-scoped and does not sweep it up, which was checked; what
+   * does sweep it up is the learner's own `git add -A`, in a repository this extension made
+   * for them, on the ordinary path where nobody did anything wrong.
+   *
+   * Never throws and never reports: see `ensureTranscriptIgnored`. A failure here must not be
+   * the reason a question goes unasked, and the ask itself is the thing the learner pressed.
+   */
+  private async ensureTranscriptIgnoredOnce(): Promise<void> {
+    if (this.ignoreEnsured) return;
+    this.ignoreEnsured = true;
+    await ensureTranscriptIgnored(this.target, this.adapters.git);
+  }
+
+  /**
+   * What came back, drawn — and in every branch, the spinner goes off first.
+   *
+   * `this.asking = undefined` is written BEFORE the outcome is even looked at, and that
+   * ordering is AC4 in one line: no branch below, and no branch a later edit adds, can leave a
+   * spinner running, because by the time any of them runs there is nothing in flight to spin
+   * about. Whoever moves that assignment into the cases has reintroduced the exact failure the
+   * criterion names.
+   *
+   * The identity check is what makes a cancel safe. `cancelAsk` clears `this.asking`
+   * synchronously, so a late outcome — a model that answered a second after the learner walked
+   * away — finds a run that is no longer this session's ask and lands nowhere. `AskRun.detach`
+   * already guarantees the outcome is `null` in that case; this is the second lock on the same
+   * door, and it also covers the case a detach cannot: an ask SUPERSEDED by a newer one.
+   *
+   * The three failure outcomes are notes, not turns (the plan says so explicitly, and
+   * `AskOutcome` is a union rather than `{ text, error? }` for the same reason): a timeout
+   * stored in the transcript would be sent back to the model on the next question as though the
+   * tutor had said it.
+   */
+  private deliverAsk(stepId: string, ticket: AskTicket, outcome: AskOutcome | null): void {
+    if (this.disposed) return;
+    if (this.asking?.ticket !== ticket) return;
+    this.asking = undefined;
+
+    if (outcome === null) {
+      // Unreachable in practice — `cancelAsk` clears `this.asking`, so the check above has
+      // already returned by the time a detached run delivers its `null`. Kept, and kept
+      // refreshing, because the alternative if some future path ever detaches without clearing
+      // is a spinner nothing takes down, which is the one outcome this method may not have.
+      this.refresh(false);
+      return;
+    }
+
+    switch (outcome.kind) {
+      case 'reply':
+        // The only outcome that is a TURN. `outcome.cost` is deliberately NOT summed here —
+        // the ledger already counted it, off `AskRun.finished`, which is what makes the total
+        // complete rather than dependent on this branch remembering. It reaches the page as
+        // `TutorView.spend`. What is still forbidden is rendering `$0.00` at somebody who was
+        // in fact billed: `metered: false` means unknown, never free, and `AskSpend.metered`
+        // is the flag that carries that all the way to the sentence.
+        this.progress = appendTurn(this.progress, stepId, { role: 'assistant', content: outcome.text });
+        this.commit(false);
+        return;
+      case 'unreachable':
+        this.unreachable = outcome.detail;
+        this.setTutorNote(stepId, `The tutor could not be reached, so nothing was asked and nothing was charged — ${outcome.detail}.`);
+        this.refresh(false);
+        return;
+      case 'timedOut':
+        // A timeout is a REPLY, not a hang — that is the whole of `askTutor`'s deadline race,
+        // and this sentence is where the learner finds out. Their question stays in the
+        // conversation because they really did ask it, and the next ask carries it as context.
+        this.setTutorNote(
+          stepId,
+          `The tutor did not answer within ${secondsPhrase(outcome.afterMs)}. Your question is still in this conversation — `
+          + 'ask again, or raise `buildTutorials.tutorTimeoutSeconds`.',
+        );
+        this.refresh(false);
+        return;
+      case 'failed':
+        this.setTutorNote(stepId, `The tutor could not answer — ${outcome.detail}. Nothing was added to this conversation.`);
+        this.refresh(false);
+        return;
+    }
+  }
+
+  /**
+   * Everything one ask needs, assembled from the two optional adapters — or `undefined`, which
+   * is the honest answer for a walk with no tutor wired and for a repo-tour that will not load
+   * alike. Both collapse into one answer on purpose: the panel has one sentence to say about
+   * "there is nobody to ask", and the learner cannot act on the difference.
+   *
+   * `cwd` is the LEARNER's folder, never the reference — it is what the provider is run in, and
+   * `TutorDeps.cwd` says so out loud. The settings are read HERE, per ask, rather than captured
+   * at `open`, so switching provider or raising the deadline takes effect on the next question.
+   */
+  private async tutorSettingsNow(): Promise<AskSettings | undefined> {
+    if (!this.adapters.tutorCore || !this.adapters.tutorSettings) return undefined;
+    const core = await this.adapters.tutorCore();
+    if (!core) return undefined;
+    const settings = this.adapters.tutorSettings();
+    return {
+      core,
+      provider: settings.provider,
+      model: settings.model,
+      timeoutMs: settings.timeoutMs,
+    };
+  }
+
+  /** A tutor sentence about what just happened, tagged with its step — the same shape and the
+   *  same reasoning as `setNote`, kept separate because the two are drawn in different places
+   *  (this one inside the tutor section, beside the input it is about) and because a write's
+   *  news and a model's must not overwrite each other. Never pushes; the caller owns that. */
+  private setTutorNote(stepId: string, text: string): void {
+    this.tutorNote = { stepId, text };
+  }
+
   /**
    * The promise of everything this session currently has in flight — a dial being applied, a
-   * check running, files being reproduced.
+   * check running, files being reproduced, a question with the tutor.
    *
    * Not a test seam bolted on afterwards, and not a way for a surface to wait: the panel and
    * the tree are pushed to, they never ask. It exists because the acceptance criterion does.
@@ -610,9 +1264,29 @@ export class WalkSession {
    * not measuring what it claims to. `test/dial.test.ts` awaits this between the walk and the
    * diff; `test/unit/walk-session.test.ts` awaits it between an action and its assertion, for
    * the same reason.
+   *
+   * **T-6: an ask is in flight WITHOUT being on the chain, so waiting for the chain alone is
+   * no longer waiting for everything.** That split is deliberate — a question can sit with a
+   * model for two minutes, and serialising it ahead of the entry pass would mean a learner who
+   * asked something could not have the next step's file written until the answer came back
+   * (AC6's own byte-for-byte reproduction, blocked by a chat message). So the ask runs beside
+   * the chain and only its DELIVERY is enqueued, which is what keeps `progress.json` mutated
+   * in one order. This method closes the resulting gap: drain the chain, then wait for whatever
+   * ask those jobs started, then drain the chain again for the delivery that ask enqueued. It
+   * cannot wait forever — `askTutor` races its own deadline, so every ask terminates in an
+   * outcome — which is exactly why a timeout being a reply rather than a hang is a property of
+   * this suite as much as of the panel.
    */
   settled(): Promise<void> {
-    return this.work;
+    return this.work.then(async () => {
+      const asking = this.asking;
+      if (!asking) return;
+      await asking.ticket.delivered;
+      // Re-read rather than captured: the delivery job was appended by the `.then` that
+      // `beginAsk` registered on this very promise, which runs before this continuation does,
+      // so `this.work` is by now the chain WITH that job on the end of it.
+      await this.work;
+    });
   }
 
   /**
@@ -649,6 +1323,21 @@ export class WalkSession {
     this.note = undefined;
     this.checks.clear();
     this.prompted.clear();
+    // T-6: the ask in flight is DETACHED rather than merely forgotten, and the difference is
+    // the point. Forgetting it would leave a live request whose answer resolves into a
+    // `deliverAsk` on a dead session — guarded, but only by a check somebody could delete —
+    // while detaching severs delivery at the source: `delivered` resolves to `null`, and the
+    // model's answer, whenever it arrives and whatever it cost, has nowhere to land. The
+    // request itself is still finishing; nothing here can stop that without killing every
+    // other live child (see `cancelAsk`), and a session going away is not a reason to take a
+    // background build down with it.
+    this.asking = undefined;
+    this.tutorNote = undefined;
+    this.lastAsked = undefined;
+    // Through the LEDGER, which abandons every live ask, refuses to open another and removes
+    // the scratch directory the provider was launched in. The totals are not reset — `close`
+    // is the end of the ledger, not a way to forget what a walk spent.
+    this.ledger.close();
     this.adapters.clearEditor();
     this.adapters.setTree(undefined);
     this.adapters.setPanel(undefined);
@@ -1154,6 +1843,17 @@ export class WalkSession {
   private clearStepNotes(): void {
     this.shape = undefined;
     this.note = undefined;
+    // T-6: the tutor's own sentence goes with them, for the identical reason — "the tutor did
+    // not answer within 120 seconds" describes something that just happened, not a step. What
+    // does NOT go is `unreachable`: that one is a standing condition of the provider rather
+    // than an event, so it survives navigation and keeps the honest line beside the input.
+    // Nor does the transcript, which is not a note at all — it is on disk, per step, and
+    // switching steps switches it by construction (AC2).
+    this.tutorNote = undefined;
+    // `accepted` is a signal to ONE page about ONE draft, so it has the shortest life of any
+    // of these: a learner who navigates away is looking at a different box, and telling that
+    // box its draft was accepted would empty a question about another step.
+    this.lastAsked = undefined;
   }
 
   /** A transient sentence about what just happened, tagged with the step it is about, then
@@ -1330,6 +2030,57 @@ export class WalkSession {
       ...(reproducible > 0
         ? { reproduce: { count: reproducible, done: this.progress.reproduced !== undefined } }
         : {}),
+      // T-6 (AC2). Read through `getTranscript` and never off `progress.steps[id].transcript`,
+      // because that is the one function that decides what is safe to render back to a learner
+      // as their own conversation — `store.ts` validates `check` and passes `transcript`
+      // through untouched, so reaching past it here would hand the panel whatever a
+      // hand-edited `progress.json` happened to contain. Keyed by the CURRENT step, which is
+      // the whole of "switching steps switches transcripts, and returning restores": there is
+      // no cache to invalidate and no rule for this method to remember.
+      transcript: getTranscript(this.progress, step.id),
+      // Always present, unlike T-5's four — a `thinking: false` is a real and drawable state
+      // (it is what puts *Ask* on the page rather than *Cancel*), so there is nothing for an
+      // absent key to mean. Both optional halves are spread in the same "absent, not
+      // `undefined`" way the rest of this object uses, because `step-panel.ts` keys its
+      // repaints on a digest of what is drawn and absent-versus-undefined is exactly the kind
+      // of difference that decides whether a repaint happens.
+      tutor: this.tutorView(step.id),
+    };
+  }
+
+  /**
+   * The tutor's transient half for ONE step — see `TutorView`, which argues every field.
+   *
+   * `thinking` and `stage` are read off the same expression rather than tracked beside each
+   * other, so there is still exactly one answer to "is a spinner on screen" (AC4) and no
+   * second flag anybody has to remember to clear. `elsewhere` and `spend` come off the LEDGER,
+   * which is the only thing that starts a paid request, so neither can be stale and neither
+   * depends on a branch above remembering to report.
+   */
+  private tutorView(stepId: string): TutorView {
+    const here = this.asking?.stepId === stepId ? this.asking : undefined;
+    const stage = here?.ticket.phase;
+    // Anything live that does NOT belong to the step on screen. `thinking` is per-step by
+    // design (a learner who navigates away must not find a spinner on the step they arrived
+    // at), and the cost of that used to be a billing request with no control anywhere in the
+    // UI to stop it — code review finding 3. The ledger knows where every live ask is, so the
+    // page can now name it and offer to stop it from wherever the learner is standing.
+    // Abandoned asks are deliberately excluded: they are still running and still billing, and
+    // `spend.unwatched` is where that is said — but this line comes with a CONTROL, and a
+    // control that cannot act on what it names is the exact thing this repo's conventions rule
+    // out. There is nothing left to cancel about an ask the learner already cancelled.
+    const away = this.ledger.live().find((entry) => entry.stepId !== stepId && !entry.abandoned);
+    const spend = this.ledger.spend();
+    return {
+      thinking: here !== undefined,
+      ...(stage === 'preparing' || stage === 'sending' ? { stage } : {}),
+      ...(this.unreachable !== undefined ? { unreachable: this.unreachable } : {}),
+      ...(this.tutorNote?.stepId === stepId ? { note: this.tutorNote.text } : {}),
+      ...(away ? { elsewhere: { stepId: away.stepId, stage: away.phase } } : {}),
+      // Absent, not zeroed, when this walk has neither spent anything nor got anything in the
+      // air: an empty object would draw an empty box and move the repaint key for nothing.
+      ...(spend.replies > 0 || spend.sending > 0 || spend.preparing > 0 ? { spend } : {}),
+      ...(this.lastAsked?.stepId === stepId ? { accepted: this.lastAsked.text } : {}),
     };
   }
 
@@ -1363,6 +2114,21 @@ export class WalkSession {
  *  than spelling it out a third time (code review finding 10). */
 function messageOf(err: unknown): string {
   return err instanceof Error && err.message.length > 0 ? err.message : String(err);
+}
+
+/**
+ * A measured wait, as a phrase that agrees with itself.
+ *
+ * `Math.max(1, Math.round(ms / 1000))` used to be spelled inline and produced "within 1
+ * **seconds**" for every ask that failed faster than half a second — which, before the
+ * deadline was bounded, was every ask on a machine whose `tutorTimeoutSeconds` was a string
+ * (code review finding 9). The floor of one is kept deliberately: a `timedOut` measured at
+ * 400 ms is still a real wait the learner sat through, and "within 0 seconds" reads as a bug
+ * report rather than as a sentence.
+ */
+function secondsPhrase(ms: number): string {
+  const seconds = Math.max(1, Math.round((Number.isFinite(ms) ? ms : 0) / 1000));
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
 }
 
 /**

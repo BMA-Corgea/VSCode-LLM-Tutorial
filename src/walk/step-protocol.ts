@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * The step panel's message protocol (spec §5.3; locate T-4: `step:next`, `step:prev`,
- * `step:open`, `step:check`, `dial:set`, `skin:set`; T-5 adds `reproduce:run`) — pure data and
- * a pure handler, deliberately separate from `src/walk/step-panel.ts`'s real
- * `vscode.WebviewView`, exactly the split `src/start/protocol.ts` established for the start
- * screen.
+ * `step:open`, `step:check`, `dial:set`, `skin:set`; T-5 adds `reproduce:run`; T-6 adds
+ * `tutor:ask` and `tutor:cancel`) — pure data and a pure handler, deliberately separate from
+ * `src/walk/step-panel.ts`'s real `vscode.WebviewView`, exactly the split
+ * `src/start/protocol.ts` established for the start screen.
  *
  * `handleStepMessage` never imports `vscode`: navigating to a step, opening the target file,
- * running the structural check, copying the never-taught files and persisting the dial/skin
- * are all `StepEffects` the real adapter (`WalkSession`) injects, so this file — every message
- * type, every reply — is testable with fake effects and no webview, no extension host, at all.
+ * running the structural check, copying the never-taught files, asking the tutor and
+ * persisting the dial/skin are all `StepEffects` the real adapter (`WalkSession`) injects, so
+ * this file — every message type, every reply — is testable with fake effects and no webview,
+ * no extension host, at all. That matters most for the tutor: `ask` is the one effect in this
+ * protocol that spends the learner's money, and it is behind the same seam as the rest
+ * precisely so no test in this suite ever needs a provider.
  *
  * **`step:check` is now the real thing, and that is the whole point of T-5.** T-4 shipped it
  * as an honest placeholder: it replied `step:note` with the literal sentence "Check my work
@@ -47,7 +50,42 @@
 
 import type { CheckOutcome } from '../dial/check.js';
 import { DIALS, type Dial } from '../start/request.js';
+import type { AskMessage } from '../tutor/core.js';
 import { nextStepId, prevStepId, type PlanLike, type Progress, type StepLike } from './model.js';
+
+/**
+ * The longest question this panel will hand the tutor, in characters (T-6 AC2).
+ *
+ * It lives HERE rather than in `./step-view.ts` because it is a rule about what the host
+ * accepts, not about what the page draws: `./step-view.ts` puts it on the textarea as a
+ * `maxlength` so the browser stops a learner at the cap, and `handleStepMessage` below
+ * enforces it again for the message that arrives anyway — a webview's `postMessage` is
+ * untyped at run time and a `maxlength` is a courtesy to a person, never a guarantee about a
+ * value. Both readings matter, because what gets past here is APPENDED TO `progress.json`
+ * and then sent to a model that bills by the token: an unbounded string from the page would
+ * be an unbounded file on the learner's disk and an unbounded bill.
+ *
+ * 4,000 is repo-tour's own order of magnitude for one turn and is far past any real question
+ * about one tutorial step — the longest `why` in the real 61-step plan is 279 characters, and
+ * a learner pasting their whole file into the box is asking the wrong question anyway, since
+ * the diff of their file against the author's is already in the context (`src/tutor/
+ * context.ts`). It is a cap on the LEARNER'S MONEY as much as on this panel's work, which is
+ * why going over it is ANSWERED rather than silently dropped; see `handleStepMessage`.
+ */
+export const MAX_ASK_TEXT = 4000;
+
+/** What the panel says when *Ask* is pressed with nothing in the box. Exported for the same
+ *  reason every other visible string in this design is: one home, asserted rather than
+ *  copied. A blank press is an ordinary slip — a stray Enter — and the honest answer is a
+ *  sentence, not a control that quietly does nothing (conventions.md). */
+export const NOTHING_TO_ASK_MESSAGE = 'There is nothing to ask yet — type a question first.';
+
+/** The same, for a question past `MAX_ASK_TEXT`. The COUNT is in it, the way every other cap
+ *  on this surface announces itself, so the learner can tell how much to cut rather than
+ *  guessing at a limit the page never named. */
+export function askTooLongMessage(length: number): string {
+  return `That question is ${length} characters long and the tutor takes at most ${MAX_ASK_TEXT}. Nothing was sent — shorten it and ask again.`;
+}
 
 export interface StepViewState {
   plan: PlanLike;
@@ -96,19 +134,92 @@ export interface StepViewState {
    * it off, and `progress.reproduced` is where that survives a reload.
    */
   reproduce?: { count: number; done: boolean };
+  /**
+   * T-6 (AC2): this STEP's conversation with the tutor, oldest turn first — every turn, as
+   * `src/tutor/transcript.ts` sanitised it off `progress.steps[id].transcript`.
+   *
+   * Required rather than optional, unlike everything else the session sends: a step nobody
+   * has asked about has an EMPTY conversation, which is a real and renderable state, while
+   * `undefined` would be a second way of spelling the same thing and would then have to be
+   * handled everywhere the array is. It arrives already validated — the session reads it only
+   * through `getTranscript`, which is the enforcement point for a file on the learner's own
+   * disk that anything could have written — so this array is exactly `AskMessage[]` and the
+   * view may render it without re-checking each turn's shape.
+   */
+  transcript: AskMessage[];
+  /**
+   * T-6 (AC4): what the tutor is DOING, as opposed to what it has said.
+   *
+   * Declared inline rather than imported from `./session.js`'s `TutorView`, exactly as
+   * `shape` is declared inline against `writer.ts`'s `FileShape`: this file is the pure
+   * protocol and the panel builds its state by spreading a `WalkView`, so the two shapes are
+   * structurally checked against each other on every push and a drift cannot compile.
+   *
+   *   - `thinking` — an ask is in flight FOR THIS STEP. It is what draws "thinking…" and the
+   *     *Cancel* beside it, and it is `false` in every other case including a failed one.
+   *     **Nothing may leave this `true` without a live ask behind it**: AC4 in one sentence is
+   *     that no spinner is ever left running, and the session clears the ask before it decides
+   *     what to say about it, so even an outcome nobody anticipated ends with the spinner off.
+   *   - `unreachable` — the provider's OWN sentence about why it cannot be run here ("not
+   *     found on PATH"), carried verbatim rather than replaced by a house phrasing that says
+   *     less. Drawn where the input is, and it outlives one ask: a provider that is not
+   *     installed is not installed for the rest of the session.
+   *   - `note` — a sentence ABOUT the conversation that is not a turn IN it: unreachable,
+   *     timed out, failed, cancelled. Kept out of `transcript` on purpose (`AskMessage` stays
+   *     pure) so a model's failure is never stored as something the tutor said.
+   *   - `stage` — WHICH half of the wait `thinking` is about. `preparing` is the availability
+   *     probe and the diff, during which nothing has been sent and nothing is charged;
+   *     `sending` is a request with a provider that is billing right now. Derived from the
+   *     same field `thinking` is, so the two cannot disagree.
+   *   - `elsewhere` — a live ask on a DIFFERENT step, so the page can offer to stop it from
+   *     wherever the learner is standing rather than pointing at a *Cancel* on a page they
+   *     have left (code review finding 3).
+   *   - `spend` — what this walk has spent and what is spending right now, off
+   *     `AskLedger.spend()`. `metered: false` means the figures are UNKNOWN, never free, and
+   *     the page may not render them as a total (code review finding 5).
+   *   - `accepted` — the question the host really sent, which is how the page knows its draft
+   *     became a turn. The page keeps the learner's text until this says otherwise, so a
+   *     refusal decided after the press leaves the question where they typed it (findings 1
+   *     and 2).
+   */
+  tutor?: {
+    thinking: boolean;
+    unreachable?: string;
+    note?: string;
+    stage?: 'preparing' | 'sending';
+    elsewhere?: { stepId: string; stage: 'preparing' | 'sending' };
+    spend?: {
+      preparing: number;
+      sending: number;
+      unwatched: number;
+      replies: number;
+      inputTokens: number;
+      outputTokens: number;
+      usd: number;
+      metered: boolean;
+    };
+    accepted?: string;
+  };
   /** the resolved skin name (never empty — see `src/skins.ts` `readSkin`). */
   skin: string;
   /**
    * The panel's own transient reply line, round-tripped through the webview's `setState`
    * (AC5) — the PANEL's, not the session's, and not persisted anywhere.
    *
-   * No message in this protocol produces one today: `step:check`'s placeholder reply was the
-   * only producer and T-5 replaced it with the real check, whose verdict is rendered from
-   * `check` above instead. The channel is kept rather than removed because it is the one way
-   * the host can put a sentence on the page WITHOUT a repaint — `step-panel.ts` keys repaints
-   * on what the page draws, and this node is updated by the client script itself — which is
-   * exactly what T-6's tutor needs for a reply that arrives while the learner is typing. See
-   * `writeNote` for the session-owned, server-rendered counterpart.
+   * **T-6 gave this channel its producer back, and the reason is the reason it was kept.**
+   * `step:check`'s placeholder reply was its only producer until T-5 replaced it with the real
+   * check, leaving a channel with nothing driving it — and its clearing-on-navigation
+   * (`step-panel.ts`'s `setView`) therefore unreachable and untested. What refills it is
+   * `tutor:ask` REFUSING to send: an empty box, or a question past `MAX_ASK_TEXT`. Those two
+   * answers are exactly the shape this channel exists for, because they are the only sentences
+   * on this page that must arrive WITHOUT a repaint. `step-panel.ts` keys repaints on what the
+   * page draws, this node is written by the client script itself, and a repaint would tear the
+   * iframe down and take the learner's half-typed question with it — telling somebody their
+   * question is too long by deleting it is not an answer, it is a second failure. Every OTHER
+   * tutor sentence is `tutor.note` above: those arrive with a repaint anyway, because the
+   * transcript or the thinking state changed with them.
+   *
+   * See `writeNote` for the session-owned, server-rendered counterpart.
    */
   note?: string;
 }
@@ -120,7 +231,10 @@ export type InboundMessage =
   | { type: 'step:check' }
   | { type: 'reproduce:run' }
   | { type: 'dial:set'; payload: { dial: Dial } }
-  | { type: 'skin:set'; payload: { skin: string } };
+  | { type: 'skin:set'; payload: { skin: string } }
+  | { type: 'tutor:ask'; payload: { text: string } }
+  | { type: 'tutor:cancel' }
+  | { type: 'tutor:clear' };
 
 export type OutboundMessage = { type: 'step:note'; payload: { note: string } };
 
@@ -148,6 +262,47 @@ export interface StepEffects {
   reproduce(): void;
   persistDial(stepId: string, dial: Dial): void;
   persistSkin(name: string): void;
+
+  // ── T-6: the tutor ────────────────────────────────────────────────────────────────────
+
+  /**
+   * Send one question to the tutor (AC2, AC3). `void` for the same reason `runCheck` is, and
+   * here it matters more than anywhere else on this surface: an ask waits on a MODEL, for as
+   * long as `buildTutorials.tutorTimeoutSeconds` allows, and this method is called from a
+   * webview message listener where a rejected promise has nobody listening for it. The
+   * session owns the whole asynchronous life of the ask and reports every failure through its
+   * own `reportError` channel; the answer comes back the way every other change does, as a
+   * fresh `WalkView`.
+   *
+   * The `text` handed over has already been trimmed and length-checked here (see
+   * `handleStepMessage`), so a session may append it to `progress.json` without re-deciding
+   * whether it is a question at all.
+   */
+  ask(text: string): void;
+  /**
+   * Stop waiting for the ask in flight (AC4). It does NOT kill the model — repo-tour's
+   * `killLlmChildren` kills every live child, so cancelling a tutor question while a build ran
+   * in the background would kill the build (`src/tutor/ask.ts` argues it in full). It detaches
+   * delivery: the panel leaves the thinking state at once and the answer, whenever it arrives,
+   * has nowhere to land. The session says what that means out loud, including that the request
+   * is still costing money.
+   */
+  cancelAsk(): void;
+  /**
+   * Forget this step's conversation (code review finding 6).
+   *
+   * `clearTranscript` shipped exported, with six unit tests and no caller in `src/` — the
+   * capability was built and never wired to anything a learner could press. It is wired rather
+   * than deleted because a stored conversation owes somebody a way to delete it: `progress.
+   * json` holds their questions and a model's answers, on their own disk, in a folder this
+   * extension `git init`s for them.
+   *
+   * Routed and not second-guessed, exactly like `reproduce:run`: whether there is anything to
+   * forget is the session's question, and a panel one push out of date must not be the thing
+   * that decides. The session answers a press on an empty conversation with a sentence rather
+   * than with silence.
+   */
+  clearConversation(): void;
 }
 
 export interface HandleResult {
@@ -189,6 +344,51 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
       effects.persistSkin(message.payload.skin);
       return { state: { ...state, skin: message.payload.skin } };
     }
+    case 'tutor:ask': {
+      /*
+       * The two refusals, decided HERE and answered through `note` — the one channel that
+       * reaches the page without a repaint (see `StepViewState.note`).
+       *
+       * Both are about a question that must not be SENT, which is why they are the protocol's
+       * business rather than the session's: nothing has been asked, nothing is in flight, and
+       * there is no state for a session to own. Answering them here also means the learner's
+       * text survives — `step-panel.ts` repaints when the page would change, a repaint tears
+       * the iframe down, and a page that deleted somebody's too-long question while telling
+       * them it was too long would have made the problem worse.
+       *
+       * Trimmed before both checks and before the effect, so trailing whitespace can neither
+       * make a blank press look like a question nor push a question one character over the
+       * cap. The length reported is the trimmed one, for the same reason: it is the number the
+       * learner has to get under.
+       */
+      const text = message.payload.text.trim();
+      if (text.length === 0) {
+        return { state: { ...state, note: NOTHING_TO_ASK_MESSAGE }, post: { type: 'step:note', payload: { note: NOTHING_TO_ASK_MESSAGE } } };
+      }
+      if (text.length > MAX_ASK_TEXT) {
+        const note = askTooLongMessage(text.length);
+        return { state: { ...state, note }, post: { type: 'step:note', payload: { note } } };
+      }
+      // The previous refusal is cleared on a press that really does send: leaving "there is
+      // nothing to ask yet" under a question the tutor is at that moment answering would be a
+      // stale sentence stated confidently, which is the failure this whole panel is careful
+      // about. `undefined` rather than `''` so `step-panel.ts`'s own `note` field goes back to
+      // meaning "there is nothing to say".
+      effects.ask(text);
+      return { state: { ...state, note: undefined }, post: { type: 'step:note', payload: { note: '' } } };
+    }
+    case 'tutor:cancel': {
+      effects.cancelAsk();
+      return { state };
+    }
+    case 'tutor:clear': {
+      // No reply and no state change here: what the conversation now is comes back on the
+      // session's own push, as `transcript`, and is DRAWN — the same routing `step:check` uses
+      // and for the same reason. A sentence composed here would be this file guessing at an
+      // outcome the session has not decided yet.
+      effects.clearConversation();
+      return { state };
+    }
     default: {
       const exhaustive: never = message;
       throw new Error(`unhandled step message: ${JSON.stringify(exhaustive)}`);
@@ -200,6 +400,7 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
 
 const INBOUND_TYPES = [
   'step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'dial:set', 'skin:set',
+  'tutor:ask', 'tutor:cancel', 'tutor:clear',
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -221,6 +422,14 @@ function isInboundType(value: unknown): value is InboundMessage['type'] {
  * is `plan.reproduce`'s answer and the session reads it from the plan, so a payload here would
  * be a number the webview supplied about work the host is about to do on disk — the one shape
  * of message this file exists to refuse.
+ *
+ * **`tutor:ask` is checked for SHAPE here and for CONTENT in `handleStepMessage`, and the
+ * split is deliberate.** A `text` that is not a string is a message this panel does not speak
+ * and is dropped; a `text` that is empty or longer than `MAX_ASK_TEXT` is a message it speaks
+ * perfectly well and must ANSWER, because a dropped message here is silent — the panel logs
+ * one line to the output channel and the learner watches a button do nothing. That is the
+ * exact failure mode this codebase tests for everywhere else, and it would be worst on the
+ * one control that has just eaten a question somebody spent a minute writing.
  */
 export function parseStepMessage(raw: unknown): InboundMessage | null {
   if (!isRecord(raw)) return null;
@@ -233,6 +442,8 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
     case 'step:open':
     case 'step:check':
     case 'reproduce:run':
+    case 'tutor:cancel':
+    case 'tutor:clear':
       return { type };
     case 'dial:set': {
       const payload = raw['payload'];
@@ -245,6 +456,11 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
       const payload = raw['payload'];
       if (!isRecord(payload) || typeof payload['skin'] !== 'string') return null;
       return { type, payload: { skin: payload['skin'] } };
+    }
+    case 'tutor:ask': {
+      const payload = raw['payload'];
+      if (!isRecord(payload) || typeof payload['text'] !== 'string') return null;
+      return { type, payload: { text: payload['text'] } };
     }
   }
 }

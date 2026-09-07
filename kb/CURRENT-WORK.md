@@ -13,7 +13,7 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — auto-review
+- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — gate
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
@@ -36,6 +36,7 @@ start. AC4 as specified still holds; the refinement note's wording is only half 
 
 **T-4 and T-5 are complete and merged.** T-7 (the detour) and T-8 (publish) are parked at
 `plan`; T-9 and T-10 untouched at `dir-goals`.
+- **T-12** (bug) — reproduceFiles copies a reference repo's agent config and secrets into the lear… — intake
 
 ## Waiting on
 

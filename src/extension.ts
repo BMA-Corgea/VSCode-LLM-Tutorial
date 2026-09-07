@@ -27,6 +27,7 @@ import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
+import { tutorCoreFor, type TutorCore } from './tutor/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
 
 let outputChannel: vscode.OutputChannel | undefined;
@@ -344,6 +345,11 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
       return choice === 'Overwrite';
     },
     git: realGit,
+
+    // ── T-6: the tutor ───────────────────────────────────────────────────────────────────
+    tutorCore: () => tutorCoreNow(context),
+    tutorSettings: tutorSettingsNow,
+
     commitPerStep: () => vscode.workspace.getConfiguration('buildTutorials').get<boolean>('commitPerStep', true),
     // The walk's channel for a failure the LEARNER has to know about — today, a
     // `progress.json` that cannot be written (a read-only checkout, a full disk), which costs
@@ -451,6 +457,78 @@ function ensureDialCore(context: vscode.ExtensionContext): Promise<DialCore | un
   return walkDialCore;
 }
 
+/**
+ * The tutor's slice of repo-tour, loaded once and memoised — a promise for the same reason
+ * `ensureDialCore` is one: `activate()` is synchronous and the walk opens before `loadCore`
+ * resolves.
+ *
+ * Separate from the dial's core rather than merged into it because the two answer to different
+ * questions. The dial's is reached on every navigation and must not be optional in practice;
+ * the tutor's is reached only when someone asks, and a missing one is a sentence in the panel
+ * rather than a broken walk.
+ */
+let walkTutorCore: Promise<TutorCore | undefined> | undefined;
+
+function ensureTutorCore(context: vscode.ExtensionContext): Promise<TutorCore | undefined> {
+  walkTutorCore ??= loadCore(configuredRepoTourRoot(context)).then((core) =>
+    core.found ? tutorCoreFor(core.loaded) : undefined,
+  );
+  return walkTutorCore;
+}
+
+/**
+ * vscode-test only, and the narrowest seam that makes the tutor testable at all — installed
+ * by `ExtensionApi._walk.useTutorCore`, `undefined` the rest of the time.
+ *
+ * `WalkAdapters.tutorCore` is the session's only route to a model, and in a real window it is
+ * repo-tour's own `runLlm`, which shells out to a provider the learner is paying for. A
+ * vscode-test therefore cannot drive an ask at all without a way to put a stand-in in front of
+ * it: there is no supported way to reach the REGISTERED session's adapters from outside
+ * `activate()` (the same argument `_walk` itself is built on), and a test that constructed its
+ * own session with its own adapters would prove something about a copy — which for this one
+ * capability is not a stylistic preference. The registered session is the only object whose
+ * ask really is wired to the real provider, so it is the only one whose ask being wired to a
+ * FAKE proves the wiring exists.
+ *
+ * A whole `TutorCore` rather than only its `runLlm` on purpose. `TutorDeps.run` is the seam
+ * `src/tutor/ask.ts` offers a unit test, but `WalkSession.tutorDepsNow` deliberately does not
+ * fill it — the session takes its runner from the core it was handed, which is the shape that
+ * ships — so overriding the core is the only injection point that does not require adding a
+ * production field nothing in production would ever set. It also lets a test do what
+ * `test/unit/tutor-ask.test.ts` already does: keep every pure member of the REAL core (so an
+ * ask goes through repo-tour's genuine `buildAskPrompt`), delegate `availability` to the real
+ * provider probe where a test wants the provider's own words, and poison `runLlm` so a test
+ * that forgot to answer for itself fails loudly instead of quietly spending money.
+ *
+ * Not consulted by anything but `walkAdaptersFor`, and not cleared by `deactivate`: whoever
+ * installs one restores it in their own `teardown`, exactly as they restore an env var.
+ */
+let tutorCoreStandIn: TutorCore | undefined;
+
+/** The core the SESSION asks with: the stand-in if a test installed one, else the real one. */
+function tutorCoreNow(context: vscode.ExtensionContext): Promise<TutorCore | undefined> {
+  return tutorCoreStandIn ? Promise.resolve(tutorCoreStandIn) : ensureTutorCore(context);
+}
+
+/**
+ * The tutor's provider, model and deadline.
+ *
+ * `tutorModel` is deliberately NOT `llmModel`. repo-tour keeps the two apart and its reasoning
+ * transfers exactly: the build model is picked for what interpreting a whole repository costs,
+ * once, in the background, while an ask is one question from one learner at the moment they
+ * are already stuck. Empty means unset, which `resolveTutorChoice` reads as the provider's
+ * STRONGEST model — the right way round for the only place in this extension where a wrong
+ * answer is read by a person who is already confused.
+ */
+function tutorSettingsNow(): { provider: string; model: string; timeoutMs: number } {
+  const config = vscode.workspace.getConfiguration('buildTutorials');
+  return {
+    provider: config.get<string>('llmProvider', 'claude'),
+    model: config.get<string>('tutorModel', ''),
+    timeoutMs: Math.max(5, config.get<number>('tutorTimeoutSeconds', 120)) * 1000,
+  };
+}
+
 function registerWalk(context: vscode.ExtensionContext): void {
   walkTree = new DecisionsTreeProvider();
   walkDecorator = new StepDecorator();
@@ -544,6 +622,19 @@ export interface ExtensionApi {
     panel: () => StepViewProvider | undefined;
     decorator: () => StepDecorator | undefined;
     openAt: (target: string) => Promise<void>;
+    /**
+     * The REAL tutor core, exactly as this extension resolves it — never the stand-in below,
+     * so a test can build a fake ON TOP of the genuine article rather than inventing a second
+     * repo-tour to agree with itself about what a prompt looks like.
+     */
+    tutorCore: () => Promise<TutorCore | undefined>;
+    /**
+     * Put a stand-in in front of it for the registered session's next ask; `undefined`
+     * restores the real one. See `tutorCoreStandIn` for why the seam is a whole core and why
+     * it exists at all — in short, `runLlm` spends the learner's money, and a suite with no
+     * way to intercept it either cannot test the tutor or has to pay to.
+     */
+    useTutorCore: (core: TutorCore | undefined) => void;
   };
 }
 
@@ -587,6 +678,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         await ensureWalkSkins(context);
         openWalkAt(context, target);
       },
+      tutorCore: () => ensureTutorCore(context),
+      useTutorCore: (core: TutorCore | undefined) => { tutorCoreStandIn = core; },
     },
   };
 }
