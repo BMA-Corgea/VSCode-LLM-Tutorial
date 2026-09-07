@@ -9,6 +9,56 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A reviewer that re-derives its own baseline is why a mistake in the brief is survivable (T-7)
+
+T-7's review brief told both reviewers "baseline entering T-7 was 966 unit tests". That was
+wrong — 966 was the mid-ticket count after three workers had already landed; `main` measures
+**737**. The brief was written by the driver who had just run both numbers and still conflated
+them.
+
+It cost nothing, and the reason it cost nothing is the whole lesson: **the code reviewer measured
+`main` itself before starting, found 737, and said so in its report.** It reported a genuine
++308/+9 diff instead of the +79 the brief implied.
+
+Had it inherited the number, it would have verified a diff a third the size of the real one and
+called it green — and the reader of that review would have been measuring the driver's confidence
+rather than the code. That is the same failure as a green board with nothing behind it, wearing a
+number.
+
+**A brief is an input to a review, never a substitute for the review's own measurement.** A
+reviewer re-deriving a baseline it was handed is not being pedantic and is not wasting a step; it
+is the only reason an error upstream of the review is recoverable. The same applies to every
+figure a brief carries — a test count, a file count, a line count, "this was verified" — each is a
+claim to check, not a fact to build on.
+
+The general form, which outlives this incident: **whoever checks the work must not inherit the
+numbers from whoever did it.** The two prior tickets say the same thing from the other side — a
+finding closed without re-driving its path, and a risk label spent without re-deriving what the
+code touches. Same disease, different direction of travel.
+
+## Parallelism is a property of the work, not a target (T-6 and T-7)
+
+T-6 fanned out two workers and put one test file in both fences; the collision was contained only
+because the colliding worker chose to read carefully. T-7 fanned out three and hit nothing,
+because the shared surface — the `Detour` types — was **hoisted into its own file and committed
+before dispatch**, making the fences disjoint by construction rather than by assertion.
+
+The corollary is the half nobody remembers to check. When T-7's review fixes came back, every one
+of the seventeen findings converged on `store.ts` and `session.ts`. **There was no honest fence to
+split them along, so they went to one worker.**
+
+> Make it so there is nothing for two workers to both touch. When that is impossible, do not run
+> parallel workers.
+
+Refusing to split is the same discipline as hoisting the shared file, not a retreat from it. A
+shop under pressure to keep N agents busy will be tempted to split work that does not split — and
+it will get exactly what the T-6 collision predicted: two writers, one shared surface, and
+correctness resting on whichever worker happens to read the other's assertion carefully enough.
+
+T-7 shipped that failure in miniature anyway, from a different direction: two write paths into the
+detour directory, disagreeing on the security-critical argument, with the test suite proving the
+property against the one nothing called.
+
 ## Containment was never a check for whether a contained file is one the learner meant to send anywhere (T-6)
 
 T-4 and T-5 both hardened one boundary — *is this path inside the root* — and T-6 asks that
