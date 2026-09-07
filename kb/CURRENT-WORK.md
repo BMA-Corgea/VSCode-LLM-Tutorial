@@ -13,7 +13,7 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — gate
+- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — uat
 - **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
@@ -21,21 +21,33 @@ here and found via the reference table below.
 
 ### Where that stands
 
-**T-6 — the tutor. BUILT, not yet reviewed or merged.** Branch `feature/T-6-tutor`, worktree
-`../VSCode-LLM-Tutorial-T-6`, 4 commits. All 7 plan steps, all 5 ACs. **653 unit + 58
-vscode-test**, green under both display methods (T-6 began at 479 + 50).
+**T-6 — the tutor. MERGED to main (`ca71146`), resting at the `accept` gate.** Both machine
+reviews ran at FULL depth against the ticket's stale `risk: low` label (override + reason:
+`.autodev/evidence/T-6/review-depth-override.md`). Code review returned **11 findings**, security
+**1 HIGH / 2 MEDIUM / 4 LOW / 5 INFO** — every one confirmed by driving, none argued from source.
 
-**RESUME BY RUNNING THE TWO MACHINE REVIEWS** (code + security), the way T-4 and T-5 ran them
-— `.autodev/reviews/T-5-*.md` shows the shape and the standard. Both of those tickets had
-must-fix findings; this one has not been reviewed at all yet. Full account and the resume
-command: `.autodev/handoffs/T-6.md`.
+Fixed as **two named seams**, not a patch per entry point:
+- **`Outbound`** (`src/tutor/context.ts`) — what may reach a paid third party. Closed the HIGH:
+  a `shape` step's `target.file` is a chapter DIRECTORY, so the diff walked two whole trees,
+  ignoring `.gitignore`, and the learner's `.env` reached the prompt. Non-regular-file targets are
+  now refused *before* git is spawned. Hostile plan 19,906,863 → 112,823 chars.
+- **`AskLedger`** (`src/tutor/ask.ts`) — what stops a runaway billed request. Owns the live
+  request set, the validated deadline, the provider's launch directory, and the running cost.
 
-One thing already flagged for the reviewer: `checkReachable` is only called inside `beginAsk`,
-so the reachability line appears after the first press rather than beside the input from the
-start. AC4 as specified still holds; the refinement note's wording is only half wired.
+**737 unit + 61 vscode-test** (from 653 + 58). The HIGH was re-driven by the driver using the
+security reviewer's own harness rebuilt against the fix — `.autodev/evidence/T-6/high-finding-redriven.md`.
+`stepRenderKey`'s completeness proof was re-earned (4 new fields keyed, 16 new mutations).
 
-**T-4 and T-5 are complete and merged.** T-7 (the detour) and T-8 (publish) are parked at
-`plan`; T-9 and T-10 untouched at `dir-goals`.
+**NOTHING IS PUSHED.** main is ahead of `origin/main`; pushing is the owner's call.
+
+**T-12 (bug, risk:high) is new and LIVE ON MERGED MAIN** — `reproduceFiles` copies a reference
+repo's `.claude/settings.json`, `.mcp.json` and `.env` into the learner's folder with no name
+allowlist. It is the delivery half of T-5 security finding 3, which the record has said was
+FIXED since 2026-09-06. At `intake`.
+
+**T-4, T-5 and T-11 are complete.** T-7 (the detour) and T-8 (publish) are at `plan`; T-9 and
+T-10 untouched at `dir-goals`.
+
 - **T-12** (bug) — reproduceFiles copies a reference repo's agent config and secrets into the lear… — intake
 
 ## Waiting on
