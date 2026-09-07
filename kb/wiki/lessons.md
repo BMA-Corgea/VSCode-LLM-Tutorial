@@ -9,6 +9,28 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## Containment was never a check for whether a contained file is one the learner meant to send anywhere (T-6)
+
+T-4 and T-5 both hardened one boundary — *is this path inside the root* — and T-6 asks that
+question correctly, on both roots, lexically and through `realpath`. Every containment check
+passed. The learner's `.env` still reached a paid third-party model.
+
+Nothing broke. The **destination** changed. T-6 is the first ticket that takes what it read and
+sends it off the machine, and containment answers a question about *location* that has nothing
+to say about *disclosure*. A file can be perfectly inside the root and still be one the learner
+never meant to send anywhere.
+
+The concrete shape, worth keeping because it is not obvious: a `shape` step's `target.file` is a
+chapter **directory** — that is how repo-tour opens every chapter — so `git diff --no-index` runs
+over two whole trees. It descends dot-directories, includes dotfiles, and **does not read
+`.gitignore`**. A file the learner explicitly declared secret is exactly the kind of file that
+diff picks up, and `.env` sorts first, so the size cap does not save it.
+
+The general rule: **when a boundary's destination changes, re-ask what the boundary was
+protecting.** A check written for "can this path escape the sandbox" does not become a check for
+"should this content leave the building" just because it is still passing. Every existing guard
+on a path deserves that question the day the path gains an egress.
+
 ## A risk class scored from diff shape is scored from the wrong thing (T-6)
 
 T-6 carried `risk: low`, and the dispatcher spends that: a low-risk ticket's review seats drop
