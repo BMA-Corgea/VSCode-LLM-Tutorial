@@ -36,8 +36,8 @@ import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import { dialCoreFor, type DialCore, type FileRecord } from '../../src/dial/core.js';
 import {
-  fileShape, isRefusal, planWrite, reproduceEntries, reproduceFiles, writeTextAtomic,
-  type PlannedWrite, type WritePlan,
+  deliverableEntries, fileShape, isRefusal, planWrite, reproduceEntries, reproduceFiles, writeTextAtomic,
+  type PlannedWrite, type ReproduceOutcome, type WritePlan,
 } from '../../src/dial/writer.js';
 import type { PlanLike, StepLike } from '../../src/walk/model.js';
 
@@ -664,7 +664,8 @@ suite('containment — a symlinked DIRECTORY, where the lexical check ends and t
     const plan = referencePlan();
     plan['reproduce'] = ['vendor/bundle.min.js', 'package-lock.json'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
 
     assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
     assert.match(problems[0] ?? '', /refused — it reaches outside the folder you are building in through a symlink/);
@@ -708,7 +709,8 @@ suite('containment — a symlinked DIRECTORY, where the lexical check ends and t
     const plan = referencePlan();
     plan['reproduce'] = ['vendor/id_rsa', 'package-lock.json'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
 
     assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
     assert.match(problems[0] ?? '', /refused — it leaves the reference repository through a symlink/);
@@ -924,7 +926,7 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
     const target = tmpDir('dial-writer-target-');
     const plan = referencePlan();
 
-    assert.deepEqual(reproduceFiles(plan, refRoot, target), [], 'nothing should have gone wrong');
+    assert.deepEqual(reproduceFiles(plan, refRoot, target), { problems: [], withheld: [] }, 'nothing should have gone wrong');
     for (const rel of ['package-lock.json', 'vendor/bundle.min.js', 'data/blob.bin']) {
       assert.ok(
         fs.readFileSync(path.join(target, rel)).equals(fs.readFileSync(path.join(refRoot, rel))),
@@ -946,7 +948,7 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
     const target = tmpDir('dial-writer-target-');
     const plan = referencePlan();
     reproduceFiles(plan, refRoot, target);
-    assert.deepEqual(reproduceFiles(plan, refRoot, target), []);
+    assert.deepEqual(reproduceFiles(plan, refRoot, target), { problems: [], withheld: [] });
     assert.deepEqual(fs.readdirSync(path.join(target, 'vendor')), ['bundle.min.js']);
   });
 
@@ -958,7 +960,8 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
     const plan = referencePlan();
     plan['reproduce'] = ['../escape/pwned.txt', 'vendor/bundle.min.js', '/etc/passwd'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
     assert.equal(problems.length, 2, `expected two refusals, got ${JSON.stringify(problems)}`);
     for (const problem of problems) assert.match(problem, /refused — it points outside/);
     // Not vacuous: the contained entry in the middle really was copied.
@@ -972,7 +975,8 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
     const plan = referencePlan();
     plan['reproduce'] = ['vendor/gone.js', 'package-lock.json'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
     assert.equal(problems.length, 1);
     assert.match(problems[0] ?? '', /vendor\/gone\.js: could not be read from the reference/);
     assert.ok(fs.existsSync(path.join(target, 'package-lock.json')));
@@ -985,7 +989,7 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
     plan['reproduce'] = ['package-lock.json', 42, '', '   ', null, { path: 'x' }];
 
     assert.deepEqual(reproduceEntries(plan), ['package-lock.json']);
-    assert.deepEqual(reproduceFiles(plan, refRoot, target), []);
+    assert.deepEqual(reproduceFiles(plan, refRoot, target), { problems: [], withheld: [] });
     assert.deepEqual(fs.readdirSync(target), ['package-lock.json']);
   });
 
@@ -996,7 +1000,7 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
     delete plan['reproduce'];
 
     assert.deepEqual(reproduceEntries(plan), []);
-    assert.deepEqual(reproduceFiles(plan, refRoot, target), []);
+    assert.deepEqual(reproduceFiles(plan, refRoot, target), { problems: [], withheld: [] });
     assert.deepEqual(fs.readdirSync(target), []);
   });
 });
@@ -1025,7 +1029,7 @@ suite('reproduceFiles — the generated, vendored and binary files (AC6)', () =>
  * Writes a reference tree containing exactly `names` (on top of the ordinary fixture), points
  * a plan's `reproduce` at them, and runs the copy for real into a fresh target.
  */
-function reproduceDrive(names: string[]): { refRoot: string; target: string; problems: string[] } {
+function reproduceDrive(names: string[]): { refRoot: string; target: string; problems: string[]; outcome: ReproduceOutcome } {
   const refRoot = referenceTree();
   const target = tmpDir('dial-writer-target-');
   for (const rel of names) {
@@ -1035,7 +1039,8 @@ function reproduceDrive(names: string[]): { refRoot: string; target: string; pro
   }
   const plan = referencePlan();
   plan['reproduce'] = names;
-  return { refRoot, target, problems: reproduceFiles(plan, refRoot, target) };
+  const outcome = reproduceFiles(plan, refRoot, target);
+  return { refRoot, target, problems: [...outcome.problems, ...outcome.withheld], outcome };
 }
 
 /**
@@ -1073,7 +1078,8 @@ suite('reproduceFiles — what the file IS, not only where it lands (T-12)', () 
     const plan = referencePlan();
     plan['reproduce'] = ['.claude/settings.json', 'package-lock.json', 'vendor/bundle.min.js', 'data/blob.bin'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
 
     assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
     assert.match(problems[0] ?? '', /^\.claude\/settings\.json: refused — it /);
@@ -1147,7 +1153,8 @@ suite('reproduceFiles — what the file IS, not only where it lands (T-12)', () 
     const plan = referencePlan();
     plan['reproduce'] = ['../.env', '/etc/passwd', 'package-lock.json'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
 
     assert.equal(problems.length, 2, `expected two refusals, got ${JSON.stringify(problems)}`);
     // The ordering is deliberate and this pins it: a plan trying to climb out of its roots is
@@ -1163,7 +1170,7 @@ suite('reproduceFiles — what the file IS, not only where it lands (T-12)', () 
   test('the ordinary reproduce list is untouched by the rule', () => {
     const refRoot = referenceTree();
     const target = tmpDir('dial-writer-target-');
-    assert.deepEqual(reproduceFiles(referencePlan(), refRoot, target), [], 'the rule must not touch an ordinary list');
+    assert.deepEqual(reproduceFiles(referencePlan(), refRoot, target), { problems: [], withheld: [] }, 'the rule must not touch an ordinary list');
     for (const rel of ['package-lock.json', 'vendor/bundle.min.js', 'data/blob.bin']) {
       assert.ok(fs.readFileSync(path.join(target, rel)).equals(fs.readFileSync(path.join(refRoot, rel))));
     }
@@ -1324,7 +1331,8 @@ suite('reproduceFiles — what the file IS, not only where it lands (T-12)', () 
     const plan = referencePlan();
     plan['reproduce'] = ['config.json', 'settings/settings.json', 'alias-lock.json'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
 
     assert.equal(problems.length, 2, `expected two refusals, got ${JSON.stringify(problems)}`);
     for (const problem of problems) assert.match(problem, /refused — it is a link to a file that /);
@@ -1363,7 +1371,8 @@ suite('reproduceFiles — what the file IS, not only where it lands (T-12)', () 
     const plan = referencePlan();
     plan['reproduce'] = ['.claude/settings.json', 'vendor/bundle.min.js'];
 
-    const problems = reproduceFiles(plan, refRoot, target);
+    const outcome = reproduceFiles(plan, refRoot, target);
+    const problems = [...outcome.problems, ...outcome.withheld];
 
     assert.equal(problems.length, 1, `expected one refusal, got ${JSON.stringify(problems)}`);
     assert.match(problems[0] ?? '', /refused — it is configuration for an agent/);
@@ -1437,5 +1446,66 @@ suite('writeTextAtomic — durable, and unreachable by a pre-planted name', () =
     assert.equal(fs.readFileSync(outside, 'utf8'), 'export PATH=$PATH\n', 'the write followed a symlink out of the folder');
     assert.equal(fs.lstatSync(dest).isSymbolicLink(), false);
     assert.equal(fs.readFileSync(dest, 'utf8'), 'export const C = 3;\n');
+  });
+});
+
+/**
+ * T-12 review findings 1 and 8, closed by the driver after both branches merged — the join
+ * neither fix worker could reach, because `session.ts` sat in the other one's fence.
+ *
+ * The property under test is not "a withheld file is refused" (that is pinned above). It is
+ * **which channel the refusal leaves by**, and **which list the counting uses**. Both were
+ * wrong in a way every test still passed through: the refusal and a genuine failure shared one
+ * array, so the feature working correctly reached the learner as a red error box on the most
+ * ordinary path there is; and the overwrite prompt counted files that would never be written,
+ * so a withheld file the learner already had blocked the whole copy and was then reported
+ * replaced.
+ */
+suite('a refusal is not a failure, and only what lands is counted (T-12 review findings 1, 8)', () => {
+  test('a withheld entry leaves by `withheld`, and `problems` stays empty', () => {
+    const refRoot = referenceTree();
+    const target = tmpDir('dial-writer-target-');
+    fs.mkdirSync(path.join(refRoot, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(refRoot, '.claude', 'settings.json'), '{"hooks":{}}');
+    fs.mkdirSync(path.join(refRoot, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(refRoot, 'src', 'app.ts'), 'export const app = 1;\n');
+    const plan = referencePlan();
+    plan['reproduce'] = ['.claude/settings.json', 'src/app.ts'];
+
+    const outcome = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(outcome.withheld.length, 1, 'the refusal belongs in `withheld`');
+    assert.match(outcome.withheld[0]!, /refused — it is configuration for an agent/);
+    // The load-bearing half. If this ever goes back to being one array, every learner on the
+    // default demo path meets an error box for the rule doing its job.
+    assert.deepEqual(outcome.problems, [], 'a refusal is NOT a problem');
+    assert.ok(fs.existsSync(path.join(target, 'src', 'app.ts')), 'the ordinary file still lands');
+  });
+
+  test('a real failure still leaves by `problems`, so the split is not just "everything is fine now"', () => {
+    const refRoot = referenceTree();
+    const target = tmpDir('dial-writer-target-');
+    const plan = referencePlan();
+    // An entry that escapes the reference: a genuine problem, and the discriminator that proves
+    // the previous test is about routing rather than about nothing ever being a problem.
+    plan['reproduce'] = ['../outside.txt'];
+
+    const outcome = reproduceFiles(plan, refRoot, target);
+
+    assert.equal(outcome.problems.length, 1, 'an escape is a problem');
+    assert.match(outcome.problems[0]!, /points outside the reference repository/);
+    assert.deepEqual(outcome.withheld, [], 'and it is not a policy refusal');
+  });
+
+  test('`deliverableEntries` is what will land — `reproduceEntries` is only what the plan names', () => {
+    const plan = referencePlan();
+    plan['reproduce'] = ['.claude/settings.json', '.env', 'src/app.ts', 'data/seed.json'];
+
+    assert.equal(reproduceEntries(plan).length, 4, 'the plan still names all four');
+    assert.deepEqual(
+      deliverableEntries(plan),
+      ['src/app.ts', 'data/seed.json'],
+      'and only two of them will ever be written',
+    );
   });
 });

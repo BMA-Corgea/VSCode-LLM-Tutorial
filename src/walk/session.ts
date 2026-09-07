@@ -187,7 +187,7 @@ import {
   fileShape,
   isRefusal,
   planWrite,
-  reproduceEntries,
+  deliverableEntries,
   reproduceFiles,
   writeTextAtomic,
   type FileShape,
@@ -2083,7 +2083,11 @@ export class WalkSession {
   private reproduceInto(mayReplace: boolean): { copied: boolean; note?: string } {
     if (this.progress.reproduced !== undefined) return { copied: false };
     const refRoot = this.request?.referenceRoot;
-    const entries = reproduceEntries(this.plan);
+    // `deliverableEntries`, not `reproduceEntries` (T-12 review finding 1). The question here is
+    // "what will land", and a withheld entry never lands — so counting it made the overwrite
+    // prompt fire for a file that would never be written (blocking the whole copy on the first
+    // press) and then claim it "was replaced" on the second, over bytes nothing had touched.
+    const entries = deliverableEntries(this.plan);
     if (refRoot === undefined || entries.length === 0) return { copied: false };
 
     const replacing = entries.filter((entry) => this.wouldReplace(refRoot, entry));
@@ -2105,24 +2109,36 @@ export class WalkSession {
       };
     }
 
-    const problems = reproduceFiles(this.plan, refRoot, this.target);
+    const { problems, withheld } = reproduceFiles(this.plan, refRoot, this.target);
     this.progress = { ...this.progress, reproduced: new Date().toISOString() };
     if (problems.length > 0) {
       this.adapters.reportError(
         `Some of this project's generated files could not be copied into ${this.target}: ${problems.join('; ')}`,
       );
     }
+    // NOT `reportError` (T-12 review finding 8). A withheld entry is the rule working, and on the
+    // default demo path — repo-tour, which commits `.claude/settings.json` — it happens to every
+    // learner on their first automated step. Routing it through the error channel meant the
+    // feature announced its own correct operation as a failure. It is said in the panel's note,
+    // beside the copy it belongs to, in the learner's own reading order.
+    const withheldNote = withheld.length === 0
+      ? undefined
+      : withheld.length === 1
+        ? `One file was left for you rather than copied: ${withheld[0]}.`
+        : `${withheld.length} files were left for you rather than copied: ${withheld.join('; ')}.`;
     return {
       copied: true,
       // Said afterwards as well as before, because "3 files were replaced" is what makes the
       // warning a warning rather than a form to click through.
-      ...(replacing.length > 0
-        ? {
-          note: replacing.length === 1
+      ...(() => {
+        const replaced = replacing.length === 0
+          ? undefined
+          : replacing.length === 1
             ? `${namesOf(replacing)} was replaced with this project's own version, as you asked.`
-            : `${replacing.length} files that were already here were replaced with this project's own versions, as you asked.`,
-        }
-        : {}),
+            : `${replacing.length} files that were already here were replaced with this project's own versions, as you asked.`;
+        const note = [replaced, withheldNote].filter((part) => part !== undefined).join(' ');
+        return note === '' ? {} : { note };
+      })(),
     };
   }
 
@@ -2344,7 +2360,9 @@ export class WalkSession {
     // step with no note and no check has no `writeNote` and no `check` key at all. The step
     // panel keys its repaints on a rendered-field digest (`keyFor`), and `undefined` versus
     // absent is exactly the kind of difference that decides whether a repaint happens.
-    const reproducible = reproduceEntries(this.plan).length;
+    // What the panel OFFERS must be what will land (T-12 review finding 8): the offer said
+    // "3 files" and delivered 2.
+    const reproducible = deliverableEntries(this.plan).length;
     const check = this.checks.get(step.id);
     return {
       plan: this.plan,

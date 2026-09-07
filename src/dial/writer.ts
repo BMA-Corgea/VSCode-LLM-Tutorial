@@ -1121,8 +1121,41 @@ export function withheldReason(entry: string): string | null {
  * Bytes, never a string: this is the one path that carries files that are not text at all, so
  * a `Buffer` goes in at one end and out at the other with no decode in between.
  */
-export function reproduceFiles(plan: PlanLike, refRoot: string, target: string): string[] {
+/**
+ * What a reproduce pass produced. Two arrays rather than one, and the split is the point
+ * (T-12 review finding 8): `problems` is "something went wrong and you should know", `withheld`
+ * is "the rule did its job". They were one array, and a refusal the feature exists to make
+ * therefore reached the learner as a red error box on the very first, most ordinary path.
+ */
+export interface ReproduceOutcome {
+  /** Real failures: an escape, an unreadable source, a write that did not land. */
+  problems: string[];
+  /** Entries the name rule deliberately did not copy. Expected, and not an error. */
+  withheld: string[];
+}
+
+/**
+ * The entries that will actually be written — `reproduceEntries` minus what the rule withholds.
+ *
+ * Anything COUNTING or PROMPTING about the reproduce list must use this rather than
+ * `reproduceEntries`, which answers "what does the plan name" and not "what will land". T-12
+ * review finding 1 is what happens otherwise: the overwrite prompt was computed from the raw
+ * list, so a withheld file the learner already had blocked the whole copy on the first press
+ * and then drew "…was replaced with this project's own version, as you asked" over a file that
+ * was never touched. Driven A/B against the previous behaviour, where the sentence was true.
+ */
+export function deliverableEntries(plan: PlanLike): string[] {
+  return reproduceEntries(plan).filter((entry) => withheldReason(entry) === null);
+}
+
+export function reproduceFiles(plan: PlanLike, refRoot: string, target: string): ReproduceOutcome {
   const problems: string[] = [];
+  // T-12 review finding 8. A withheld entry is the feature WORKING, and it used to leave through
+  // the same array as "could not be read" — so on the default demo path (repo-tour, which commits
+  // `.claude/settings.json`) every learner met a red error box for a refusal that is correct and
+  // expected. Two arrays, because they are two different sentences to two different moods: one is
+  // "something went wrong", the other is "this was deliberately left for you to copy yourself".
+  const withheldEntries: string[] = [];
 
   for (const entry of reproduceEntries(plan)) {
     const from = resolveInsideTarget(refRoot, entry);
@@ -1185,7 +1218,7 @@ export function reproduceFiles(plan: PlanLike, refRoot: string, target: string):
       // Advice the containment refusals do not offer, because this refusal is different in
       // kind: those name an attack, this one can land on a file somebody genuinely wants.
       const reason = withheld !== null ? `it ${withheld}` : `it is a link to a file that ${withheldAlias}`;
-      problems.push(`${label(entry)}: refused — ${reason}; copy it in yourself if you want it`);
+      withheldEntries.push(`${label(entry)}: refused — ${reason}; copy it in yourself if you want it`);
       continue;
     }
     let bytes: Buffer;
@@ -1213,7 +1246,7 @@ export function reproduceFiles(plan: PlanLike, refRoot: string, target: string):
     }
   }
 
-  return problems;
+  return { problems, withheld: withheldEntries };
 }
 
 // ── the write primitive ─────────────────────────────────────────────────────────────────────

@@ -432,6 +432,31 @@ suiteTeardown(() => {
 
 // ── AC6: the whole point ───────────────────────────────────────────────────────────────────
 
+/**
+ * **AC6 GAINED AN EXCEPTION IN T-12, AND THIS SUITE DOES NOT TEST IT.** Read before trusting a
+ * green run here as proof of the criterion.
+ *
+ * AC6 says an automated walk leaves the target identical to the reference. Since T-12,
+ * `reproduceFiles` **withholds** any `plan.reproduce` entry whose name says it carries
+ * credentials or configures an agent that would then run in the learner's folder. Against a
+ * reference repo carrying such a file, a fully-walked target therefore CANNOT `diff -r` clean —
+ * and **repo-tour is one such reference**: it commits `.claude/settings.json`, and it is the
+ * obvious repository to point this extension at, since the project is defined as its inverse.
+ *
+ * So the criterion now reads: *identical to the reference, except for entries the name rule
+ * withholds, each of which is reported to the learner.* That is a deliberate trade — the
+ * alternative is copying someone's credentials into a folder this extension runs `git commit`
+ * in — but it is an exception to the headline AC and it is not written in the AC's own words
+ * anywhere else.
+ *
+ * **The tests below pass only because this fixture happens to be clean.** `NEVER_TAUGHT` is
+ * `['data/seed.bin', 'data/seed.json', 'src/generated.ts']` — three names the rule has no
+ * opinion about. Add one withheld name to the fixture and the byte-for-byte assertion fails,
+ * correctly. That is worth knowing before someone reads a green AC6 as "the exception is
+ * covered": it is not covered, it is absent. The rule's own behaviour is pinned in
+ * `test/unit/dial-writer.test.ts`; what is missing here is the *interaction*, and the honest
+ * statement is that this suite proves the criterion for references with no withheld files.
+ */
 suite('an automated walk reproduces the reference byte for byte (AC6)', () => {
   teardown(teardownDial);
 
