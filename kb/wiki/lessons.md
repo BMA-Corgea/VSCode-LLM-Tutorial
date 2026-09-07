@@ -9,6 +9,97 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## Keys do not travel: an identifier is only a key inside the space it was minted for (T-7)
+
+repo-tour mints a step id as `sha256(file + ' ' + kind + ' ' + symbolName)`. **Nothing is wrong
+with it.** Inside one plan, for one repository, it is a correct and sufficient identifier — that
+is the space it was minted for.
+
+It became a defect the moment it was used as a key in `globalStorageUri`, which is
+**per-extension, not per-tutorial**. Two tutorials that happen to share a file path — `src/index.ts`
+is not an exotic coincidence — collide by construction. Driven, both halves: a session being
+disposed **deleted a live session's detour directory** (leaving tabs open on deleted files, a
+narrator describing them, and no sentence anywhere), and one repository's worked example was served
+to a different repository for free, `runLlm` calls = 0.
+
+The rule:
+
+> **An identifier is only a key inside the space it was minted for. Moving state into a wider
+> store requires re-deriving every key in it.**
+
+The shape is worth recognising because it does not look like a bug at either end. The id is
+correct. The store is correct. The defect lives in the join, and it appears at the moment scope
+widens — a per-plan id reused per-extension, a per-request id reused per-session, a per-tenant id
+reused globally. Nothing changed except the space, and the space is exactly what the key encoded
+implicitly.
+
+Ask it as a question whenever state moves outward: **what did this identifier assume about its
+world, and is that still true here?** If the answer needs a sentence, the key needs a component.
+
+## Coverage aimed at a dead path is evidence about nothing, while looking like evidence about everything (T-7)
+
+`src/detour/store.ts` carries a **972-line test suite** that proves, carefully and correctly, that
+a write's containment root must be the *proven store* rather than a composed path. The function it
+proves that about — `writeDetourFiles` — **has no caller.** The code that ships is
+`session.ts`'s `writeDetour`, which makes the **opposite** choice, and a symlink swapped in between
+check and write put a file outside the store with nothing thrown.
+
+This is not missing coverage. Missing coverage is honest: it reads as a gap and invites someone to
+fill it. **This is coverage pointing at a corpse, and it is strictly more dangerous than no tests
+at all** — anyone auditing that file sees 972 lines of security tests, concludes the property is
+held, and moves on. The suite is not wrong about anything; it is simply about a path nobody walks.
+
+> **Coverage proves a property of the path it exercises. A suite aimed at a dead path is evidence
+> about nothing.**
+
+So: when a security property is claimed, check what CALLS the thing the tests exercise, not just
+what the tests assert. A `grep` for callers is a one-line check and it is the difference between a
+proof and a decoration.
+
+## The class: records that are easier to write than to earn (T-5, T-6, T-7)
+
+Three instances in a single day, each in a different medium, all the same disease:
+
+| # | The record | What it claimed | What was true |
+| --- | --- | --- | --- |
+| T-5 | a review finding marked **FIXED** | both halves of finding 3 were closed | only the overwrite half; the missing allowlist is live on main (now T-12) |
+| T-6 | a ticket's **`risk: low`** | a light review was proportionate | the diff shelled out to an LLM, read two repos into a prompt and rendered model output into a webview |
+| T-7 | a **972-line test suite** | the write path's containment root is proven | it proves it of a function nothing calls |
+
+None of the three was a lie, and no one was careless. Each is a record that costs almost nothing to
+write and a great deal to earn — a disposition field, a label, a test file — and each was written
+in the direction that ends the conversation. **A record that overstates in the safe-sounding
+direction is worse than no record, because the next person stops looking.** All three were caught
+by someone re-driving a path for an unrelated reason, never by a mechanism.
+
+The counter-discipline, and it is the same move every time: **ask what would have to be true for
+this record to be false, then go and look.** A finding is closed when its path is re-driven
+(`autodev/instructions/closing-findings.md`); a risk class is earned by naming what the code
+touches; a test suite is evidence only for the path it actually exercises.
+
+## An invariant nothing would trip is a coincidence that held once (T-6 → T-7)
+
+T-6 deliberately kept the model call **off** the walk's serialised chain — reasoned about at
+length, paid for in design, written down in the handoff. T-7 put it back on. **Every test stayed
+green**, and it took a machine review driving the observable behaviour to notice that a detour
+generation silenced `step:check`, `dial:set`, `tutor:clear` and `detour:back` for up to an hour.
+
+The property was real and was never pinned by anything a later ticket would break. So:
+
+> **An invariant that is not pinned by a test the next ticket would break is not an invariant. It
+> is a coincidence that held once.**
+
+Two consequences worth keeping:
+
+- **Pin the observable property, not the mechanism.** A test asserting something about `enqueue`
+  would have been satisfied by a new mechanism that reintroduced the same bug. The property that
+  matters is *"while a model call is in flight, the other controls stay live"* — true or false
+  regardless of how the call is made.
+- **A handoff that says "we deliberately did X" without naming the test that enforces X is a
+  handoff that will be silently undone.** A ticket that establishes an invariant owes the next
+  ticket a test that fails when it is broken. Saying it in prose transfers the intention and not
+  the guarantee — and the next ticket has its own problems to think about.
+
 ## A reviewer that re-derives its own baseline is why a mistake in the brief is survivable (T-7)
 
 T-7's review brief told both reviewers "baseline entering T-7 was 966 unit tests". That was

@@ -13,8 +13,7 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-6** (feature) — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe… — uat
-- **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — plan
+- **T-7** (feature) — The detour — an unrelated worked example, in real tabs, that leaves nothing beh… — build
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — plan
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
 - **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
@@ -85,6 +84,7 @@ T-10 untouched at `dir-goals`.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-07 **T-6 COMPLETE** — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe…
 - 2026-09-06 **T-5 COMPLETE** — The dial — manual, scaffolded, automated — with the structural check and a comm…
 - 2026-09-06 **T-4 COMPLETE** — The walk — decision tree, step panel, editor driving, and progress that survive…
 - 2026-09-05 **T-11 COMPLETE** — The owner's name leaves the public repo
