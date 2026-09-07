@@ -3,7 +3,8 @@
 The living code map (regenerable, Aider repo-map pattern): modules, their
 exported symbols, and local import edges. LOCATE reads this first, then
 verifies against reality; BUILD regenerates it at close-out.
-Regenerate with `node scripts/code-map.mjs`. Do not hand-edit; changes
+Regenerate with `node ${CLAUDE_PLUGIN_ROOT}/scripts/code-map.mjs` — the AutoDev plugin's script;
+this repo carries no local copy of it, so a bare `node scripts/code-map.mjs` will not run. Do not hand-edit; changes
 will be overwritten.
 
 ## scripts/doctor-cli.mjs
