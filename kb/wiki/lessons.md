@@ -9,6 +9,47 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## An absent value read as a meaningful one — the same bug in the product and in the harness (T-13)
+
+Two failures from the same hour, which look unrelated and are not:
+
+- **In the product.** `realGit` had no timeout, so a `git rev-parse --is-inside-work-tree` that was
+  killed came back indistinguishable from git answering. `ensureRepo` read that as **`false`** and
+  ran `git init` — creating a **nested repository inside the learner's own repo**, where every
+  later step commits somewhere their `git log` never looks. A timed-out `git config` likewise
+  reported a perfectly good identity as missing.
+- **In the test harness.** A probe written as `rm "$C/$file"` where `$C` was inherited from an
+  earlier unchecked command. An unset `$C` expands to nothing, and the line becomes `rm /<file>`.
+
+**Both are an absent value being read as a meaningful one.** Not "no answer" — a *specific* answer
+that happens to be falsy, empty, or zero-length, and that flows onward as if it were real. The
+product turned "we killed git" into "you are not in a repository". The shell turned "this variable
+was never set" into "the filesystem root".
+
+> **Distinguish "no answer" from "an answer that happens to be falsy", and make the absent case
+> abort rather than proceed.**
+
+The remedy has the same shape in both places, which is what makes it a rule rather than two fixes:
+
+- **Product:** a bound with a *working default*, so a call site added later inherits it by
+  existing; and a distinguishable failure (`GitTimeoutError`) so "killed" can never be mistaken for
+  "answered". Note which half matters — the timeout stops the hang, but the **distinguishable
+  rejection** is what stops the wrong answers downstream.
+- **Shell:** `set -euo pipefail` so an unset variable aborts instead of expanding; mint the scratch
+  directory in the same script and prove it (`[ -n "$C" ] && [ -d "$C" ]`) before anything touches
+  it; `trap 'rm -rf "$C"' EXIT` so a removal names a directory you created rather than a path you
+  assembled.
+
+And one habit that removes the class rather than guarding it: **a probe that only ever adds and
+moves cannot delete the wrong thing.** To test whether something notices a file, copy the tree and
+`mv` the file aside, or write the mutation to a fresh path. Reach for `rm` in a harness only when
+nothing else will do, and then only against a directory the same script created.
+
+The reason this is worth one entry rather than two: the discipline the codebase applies to its own
+error paths is the discipline the throwaway scripts deserve too, and the throwaway script is where
+it is easiest to skip — it is temporary, it is about to be deleted, and it is running with the same
+permissions as everything else.
+
 ## Keys do not travel: an identifier is only a key inside the space it was minted for (T-7)
 
 repo-tour mints a step id as `sha256(file + ' ' + kind + ' ' + symbolName)`. **Nothing is wrong
