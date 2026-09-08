@@ -13,7 +13,6 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — build
 - **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-scope
 - **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-scope
 
@@ -84,6 +83,7 @@ that undo and the deferred replan diff need the same substrate.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-08 **T-8 COMPLETE** — Package and publish — .vsix, Marketplace and Open VSX
 - 2026-09-07 **T-13 COMPLETE** — realGit spawns git with no timeout — the last unbounded member of the cost-and-…
 - 2026-09-07 **T-12 COMPLETE** — reproduceFiles copies a reference repo's agent config and secrets into the lear…
 - 2026-09-07 **T-7 COMPLETE** — The detour — an unrelated worked example, in real tabs, that leaves nothing beh…
