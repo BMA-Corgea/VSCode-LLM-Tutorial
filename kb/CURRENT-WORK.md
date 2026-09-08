@@ -47,6 +47,7 @@ that undo and the deferred replan diff need the same substrate.
 **Test baseline on `main`: 1248 unit + 75 vscode-test.** It was 479 + 50 when T-6 began.
 
 - **T-14** (feature) — Undo a divergence — return to the pre-divergence plan — intake
+- **T-15** (bug) — Pressing 'Build the plan' with a blocking problem changes nothing on screen — t… — intake
 
 ## Waiting on
 

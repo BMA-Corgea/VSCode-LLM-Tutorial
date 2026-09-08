@@ -102,6 +102,59 @@ rejected alternative in a decision record names a failure mode someone already t
 avoiding; that list is free, specific, and written before anyone was invested in the
 implementation.
 
+## Feedback has to be a CHANGE, not a state (T-15)
+
+The start screen validates on every keystroke, so a field's problem is already on screen before the
+button is pressed. Pressing **Build the plan** with a blocking problem returns the same message the
+keystroke already returned — so the reply to the press is **byte-identical to what preceded it**.
+
+The owner pressed the button and nothing happened. His words: *"I clicked build the plan but I have
+no way of knowing if it's loading or if it's errored."*
+
+> **A validation message that is already on screen cannot also serve as the response to a press.
+> If the reply to an action is identical to what preceded it, the action is indistinguishable from
+> being ignored.**
+
+The trap is that the message is *correct*. Every problem is named, under its own field, in plain
+language — the requirement is met. What is missing is not information, it is **difference**. A user
+does not read the page fresh after a press; they look for what moved.
+
+Two consequences worth keeping:
+
+- **"Nothing happened" and "it is working" are the same picture.** A slow accepted submit shows the
+  same unchanged screen as a rejected one, so the ambiguity is worst exactly when the action
+  succeeded and is taking time.
+- **The requirement was written against the wrong failure.** T-3's README promised *"never a
+  disabled button with no explanation"* — and satisfied it by shipping an **enabled button with no
+  response**, which is worse, because a disabled button at least tells you it will not work. When a
+  requirement names a specific bad pattern, check whether it forbids the pattern or forbids the
+  *harm* — and fix the sentence when you fix the code, or the trap is reset for the next feature.
+
+## The family: two states that look identical (T-3, T-6, T-8, T-13, and the ledger)
+
+Six instances in one project, and they are one defect wearing six costumes. **Two situations that
+should be distinguishable produce the same observable.**
+
+| where | the two states |
+| --- | --- |
+| **T-15** the start screen | a rejected press and a working press both leave the screen unchanged |
+| **T-6** the tutor | *"a button that did nothing, with no spinner and no way to cancel"* — pressing *Ask* looked exactly like a dead control |
+| **T-13** git | a **killed** `rev-parse` and a `rev-parse` that **answered false** were the same rejection, so `ensureRepo` created a nested repository |
+| **T-8** the disclosure check | *"did not run"* and *"found nothing"* both exited 0 |
+| **T-8** the VS Code probe | a build that died before writing a log line and a clean run both exited 0 with no errors |
+| **the ledger** | `grants` returning `[]` meant *"no grant of this kind"* and read as *"no authority exists"*, while six covering go-aheads sat unqueried |
+
+**The remedy is the same shape every time: make the two states produce different observables.** A
+distinct exit code, a distinct message type, a positive assertion that something was produced, a
+transient the eye can catch. Not more information — *different* information.
+
+**And the review method matters.** This family is nearly invisible to the way these reviews work.
+Every T-3 review checked the emitted markup and the markup was right; the defect is in **what does
+not change between two renders**, which no single-render inspection can see. Asking *"is the right
+thing on the page?"* cannot find it. Only pressing the button twice can — which is why the owner
+found in five minutes what eleven machine reviews across five tickets did not, and why a human
+walking the thing is not a formality.
+
 ## An absent value read as a meaningful one — the same bug in the product and in the harness (T-13)
 
 Two failures from the same hour, which look unrelated and are not:
