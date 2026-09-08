@@ -102,6 +102,38 @@ rejected alternative in a decision record names a failure mode someone already t
 avoiding; that list is free, specific, and written before anyone was invested in the
 implementation.
 
+## Red-checking is the only thing that separates a pin from a decoration (T-15)
+
+The pin written for T-15 was **worthless, and it took thirty seconds to find out.**
+
+It built a fake page, delivered `form:rejected` to it by hand, and asserted the page changed. It
+passed. It also passed **with the defect fully reintroduced** — because the defect lives in *which
+message the host chooses to send*, and a test that supplies the right message never exercises that
+choice. Coverage aimed at a path the bug does not live on, written inside the pin for that exact
+lesson.
+
+The rewrite drives the real `handleStartMessage`, takes **its actual reply**, and feeds that to the
+page — spanning the protocol's choice and the view's rendering, which is where the property lives.
+Re-driven: **3 failing with the defect restored, 16 passing without it.**
+
+> **A pin you have not watched fail is not a pin. Break the code by hand and count the failures.**
+
+Two things make this the sharpest instance so far:
+
+- **The green was honest.** No mistake in the assertions, the fake DOM, or the wiring. The test did
+  exactly what it said. It was simply pointed one layer away from the defect — and *nothing about
+  reading it would have revealed that*, because reading a test tells you what it checks, never what
+  it would have missed.
+- **The number matters, not the colour.** "It goes red" is weaker than "3 fail, and they are the
+  two named cases plus the one that depends on them." Count them, name them, and notice if the
+  count is smaller than expected — a pin that fails in one place where you predicted three is
+  telling you the other two are aimed wrong.
+
+This is the same family as the store's 972-line suite proving a property of a function nothing
+called, and as ten call sites typing a default the shipped code no longer used. **A suite is
+evidence only for the path it actually exercises**, and the cheapest way to find out which path
+that is, is to break the code and watch.
+
 ## Feedback has to be a CHANGE, not a state (T-15)
 
 The start screen validates on every keystroke, so a field's problem is already on screen before the
