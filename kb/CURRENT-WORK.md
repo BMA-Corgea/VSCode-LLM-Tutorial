@@ -21,7 +21,7 @@ here and found via the reference table below.
 **Every work ticket is complete. T-1…T-8 and T-11…T-13 have shipped; T-9, T-10 and T-14 are
 direction/deferred.**
 
-**T-8 (package and publish) MERGED at `d990a2a`** — the `.vsix` now carries the core, so the
+**T-8 (package and publish) MERGED at `424fcec`** — the `.vsix` now carries the core, so the
 extension installs for someone with no repo-tour checkout beside them. It was 11 files with no
 `node_modules`; it is **152 files / 6.57 MB** with `repo-tour/dist`, `web-tree-sitter` and 36
 `.wasm` grammars. AC1 PROVEN on **both** VSCodium and a real VS Code 1.136.1. Full account:
