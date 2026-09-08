@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 import * as vscode from 'vscode';
-import { loadCore, resolveCoreRoot, type CoreLoadResult } from './core.js';
+import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from './core.js';
 import { runDoctor, formatReport } from './doctor.js';
 import { StartPanel, type StartPanelDeps } from './start/panel.js';
 import {
@@ -39,9 +39,28 @@ function getOutputChannel(): vscode.OutputChannel {
   return outputChannel;
 }
 
-/** Where the setting currently points, resolved against this extension's own install directory. */
+/**
+ * Where the setting currently points, resolved against this extension's own install directory.
+ *
+ * The fallback here is `''` — the same default `package.json` declares — and `''` means "ask
+ * Node to resolve the `repo-tour` dependency", i.e. the copy packaged INSIDE the extension
+ * (T-8). It used to be `'../repo-tour'`, which resolved to a sibling of the extension's own
+ * install directory: correct in a development checkout and correct nowhere else. An installed
+ * copy would look for `<extensions-dir>/repo-tour`, find nothing, and the doctor would report
+ * "core NOT found" on a machine where the core was sitting inside the extension all along.
+ *
+ * Both defaults have to agree, so there is only one of them: `DEFAULT_REPO_TOUR_PATH`, which
+ * `test/unit/core-root.test.ts` asserts equals `package.json`'s manifest default. This fallback
+ * only applies when the configuration section is absent entirely, which happens outside a real
+ * extension host — but a fallback that disagreed with the manifest would be a second, invisible
+ * answer to the same question, and T-8 shipped exactly that (review finding 13).
+ *
+ * `resolveCoreRoot` is TOTAL — see its header. That is what makes every call site below safe to
+ * leave un-guarded, including the Doctor command, whose entire job is to be reachable when the
+ * core is not, and `resumeOnActivate`, which is floated with `void`.
+ */
 function configuredRepoTourRoot(context: vscode.ExtensionContext): string {
-  const setting = vscode.workspace.getConfiguration('buildTutorials').get<string>('repoTourPath', '../repo-tour');
+  const setting = vscode.workspace.getConfiguration('buildTutorials').get<string>('repoTourPath', DEFAULT_REPO_TOUR_PATH);
   return resolveCoreRoot(setting, context.extensionUri.fsPath);
 }
 

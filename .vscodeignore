@@ -22,3 +22,22 @@ tsconfig.json
 .gitignore
 **/*.ts
 **/*.map
+
+# ── T-8: the packaging intermediates ────────────────────────────────────────────────────
+# `vendor/` holds the repo-tour tarball `scripts/package.mjs` packs, and `.package-staging/`
+# is the staging copy it installs that tarball into. Both exist only while a package is being
+# built, and neither belongs in the archive.
+vendor/**
+.package-staging/**
+# Release tooling for THIS repository rather than part of the extension: the packaging and
+# publish decision logic that scripts/package.mjs and scripts/publish.mjs import.
+dist/publish.js
+#
+# WHAT MUST NEVER BE ADDED TO THIS FILE: `node_modules/**`.
+#
+# The staged package's entire purpose is that `node_modules/repo-tour` — plus web-tree-sitter
+# and tree-sitter-wasms, with their .wasm grammars — travels INSIDE the .vsix. Excluding it
+# would silently restore the bug T-8 exists to fix: the extension installs, activates, looks
+# perfectly healthy, and then reports "core NOT found" because the core it was built to load
+# is on somebody else's machine. There is no test that catches that here; the check lives in
+# scripts/package.mjs, which reads the finished archive back and fails if the core is absent.

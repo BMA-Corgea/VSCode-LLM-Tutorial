@@ -4,11 +4,12 @@
  * `src/core.ts` — because it must stay loadable via dynamic `import()` for its
  * `import.meta.url` asset lookups (skins, grammar paths) to keep resolving correctly.
  *
- * Nine entry points (eight fixed, plus one per `test/unit/*.test.ts` file), all CJS /
+ * Ten entry points (nine fixed, plus one per `test/unit/*.test.ts` file), all CJS /
  * platform:node, so a plain `require()` or dynamic `import()` of the output works the same
  * inside the extension host and outside it:
  *   - src/extension.ts        -> dist/extension.js            (external: vscode, repo-tour) — the extension
  *   - src/doctor.ts           -> dist/doctor.js                (external: repo-tour)         — for build-tutorials' CLI doctor, no vscode needed
+ *   - src/publish/index.ts    -> dist/publish.js               (no externals)                — the packaging + publish decision logic, for scripts/{package,publish}.mjs
  *   - test/extension.test.ts  -> dist/test/extension.test.js   (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/start.test.ts      -> dist/test/start.test.js       (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/walk.test.ts       -> dist/test/walk.test.js        (external: vscode, repo-tour, mocha) — vscode-test
@@ -55,6 +56,11 @@ const builds = [
     entryPoints: ['src/doctor.ts'],
     outfile: 'dist/doctor.js',
     external: ['repo-tour'],
+  },
+  {
+    ...shared,
+    entryPoints: ['src/publish/index.ts'],
+    outfile: 'dist/publish.js',
   },
   {
     ...shared,

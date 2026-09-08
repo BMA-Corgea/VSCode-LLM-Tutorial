@@ -110,8 +110,8 @@
       "properties": {
         "buildTutorials.repoTourPath": {
           "type": "string",
-          "default": "../repo-tour",
-          "description": "Path to the repo-tour checkout, relative to the extension or absolute. repo-tour supplies the core engine (extraction, digest, the LLM layer, skins) that this extension loads at run time. Machine-scoped on purpose: this path is dynamically imported and its top-level code runs in the extension host, so a repository must not be able to set it from its own .vscode/settings.json.",
+          "default": "",
+          "description": "Where to find repo-tour, which supplies the core engine (extraction, digest, the LLM layer, skins) this extension loads at run time. LEAVE THIS EMPTY unless you are developing the extension itself \u2014 empty means the copy packaged inside the extension, which is what an installed copy uses and the only value under which a normal install works at all. A path, absolute or relative to the extension's own install directory, points at a repo-tour checkout instead: that is how a developer runs against uncommitted core changes. Machine-scoped on purpose: this path is dynamically imported and its top-level code runs in the extension host, so a repository must not be able to set it from its own .vscode/settings.json.",
           "scope": "machine"
         },
         "buildTutorials.llmProvider": {
@@ -154,7 +154,10 @@
     "test:unit": "mocha --ui tdd \"dist/test/unit/**/*.test.js\"",
     "test": "npm run test:unit && node scripts/run-tests.mjs",
     "vscode:prepublish": "npm run build",
-    "package": "vsce package --no-dependencies"
+    "package": "node scripts/package.mjs",
+    "check:package": "node scripts/package.mjs --verify-only",
+    "verify:install": "node scripts/verify-install.mjs",
+    "publish:dry-run": "node scripts/publish.mjs"
   },
   "dependencies": {
     "repo-tour": "file:../repo-tour"
