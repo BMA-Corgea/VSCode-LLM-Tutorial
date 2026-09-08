@@ -57,7 +57,7 @@ suite('the start screen — real WebviewPanel wiring (AC1, AC2, AC6)', () => {
     panel = undefined;
   });
 
-  test('AC1: form:submit with recreate ticked and no repo replies form:problems naming repo', async () => {
+  test('AC1: form:submit with recreate ticked and no repo is REJECTED, naming repo', async () => {
     const context = await getContext();
     const skins = await realSkins(context);
     panel = StartPanel.show(context, { skins, onSubmit: () => { throw new Error('an invalid submit must not start a build'); } });
@@ -67,11 +67,13 @@ suite('the start screen — real WebviewPanel wiring (AC1, AC2, AC6)', () => {
       payload: { request: { ...emptyRequest(), recreate: true, repo: '' } },
     });
 
-    assert.equal(reply?.type, 'form:problems');
-    assert.equal(reply?.type === 'form:problems' ? reply.payload.problems.repo : undefined, 'required when recreating');
+    // T-15: `form:rejected`, because a press replying with the keystroke's own message was
+    // indistinguishable from being ignored. The AC — repo is named — is unchanged.
+    assert.equal(reply?.type, 'form:rejected');
+    assert.equal(reply?.type === 'form:rejected' ? reply.payload.problems.repo : undefined, 'required when recreating');
   });
 
-  test('AC2: idea typed without recreate replies form:problems with the exact T-9 honesty line', async () => {
+  test('AC2: idea typed without recreate is REJECTED with the exact T-9 honesty line', async () => {
     const context = await getContext();
     const skins = await realSkins(context);
     panel = StartPanel.show(context, { skins, onSubmit: () => { throw new Error('must not be called'); } });
@@ -81,7 +83,7 @@ suite('the start screen — real WebviewPanel wiring (AC1, AC2, AC6)', () => {
       payload: { request: { ...emptyRequest(), idea: 'a chat app', recreate: false } },
     });
 
-    assert.equal(reply?.type === 'form:problems' ? reply.payload.problems.idea : undefined, IDEA_FIRST_MESSAGE);
+    assert.equal(reply?.type === 'form:rejected' ? reply.payload.problems.idea : undefined, IDEA_FIRST_MESSAGE);
   });
 
   test('a fully valid submit calls onSubmit with exactly that request, and clears all problems', async () => {
@@ -93,7 +95,12 @@ suite('the start screen — real WebviewPanel wiring (AC1, AC2, AC6)', () => {
     const request: BuildRequest = { idea: '', recreate: true, repo: tmpDir('start-test-repo-'), target: tmpDir('start-test-target-'), dial: 'manual' };
     const reply = await panel.dispatchForTest({ type: 'form:submit', payload: { request } });
 
-    assert.deepEqual(reply, { type: 'form:problems', payload: { problems: {} } });
+    // T-15: a press replies `form:accepted`, not the keystroke's `form:problems`. The AC here —
+    // onSubmit is called with exactly this request — is unchanged.
+    assert.deepEqual(reply, { type: 'form:accepted' });
+    // The "clears all problems" half of this test's name, asserted against the panel's state now
+    // that the reply carries no payload to read it from.
+    assert.deepEqual(panel.getStateForTest().problems, {}, 'a valid submit must clear the problems');
     assert.deepEqual(submitted, request);
   });
 
@@ -135,7 +142,10 @@ suite('the start screen — real WebviewPanel wiring (AC1, AC2, AC6)', () => {
       type: 'form:submit',
       payload: { request: { ...emptyRequest(), recreate: true, repo: tmpDir('x-'), target: tmpDir('y-') } },
     });
-    assert.deepEqual(reply, { type: 'form:problems', payload: { problems: {} } });
+    // T-15: a valid press now answers `form:accepted`. This test is about the panel being a
+    // singleton; the reply shape is incidental to it and is asserted so the test still proves
+    // the dispatch reached a live panel at all.
+    assert.deepEqual(reply, { type: 'form:accepted' });
   });
 
   test('after dispose(), the NEXT show() creates a genuinely fresh panel (discriminates against the singleton case)', async () => {
@@ -224,7 +234,7 @@ suite('StartPanel.reportProblem — a build-time refusal surfaces in the form (A
     // synchronously inside its form:submit branch — by the time this resolves, `onSubmit`
     // has already run and `buildDone` is assigned (though not yet settled).
     const submitReply = await panel.dispatchForTest({ type: 'form:submit', payload: { request } });
-    assert.deepEqual(submitReply, { type: 'form:problems', payload: { problems: {} } }, 'the form itself is valid at submit time');
+    assert.deepEqual(submitReply, { type: 'form:accepted' }, 'the form itself is valid at submit time');
     assert.deepEqual(submittedRequest, request);
     assert.ok(buildDone, 'onSubmit should have run synchronously within dispatchForTest');
 
@@ -303,7 +313,9 @@ suite('StartPanel ignores malformed webview messages (review finding 3)', () => 
 
     const reply = await panel.dispatchForTest(raw);
 
-    assert.deepEqual(reply, { type: 'form:problems', payload: { problems: {} } });
+    // T-15: a press replies `form:accepted`, not the keystroke's `form:problems`. The AC here —
+    // onSubmit is called with exactly this request — is unchanged.
+    assert.deepEqual(reply, { type: 'form:accepted' });
     assert.deepEqual(submitted, request);
     assert.deepEqual(logged, [], 'a valid message must not be logged as ignored');
   });

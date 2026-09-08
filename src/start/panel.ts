@@ -55,7 +55,7 @@ export class StartPanel {
 
   private constructor(context: vscode.ExtensionContext, private readonly deps: StartPanelDeps) {
     const skin = readSkin(context.globalState, deps.skins.DEFAULT_SKIN);
-    this.state = { request: emptyRequest(), problems: {}, skin };
+    this.state = { request: emptyRequest(), problems: {}, skin, building: false };
 
     this.effects = {
       pickFolder: async (which: PickTarget) => {
@@ -121,6 +121,21 @@ export class StartPanel {
   reportProblem(problems: Partial<Record<RequestField, string>>): OutboundMessage {
     this.state = { ...this.state, problems: { ...this.state.problems, ...problems } };
     const post: OutboundMessage = { type: 'form:problems', payload: { problems: this.state.problems } };
+    void this.panel.webview.postMessage(post);
+    return post;
+  }
+
+  /**
+   * The build ended — however it ended (T-15 review finding 2).
+   *
+   * Called for EVERY outcome, including a failure and a cancel, because the button was disabled
+   * on submit and nothing else brings it back. A cancel posts nothing else at all, so without
+   * this the only way out of a dead "Building…" button was to switch tabs and back — which no
+   * user has a reason to try.
+   */
+  buildFinished(): OutboundMessage {
+    this.state = { ...this.state, building: false };
+    const post: OutboundMessage = { type: 'form:idle' };
     void this.panel.webview.postMessage(post);
     return post;
   }

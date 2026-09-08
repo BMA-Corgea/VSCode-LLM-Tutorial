@@ -100,7 +100,16 @@ function bodyHtml(state: PanelState, skins: SkinsModule): string {
 
     ${dialFieldset(r.dial)}
 
-    <button type="submit" class="btn primary" id="build-btn">Build the plan</button>
+    <button type="submit" class="btn primary" id="build-btn"${state.building ? ' disabled' : ''}>${state.building ? 'Building…' : 'Build the plan'}</button>
+    <!-- T-15. One line, BELOW the button, empty until a press. It exists because the problem
+         lines under each field are already on screen before the button is touched, so they
+         cannot also be the ANSWER to pressing it.
+         It carries a press ordinal in data-press, because the words alone are not enough: two
+         identical refused presses would otherwise write the same sentence over itself. What is
+         guaranteed to differ across a press is this element — its text, or failing that its
+         ordinal — plus the button on the accepted path. The build's own progress notification
+         appears in the corner, not here, which is why the accepted path needs this too. -->
+    <p class="problem" id="submit-note" role="status" aria-live="polite" data-press="0">${state.building ? 'Starting the build…' : ''}</p>
   </form>
 </main>`;
 }
@@ -139,9 +148,32 @@ const CLIENT_SCRIPT = `
     });
   }
 
+  // T-15, and review finding 3. Cleared on every edit so the NEXT press is observable — but the
+  // words alone are not enough. Press Enter in the field this fix's own focus move just landed
+  // you in and no change event fires, so the note is never cleared and the same sentence is
+  // written over itself: byte-identical, which is the defect again one keystroke later. The
+  // ordinal makes every press differ whether or not the words do.
+  var presses = 0;
+  function setNote(text, counts) {
+    var el = document.getElementById('submit-note');
+    if (!el) { return; }
+    el.textContent = text || '';
+    if (counts) { presses += 1; }
+    el.setAttribute('data-press', String(text ? presses : 0));
+  }
+
+  function firstProblemField(problems) {
+    var order = ['idea', 'repo', 'target'];
+    for (var i = 0; i < order.length; i += 1) {
+      if (problems && problems[order[i]]) { return document.getElementById(order[i]); }
+    }
+    return null;
+  }
+
   form.addEventListener('change', function () {
     var request = currentRequest();
     save({ request: request });
+    setNote('', false);
     post('form:changed', { request: request });
   });
 
@@ -170,10 +202,37 @@ const CLIENT_SCRIPT = `
     if (!msg) return;
     if (msg.type === 'form:problems') {
       showProblems(msg.payload.problems);
+    } else if (msg.type === 'form:rejected') {
+      // The note first, then focus. Both change; the note is the one a test can see and the one
+      // that survives the button already having focus.
+      showProblems(msg.payload.problems);
+      setNote(msg.payload.count === 1
+        ? 'One thing needs fixing before this can build.'
+        : msg.payload.count + ' things need fixing before this can build.', true);
+      var target = firstProblemField(msg.payload.problems);
+      if (target && target.focus) { target.focus(); }
+    } else if (msg.type === 'form:accepted') {
+      // The build is real from here. The button goes quiet because pressing it again would
+      // start a second one, and the note says so on the surface the reader is looking at —
+      // the progress notification appears in the corner, not in this panel.
+      setNote('Starting the build…', true);
+      var btn = document.getElementById('build-btn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Building…'; }
+    } else if (msg.type === 'form:idle') {
+      // Every build ends, including the failed and cancelled ones. Without this the button that
+      // was disabled on submit stayed disabled reading "Building…" beside a note still claiming
+      // the build was starting — a dead control with a false explanation, which is the family
+      // this whole ticket was filed about.
+      setNote('', false);
+      var doneBtn = document.getElementById('build-btn');
+      if (doneBtn) { doneBtn.disabled = false; doneBtn.textContent = 'Build the plan'; }
     } else if (msg.type === 'field:set') {
       var el = document.getElementById(msg.payload.field);
       if (el) { el.value = msg.payload.value; }
       showProblems(msg.payload.problems);
+      // A folder pick changes the problems, so a note counting the OLD ones is now wrong — and
+      // leaving it stale is also how the next press becomes unobservable (review finding 4).
+      setNote('', false);
     }
   });
 })();
