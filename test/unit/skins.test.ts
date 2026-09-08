@@ -131,7 +131,7 @@ suite('AC6 — a fixture skin, via a temp copy of repo-tour\'s assets, no extens
       // picker functions called directly above, but the actual start-screen page a real
       // webview would receive, produced with zero change to this extension's code.
       const page = renderStartHtml(
-        { request: emptyRequest(), problems: {}, skin: 'fixture' },
+        { request: emptyRequest(), problems: {}, skin: 'fixture', building: false },
         skinsMod,
       );
       assert.ok(page.includes(marker), 'the fixture skin\'s css should be inlined in the rendered page\'s <style>');

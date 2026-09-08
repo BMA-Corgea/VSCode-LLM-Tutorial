@@ -18,9 +18,14 @@
  * that does not match, rather than letting a malformed payload throw inside a `void`-ed
  * promise where nothing is listening for the rejection.
  *
- * `form:submit` and `form:changed` both reply with `form:problems` — "the message is shown
- * under the field, where the eye is, never a silent disable" (repo-tour lesson, T-3,
- * 2026-08-26; plan step 5). A folder pick additionally has to tell the webview the path it
+ * `form:changed` replies `form:problems` — "the message is shown under the field, where the eye
+ * is, never a silent disable" (repo-tour lesson, T-3, 2026-08-26; plan step 5). **`form:submit`
+ * used to share that reply and no longer does (T-15).** It was the right message for a keystroke
+ * and the wrong one for a press: the page validates on every `change`, so those lines were
+ * already on screen, and re-sending them meant a press produced no observable difference at all.
+ * A press now gets `form:rejected` or `form:accepted`. `form:accepted` is always new; a
+ * `form:rejected` may repeat the same words on a second press with no edit between, so the page
+ * carries a press ordinal that differs even when the sentence does not (review finding 3). A folder pick additionally has to tell the webview the path it
  * chose, so it replies `field:set` (value + the same problems, recomputed). `skin:set` gets
  * no reply: the client already applied the skin instantly (see `src/start/panel.ts`'s client
  * script) for zero flash; the host's only job there is to persist the choice.
@@ -33,6 +38,17 @@ export interface PanelState {
   problems: ValidationResult['problems'];
   /** the resolved skin name (never empty — defaults to repo-tour's own DEFAULT_SKIN). */
   skin: string;
+  /**
+   * A build is in flight (T-15 review findings 2 and 5).
+   *
+   * It lives HERE rather than only in the page because the panel re-renders from this state on
+   * `onDidChangeViewState`, and a flag the page owns alone is a flag a tab switch silently
+   * discards — `panel.ts`'s own doc says the host "NEVER trusts the view's own memory", and a
+   * disabled button that only the DOM remembers is exactly that. It is also what lets a finished
+   * build re-enable the button: the first version disabled it on submit and nothing anywhere
+   * ever undid that, so a FAILED build left the screen reading "Building…" for ever.
+   */
+  building: boolean;
 }
 
 export type PickTarget = 'repo' | 'target';
@@ -46,6 +62,17 @@ export type InboundMessage =
 
 export type OutboundMessage =
   | { type: 'form:problems'; payload: { problems: ValidationResult['problems'] } }
+  // T-15. A PRESS gets its own two replies, and they exist because `form:problems` could not
+  // serve as one: the page validates on every `change`, so the problem lines are already on
+  // screen before the button is touched. Replying `form:problems` to a rejected press therefore
+  // re-sent bytes the page was already showing, and the press was indistinguishable from being
+  // ignored. What was missing was never information — it was a DIFFERENCE.
+  | { type: 'form:rejected'; payload: { problems: ValidationResult['problems']; count: number } }
+  | { type: 'form:accepted' }
+  // The other half of `form:accepted`, and the reason it is a pair rather than a one-way flip:
+  // every build ends, including the ones that fail and the ones the learner cancels, and the
+  // button has to come back. Posted by `StartPanel.buildFinished` from `reportOutcome`.
+  | { type: 'form:idle' }
   | { type: 'field:set'; payload: { field: PickTarget; value: string; problems: ValidationResult['problems'] } };
 
 export interface StartEffects {
@@ -68,12 +95,35 @@ export async function handleStartMessage(
   effects: StartEffects,
 ): Promise<HandleResult> {
   switch (message.type) {
-    case 'form:changed':
+    case 'form:changed': {
+      const { problems } = validateRequest(message.payload.request);
+      const next: PanelState = { ...state, request: message.payload.request, problems };
+      return { state: next, post: { type: 'form:problems', payload: { problems } } };
+    }
+    // T-15: split from `form:changed`, which it used to share a case with. The old shared
+    // `return` was the whole defect — a rejected press replied with the identical message a
+    // keystroke had already sent, so nothing on the page moved. Both arms below now say
+    // something the page was NOT already saying.
     case 'form:submit': {
       const { ok, problems } = validateRequest(message.payload.request);
       const next: PanelState = { ...state, request: message.payload.request, problems };
-      if (message.type === 'form:submit' && ok) effects.submit(message.payload.request);
-      return { state: next, post: { type: 'form:problems', payload: { problems } } };
+      if (ok) {
+        effects.submit(message.payload.request);
+        next.building = true;
+        // Said BEFORE the build's own progress notification, and on the surface the eye is
+        // actually on. `runBuild` awaits a `workspaceState.update` and only then raises a
+        // notification in the corner — so without this the START SCREEN is unchanged on an
+        // accepted press too. That case is the worse one: there are no problem lines to
+        // misread as a response, and a slow accepted submit looks exactly like a dead button.
+        return { state: next, post: { type: 'form:accepted' } };
+      }
+      return {
+        state: next,
+        post: {
+          type: 'form:rejected',
+          payload: { problems, count: Object.values(problems).filter(Boolean).length },
+        },
+      };
     }
     case 'pick:repo':
     case 'pick:target': {

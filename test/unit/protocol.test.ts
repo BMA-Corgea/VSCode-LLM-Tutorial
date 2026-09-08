@@ -22,7 +22,7 @@ function tmpEmptyDir(): string {
 }
 
 function freshState(overrides: Partial<PanelState> = {}): PanelState {
-  return { request: emptyRequest(), problems: {}, skin: 'system', ...overrides };
+  return { request: emptyRequest(), problems: {}, skin: 'system', building: false, ...overrides };
 }
 
 function fakeEffects(overrides: Partial<StartEffects> = {}): StartEffects & { submitted: BuildRequest[]; persisted: string[] } {
@@ -39,22 +39,33 @@ function fakeEffects(overrides: Partial<StartEffects> = {}): StartEffects & { su
 }
 
 suite('handleStartMessage — form:submit (AC1 protocol test)', () => {
-  test('recreate ticked, no repo -> form:problems names repo, and the build is NOT started', async () => {
+  // T-15 changed the REPLY, not the rule: a press used to answer `form:problems` — the same
+  // message a keystroke sends — and so was indistinguishable from being ignored. The AC these
+  // tests exist for (the right problem is named, no build starts) is unchanged and still asserted.
+  test('recreate ticked, no repo -> the press is REJECTED, names repo, and the build is NOT started', async () => {
     const effects = fakeEffects();
     const request: BuildRequest = { ...emptyRequest(), recreate: true, repo: '' };
     const result = await handleStartMessage(freshState(), { type: 'form:submit', payload: { request } }, effects);
 
-    assert.equal(result.post?.type, 'form:problems');
-    assert.equal(result.post?.type === 'form:problems' && result.post.payload.problems.repo, 'required when recreating');
+    assert.equal(result.post?.type, 'form:rejected', 'a press must not reply with the keystroke message');
+    assert.equal(result.post?.type === 'form:rejected' && result.post.payload.problems.repo, 'required when recreating');
+    // The count is asserted against the problems it summarises rather than against a literal:
+    // a hard-coded number pins this fixture, not the property, and would drift the moment
+    // validation changes. (Written as a literal first; it said 1, the truth was 2.)
+    if (result.post?.type === 'form:rejected') {
+      const named = Object.values(result.post.payload.problems).filter(Boolean).length;
+      assert.equal(result.post.payload.count, named, 'the count must equal the problems it summarises');
+      assert.ok(named > 0, 'a rejection with nothing to name would be a rejection with no reason');
+    }
     assert.equal(effects.submitted.length, 0, 'an invalid submit must never start a build');
   });
 
-  test('idea typed, recreate off -> form:problems names idea with the exact T-9 line (AC2)', async () => {
+  test('idea typed, recreate off -> the press is REJECTED and names idea with the exact T-9 line (AC2)', async () => {
     const effects = fakeEffects();
     const request: BuildRequest = { ...emptyRequest(), idea: 'a chat app', recreate: false };
     const result = await handleStartMessage(freshState(), { type: 'form:submit', payload: { request } }, effects);
 
-    assert.equal(result.post?.type === 'form:problems' ? result.post.payload.problems.idea : undefined, IDEA_FIRST_MESSAGE);
+    assert.equal(result.post?.type === 'form:rejected' ? result.post.payload.problems.idea : undefined, IDEA_FIRST_MESSAGE);
     assert.equal(effects.submitted.length, 0);
   });
 
@@ -63,7 +74,13 @@ suite('handleStartMessage — form:submit (AC1 protocol test)', () => {
     const request: BuildRequest = { idea: '', recreate: true, repo: tmpEmptyDir(), target: tmpEmptyDir(), dial: 'manual' };
     const result = await handleStartMessage(freshState(), { type: 'form:submit', payload: { request } }, effects);
 
-    assert.deepEqual(result.post, { type: 'form:problems', payload: { problems: {} } });
+    // `form:accepted` carries no payload on purpose: there is nothing to say about a request the
+    // page already holds, and the point of the message is that it DIFFERS from the keystroke reply.
+    assert.deepEqual(result.post, { type: 'form:accepted' });
+    // `form:accepted` carries no payload, so the "no problems" half of this test's own name is
+    // asserted against the STATE a later re-render draws from, not against the reply.
+    assert.deepEqual(result.state.problems, {}, 'a valid submit must leave no problems behind');
+    assert.equal(result.state.building, true, 'and must record that a build is in flight');
     assert.deepEqual(effects.submitted, [request]);
   });
 });
@@ -227,7 +244,7 @@ suite('parseInboundMessage — every real message still gets through (discrimina
     });
     assert.ok(parsed);
     const result = await handleStartMessage(freshState(), parsed, effects);
-    assert.deepEqual(result.post, { type: 'form:problems', payload: { problems: {} } });
+    assert.deepEqual(result.post, { type: 'form:accepted' });
     assert.equal(effects.submitted.length, 1);
   });
 });

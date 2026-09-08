@@ -15,8 +15,11 @@
  */
 
 import * as assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { emptyRequest, IDEA_FIRST_MESSAGE } from '../../src/start/request.js';
-import type { PanelState } from '../../src/start/protocol.js';
+import { handleStartMessage, type PanelState, type StartEffects } from '../../src/start/protocol.js';
 import { renderStartHtml, type SkinsModule } from '../../src/start/view.js';
 
 const FAKE_SKINS: SkinsModule = {
@@ -29,7 +32,7 @@ const FAKE_SKINS: SkinsModule = {
 };
 
 function state(overrides: Partial<PanelState> = {}): PanelState {
-  return { request: emptyRequest(), problems: {}, skin: 'system', ...overrides };
+  return { request: emptyRequest(), problems: {}, skin: 'system', building: false, ...overrides };
 }
 
 suite('renderStartHtml — markup-level DOM assertions (AC1, AC2)', () => {
@@ -87,6 +90,12 @@ class FakeElement {
   value = '';
   checked = false;
   textContent = '';
+  disabled = false;
+  focused = 0;
+  private readonly attrs = new Map<string, string>();
+  focus(): void { this.focused += 1; }
+  setAttribute(name: string, value: string): void { this.attrs.set(name, value); }
+  getAttribute(name: string): string | undefined { return this.attrs.get(name); }
   private readonly listeners = new Map<string, Array<(e: unknown) => void>>();
   addEventListener(type: string, fn: (e: unknown) => void): void {
     const list = this.listeners.get(type) ?? [];
@@ -113,7 +122,7 @@ function radio(value: string, checked: boolean): FakeElement {
 }
 
 function buildFakeDom() {
-  const ids = ['idea', 'recreate', 'repo', 'target', 'problem-idea', 'problem-repo', 'problem-target', 'browse-repo', 'browse-target', 'skinpick'];
+  const ids = ['idea', 'recreate', 'repo', 'target', 'problem-idea', 'problem-repo', 'problem-target', 'browse-repo', 'browse-target', 'skinpick', 'submit-note', 'build-btn'];
   const elements = new Map<string, FakeElement>();
   for (const id of ids) elements.set(id, new FakeElement());
 
@@ -251,5 +260,165 @@ suite('the start screen\'s client script, actually executed against a fake DOM (
     dom.elements.get('skinpick')!.dispatch('change');
 
     assert.equal(dom.docAttrs.has('data-theme'), false);
+  });
+});
+
+/**
+ * T-15 — the pin, and it deliberately asserts a PROPERTY rather than a sentence.
+ *
+ * The defect was not a missing message. Every problem was already named, under its own field, in
+ * plain language — the page was *correct* and the press was still indistinguishable from being
+ * ignored, because the reply to `form:submit` was byte-identical to the reply a keystroke had
+ * already produced.
+ *
+ * So the thing that was false is: **the render after a press differs from the render before it.**
+ * That is what these tests assert, for BOTH paths. A test asserting "the note says three things
+ * need fixing" would pin today's wording and let a redesign satisfy it while reintroducing the
+ * bug; this survives rewording every message on the page.
+ *
+ * `observable()` is deliberately a snapshot of what a person could SEE — every element's text,
+ * plus the button's label and disabled state. Focus is counted too, but it is not what carries
+ * the assertion: a note that changes is visible whether or not focus moved, and focus alone would
+ * be invisible to a reader who was not watching the caret.
+ */
+suite('a press always changes something on the page (T-15)', () => {
+  /**
+   * **This drives the REAL protocol, not a hand-picked message**, and that distinction is the
+   * whole value of the suite. A first version of this pin delivered `form:rejected` to the page
+   * directly and asserted the page changed. It passed — and it *kept* passing when the defect was
+   * reintroduced by hand, because the defect is in **which message the host chooses to send**, and
+   * a test that hands the page the right message never exercises that choice. It was coverage
+   * aimed at a path the bug does not live on.
+   *
+   * So: build a request, ask `handleStartMessage` what a `form:submit` produces, and feed **its
+   * actual reply** to the page. That spans both halves — the protocol's choice and the view's
+   * rendering — which is where the property actually lives.
+   */
+  const BAD = { ...emptyRequest(), idea: '', repo: '', target: '' };
+  /**
+   * **The first version of this fixture was not valid, and the ACCEPTED test was therefore a
+   * second REJECTED test** (review finding 1). `emptyRequest()` leaves `recreate: false`, so an
+   * idea typed without it trips the T-9 honesty line, and `/tmp/ref` does not exist — the reply
+   * was `form:rejected` with `count: 2`, and the assertion passed because the *rejected* branch
+   * fills the note. Proof it was checking nothing: renaming the `form:accepted` handler so the
+   * message fell through unhandled left the whole suite green.
+   *
+   * Real directories and `recreate: true`, so the request is genuinely valid. If this ever stops
+   * producing `form:accepted` the assertion below says so out loud rather than passing on the
+   * other branch.
+   */
+  const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'start-view-'));
+  const GOOD = { ...emptyRequest(), recreate: true, repo: tmp(), target: tmp() };
+
+  const effects = (): StartEffects => ({
+    // `Promise.resolve(...)` rather than an `async` arrow with no `await`: the lint rule that
+    // catches a pointless `async` is right, and the seam only needs a thenable here.
+    pickFolder: () => Promise.resolve(undefined),
+    submit: () => undefined,
+    persistSkin: () => undefined,
+  });
+
+  function observable(dom: ReturnType<typeof buildFakeDom>): string {
+    const parts: string[] = [];
+    for (const [id, el] of dom.elements) parts.push(`${id}:text=${el.textContent}:disabled=${String(el.disabled)}`);
+    return parts.join('|');
+  }
+
+  /** The page as it really stands when a finger reaches the button: every edit has already been
+   *  validated, so the problem lines are on screen before the press. Then press for real. */
+  async function press(dom: ReturnType<typeof buildFakeDom>, request: typeof BAD): Promise<{ before: string; after: string }> {
+    const handlers = dom.windowListeners.get('message') ?? [];
+    assert.equal(handlers.length, 1);
+    const typed = await handleStartMessage(state(), { type: 'form:changed', payload: { request } }, effects());
+    if (typed.post) handlers[0]!({ data: typed.post });
+    const before = observable(dom);
+    const pressed = await handleStartMessage(typed.state, { type: 'form:submit', payload: { request } }, effects());
+    assert.ok(pressed.post, 'a press must reply with something');
+    handlers[0]!({ data: pressed.post });
+    return { before, after: observable(dom) };
+  }
+
+  test('REJECTED: the page after a real rejected press differs from the page before it', async () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const { before, after } = await press(dom, BAD);
+    assert.notEqual(after, before, 'a rejected press left the page byte-identical — the T-15 defect');
+  });
+
+  test('ACCEPTED: the page after a real accepted press differs from the page before it', async () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    // Asserted FIRST, because the previous version of this test passed on the rejected branch
+    // without ever exercising the one it is named for.
+    const reply = await handleStartMessage(state(), { type: 'form:submit', payload: { request: GOOD } }, effects());
+    assert.equal(reply.post?.type, 'form:accepted', 'the fixture must actually be valid, or this test proves nothing');
+
+    const { before, after } = await press(dom, GOOD);
+    assert.notEqual(after, before, 'an accepted press left the page unchanged — the worse half of T-15');
+    assert.equal(dom.elements.get('build-btn')?.disabled, true, 'an accepted press must quiet the button');
+  });
+
+  test('a build that ENDS gives the button back — however it ended (review finding 2)', () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const handlers = dom.windowListeners.get('message') ?? [];
+    handlers[0]!({ data: { type: 'form:accepted' } });
+    assert.equal(dom.elements.get('build-btn')?.disabled, true);
+
+    handlers[0]!({ data: { type: 'form:idle' } });
+    assert.equal(dom.elements.get('build-btn')?.disabled, false, 'a failed or cancelled build must not strand a dead button');
+    assert.equal(dom.elements.get('build-btn')?.textContent, 'Build the plan');
+    assert.equal(dom.elements.get('submit-note')?.textContent, '', 'the note must not keep claiming the build is starting');
+  });
+
+  test('a SECOND press with no edit still differs — Enter in the focused field fires no change (review finding 3)', async () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const handlers = dom.windowListeners.get('message') ?? [];
+    const one = await handleStartMessage(state(), { type: 'form:submit', payload: { request: BAD } }, effects());
+    handlers[0]!({ data: one.post });
+    const afterFirst = dom.elements.get('submit-note')?.getAttribute?.('data-press');
+    const two = await handleStartMessage(one.state, { type: 'form:submit', payload: { request: BAD } }, effects());
+    handlers[0]!({ data: two.post });
+    assert.notEqual(dom.elements.get('submit-note')?.getAttribute?.('data-press'), afterFirst,
+      'two identical presses produced identical bytes — the defect, one keystroke later');
+  });
+
+  test('a folder pick clears the note, so its count is never stale (review finding 4)', () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const handlers = dom.windowListeners.get('message') ?? [];
+    handlers[0]!({ data: { type: 'form:rejected', payload: { problems: { repo: 'x', target: 'y' }, count: 2 } } });
+    assert.notEqual(dom.elements.get('submit-note')?.textContent, '');
+    handlers[0]!({ data: { type: 'field:set', payload: { field: 'target', value: '/somewhere', problems: { repo: 'x' } } } });
+    assert.equal(dom.elements.get('submit-note')?.textContent, '', 'a note counting the OLD problems is a wrong note');
+  });
+
+  test('a re-render carries the in-flight build, so a tab switch cannot re-enable the button (review finding 5)', () => {
+    const html = renderStartHtml(state({ building: true }), FAKE_SKINS);
+    assert.match(html, /id="build-btn"[^>]*disabled/, 'the button must come back disabled after a re-render');
+    assert.match(html, /Building…/);
+    const idle = renderStartHtml(state({ building: false }), FAKE_SKINS);
+    assert.doesNotMatch(idle, /id="build-btn"[^>]*disabled/, 'and enabled when no build is running (discriminates)');
+  });
+
+  test('THE DISCRIMINATOR: a keystroke on an unchanged request changes nothing, so the suite is not passing on drift', async () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const handlers = dom.windowListeners.get('message') ?? [];
+    const first = await handleStartMessage(state(), { type: 'form:changed', payload: { request: BAD } }, effects());
+    if (first.post) handlers[0]!({ data: first.post });
+    const before = observable(dom);
+    const again = await handleStartMessage(first.state, { type: 'form:changed', payload: { request: BAD } }, effects());
+    if (again.post) handlers[0]!({ data: again.post });
+    assert.equal(observable(dom), before, 'a repeated keystroke is idempotent; that is exactly why a press needed its own reply');
+  });
+
+  test('a SECOND rejected press is observable too — the note is cleared on edit', async () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const { after: afterFirst } = await press(dom, BAD);
+    dom.elements.get('start-form')!.dispatch('change');
+    assert.notEqual(observable(dom), afterFirst, 'editing must clear the note, or the next press cannot be seen');
   });
 });

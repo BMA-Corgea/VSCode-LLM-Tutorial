@@ -134,6 +134,9 @@ function buildContextFor(
  * threading field-attribution through every stage of `build.ts`.
  */
 async function reportOutcome(outcome: BuildOutcome | undefined, panel?: StartPanel): Promise<void> {
+  // FIRST, and for every outcome including `undefined` (the learner cancelled): the button was
+  // disabled when the build started and nothing else brings it back (T-15 review finding 2).
+  panel?.buildFinished();
   if (!outcome) return;
   if (outcome.ok) {
     await vscode.window.showInformationMessage(`Build Tutorials: ${completionMessage(outcome.plan!, outcome.cost!)}`);

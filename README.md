@@ -53,8 +53,15 @@ report in plain sentences, never a stack trace.
 - **How much do you want to type?** — the dial, below. Set here as the default, overridable on
   any single step.
 
-Every field's problem, if it has one, appears in a line right under that field — never a
-disabled button with no explanation.
+Every field's problem, if it has one, appears in a line right under that field. **And pressing
+*Build the plan* always changes something**, whether it was accepted or refused — a line beside
+the button says which, and while a build is running the button says so and stops taking presses.
+
+That second sentence was learned the hard way. The first one used to end "never a disabled button
+with no explanation", and the code satisfied it by shipping an *enabled* button with no response:
+the problems were already on screen from typing, so pressing the button re-drew exactly what was
+already there and a press was indistinguishable from being ignored. **The requirement had been
+written against the wrong failure** — a disabled button at least tells you it will not work.
 
 Building the plan takes minutes, so it runs behind a cancellable progress notification with a
 write-ahead marker at `<target>/.repo-tour/build/building.json`. If the window reloads or the
