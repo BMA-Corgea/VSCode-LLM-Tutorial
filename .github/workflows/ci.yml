@@ -2,9 +2,11 @@
 #
 # T-2 AC4: typecheck, lint, tests and `vsce package` on push. repo-tour is not published, so
 # this extension depends on it via `file:../repo-tour` (spec §3) — the two repos are checked
-# out as SIBLING directories here, exactly as they are on a developer's machine, so
-# `buildTutorials.repoTourPath`'s default (`../repo-tour`) resolves the same way in CI as it
-# does locally.
+# out as SIBLING directories here, exactly as they are on a developer's machine, so `npm ci`
+# links the sibling into `node_modules/repo-tour` and `buildTutorials.repoTourPath`'s default
+# (EMPTY since T-8: "resolve the repo-tour dependency") reaches the same checkout in CI as it
+# does locally. Empty is also what an installed .vsix uses, where the dependency it resolves is
+# the copy vendored inside the extension — one resolution path, exercised both ways.
 name: CI
 
 on:
@@ -61,18 +63,64 @@ jobs:
         working-directory: VSCode-LLM-Tutorial
         run: npm test
 
-      # `npm run package` is `vsce package --no-dependencies`. Plain `vsce package` was tried
-      # first, since repo-tour is a runtime dependency and dependencies shipping was the plan
-      # — but vsce hard-errors on it: repo-tour is a `file:../repo-tour` SIBLING checkout, so
-      # walking into ITS node_modules for web-tree-sitter/tree-sitter-wasms produces paths
-      # like `extension/../repo-tour/node_modules/...`, which escape the vsix's own root and
-      # are not representable in the archive. Vendoring repo-tour into a truly standalone
-      # .vsix is deferred to T-8 (spec §11) — for now the packaged extension still expects a
-      # sibling repo-tour checkout at run time, exactly like `./build-tutorials dev` already
-      # does.
-      - name: Package
+      # T-8 replaced `vsce package --no-dependencies` with `scripts/package.mjs`, which VENDORS
+      # repo-tour: `npm pack` the sibling checkout, install the tarball into a staging copy, and
+      # package from there WITH dependencies. Before T-8 this step produced 11 files and 129 KB
+      # with no `node_modules` at all — an extension that only worked on a machine that already
+      # had a repo-tour checkout beside it.
+      #
+      # The script also reads the finished archive back and FAILS if the core, the two runtime
+      # dependencies or any of the four WASM grammars are missing, or if the archive carries
+      # anything that must not be published (`.autodev/`, `kb/`, `autodev/`, a `.env`, an
+      # `.npmrc`, a source map, the compiled test bundle, the packaging intermediates, a
+      # credential shape, or a personal name). That check is part of packaging rather than a
+      # separate optional step, so there is no route to a .vsix that skipped it.
+      #
+      # BUILD_TUTORIALS_OWNER_NAMES is what makes the last of those non-vacuous HERE. The names
+      # to search for are supplied at run time and never written into this public repository;
+      # the local fallback is the git identity, and `actions/checkout` configures none — so
+      # before T-8's review this step scanned for nothing and printed "packaged and verified".
+      # It now exits 2 instead, which means this step goes RED until the repository has a
+      # secret of that name holding a comma-separated list of the identifiers that must not
+      # ship. That is the intended failure: a check that cannot check must not report success.
+      # (`--allow-vacuous-name-scan` exists for a caller that accepts an unchecked archive on
+      # purpose. It is deliberately NOT passed here.)
+      - name: Package (vendors repo-tour, then verifies the archive)
         working-directory: VSCode-LLM-Tutorial
+        env:
+          BUILD_TUTORIALS_OWNER_NAMES: ${{ secrets.BUILD_TUTORIALS_OWNER_NAMES }}
         run: npm run package
+
+      # AC1: install the .vsix into an ISOLATED --extensions-dir and prove the extension both
+      # resolves its vendored core (doctor: found, via: exports, four grammars) and activates
+      # for real. `npm test` above has already made @vscode/test-electron download a stable
+      # VS Code into .vscode-test/, and this uses that build's own CLI.
+      #
+      # --allow-missing-editors because a GitHub runner has neither editor preinstalled and
+      # VSCodium never arrives at all: the run still PRINTS which halves are unproven, it just
+      # does not fail the build over an editor that was never there. A real failure of an
+      # editor that IS present still exits 1 and still goes red.
+      - name: Install the .vsix and prove it activates
+        working-directory: VSCode-LLM-Tutorial
+        run: npm run verify:install -- --allow-missing-editors
+
+      # AC3. THE LINE: this repository never publishes. No token is configured here, and none
+      # may be added — publishing is the owner's act, in his account, with his credentials.
+      #
+      # Note what is NOT passed: `--dry-run`. Without it, `scripts/publish.mjs` dry-runs while
+      # no credential is present and REFUSES (exit 1) the moment one is. So if a `VSCE_PAT` or
+      # `OVSX_PAT` secret is ever wired into this workflow, this step goes RED instead of
+      # quietly publishing — which is the entire point of running it here. Passing --dry-run
+      # would make that same mistake silent.
+      #
+      # The exact boundary, because a tripwire that is described as a guarantee stops being
+      # read: this catches a credential wired in at the workflow or job `env:` level, and an
+      # edit to this step. It does NOT catch a secret added to a NEW step's own `env:` — a
+      # step's environment is not visible to other steps — which is the most likely way someone
+      # would actually add publishing. This is one shape of the mistake, caught loudly.
+      - name: Publish dry run (never publishes; goes red if a credential appears)
+        working-directory: VSCode-LLM-Tutorial
+        run: npm run publish:dry-run
 
       - name: Upload .vsix
         uses: actions/upload-artifact@v4

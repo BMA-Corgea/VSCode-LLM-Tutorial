@@ -2,6 +2,11 @@ node_modules/
 dist/
 out/
 *.vsix
+
+# T-8 packaging intermediates: the packed repo-tour tarball and the staging copy it is
+# installed into. Both are rebuilt from scratch by every `npm run package`.
+vendor/
+.package-staging/
 *.log
 .cache/
 .scratch/

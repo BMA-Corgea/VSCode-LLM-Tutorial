@@ -20,11 +20,20 @@ try {
   process.exit(1);
 }
 
-const { runDoctor, formatReport, resolveCoreRoot } = doctorModule;
+const { runDoctor, formatReport, resolveCoreRoot, DEFAULT_REPO_TOUR_PATH } = doctorModule;
 
-// Same default the extension's `buildTutorials.repoTourPath` setting has; an optional first
-// argument overrides it, exactly like pointing the setting at a different checkout.
-const setting = process.argv[2] ?? '../repo-tour';
+// The extension's `buildTutorials.repoTourPath` default, taken from the bundle rather than
+// typed again here (T-8 changed the string in three places and missed a fourth). Empty asks
+// Node to resolve the `repo-tour` dependency, which in a development checkout is the symlink
+// `npm install` made to the sibling and in an installed extension is the copy packaged inside
+// it. Running the CLI doctor down the SAME resolution path the packaged extension uses is the
+// point — a doctor that only ever proves the sibling case cannot tell you the .vsix is broken.
+// An optional first argument overrides it, exactly like pointing the setting at a checkout.
+//
+// `resolveCoreRoot` is total, so a checkout with no node_modules at all reaches the report
+// below instead of raising MODULE_NOT_FOUND here — which is the one thing this command may
+// never do, since a missing core is precisely what it exists to explain.
+const setting = process.argv[2] ?? DEFAULT_REPO_TOUR_PATH;
 const root = resolveCoreRoot(setting, projectRoot);
 
 const report = await runDoctor(root);

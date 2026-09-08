@@ -28,6 +28,21 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
+/**
+ * `buildTutorials.repoTourPath`'s default, in ONE place.
+ *
+ * `package.json`'s manifest declares it for a real editor; `src/extension.ts` needs the same
+ * value as its `getConfiguration().get()` fallback (for the case where the configuration
+ * section is absent entirely, which happens outside an extension host); `scripts/doctor-cli.mjs`
+ * needs it to run the CLI doctor down the same resolution path a packaged extension uses. Those
+ * were three separate string literals, plus a fourth in `test/dial.test.ts`, and T-8 changed
+ * three of them. `test/unit/core-root.test.ts` asserts this constant equals the manifest's.
+ *
+ * Empty means "resolve the `repo-tour` dependency" — in an installed copy the core packaged
+ * inside the extension, in a development checkout the link `npm install` made to the sibling.
+ */
+export const DEFAULT_REPO_TOUR_PATH = '';
+
 /** repo-tour's public modules, in the order the doctor reports them. */
 export const CORE_MODULE_NAMES = ['skins', 'extract', 'llm', 'digest', 'interpret', 'ask', 'types', 'build'] as const;
 export type CoreModuleName = (typeof CORE_MODULE_NAMES)[number];
@@ -60,21 +75,45 @@ export interface CoreLoadResult {
 /**
  * Turns the `buildTutorials.repoTourPath` setting into an absolute directory.
  *
- * Purely lexical: it never touches the filesystem, so a typo'd setting is not an exception
- * here — it becomes a normal, reportable `loadCore` failure that names the exact path tried.
+ * TOTAL: it never throws. Whatever the setting says, and whatever is or is not installed, this
+ * returns a path — so a missing core is a normal, reportable `loadCore` failure that names the
+ * exact path tried, and not an exception raised inside whichever command happened to ask.
  *
- *   - absolute setting        -> used as-is
+ *   - absolute setting        -> used as-is                            (purely lexical)
  *   - relative setting        -> resolved against the extension's own install directory
- *   - empty setting (cleared) -> ask Node's ordinary resolution to find the `repo-tour`
+ *                                                                      (purely lexical)
+ *   - empty setting (default) -> ask Node's ordinary resolution to find the `repo-tour`
  *                                 dependency, since one is always declared in package.json
+ *
+ * Only the last branch consults the filesystem, and it is the only one that CAN fail: an
+ * extension with no `node_modules/repo-tour` — a fresh clone before `npm install`, a .vsix that
+ * was built without vendoring the core — makes `require.resolve` throw `MODULE_NOT_FOUND`.
+ * Being total matters more here than anywhere else in this file, because that failure is
+ * exactly the case the doctor exists to explain, and because every caller in `src/extension.ts`
+ * is un-guarded: the Doctor command, Start, and `resumeOnActivate`, which is floated with `void`
+ * and would turn a throw into an unhandled rejection on any window carrying a build bookmark.
+ * (T-8 made the empty setting the default and moved that risk from opt-in to ordinary; the
+ * review that caught it is `.autodev/reviews/T-8-review.md`, finding 1.)
+ *
+ * So an unresolvable dependency degrades to the FIRST place Node looked —
+ * `<extensionRoot>/node_modules/repo-tour` — which `loadCore` then reports as "no repo-tour
+ * package.json found at …". The reported path is where the core would have been, which is what
+ * makes the report actionable rather than merely honest.
  */
 export function resolveCoreRoot(setting: string, extensionRoot: string): string {
   const trimmed = setting.trim();
-  if (trimmed.length === 0) {
+  if (trimmed.length > 0) {
+    return path.isAbsolute(trimmed) ? trimmed : path.resolve(extensionRoot, trimmed);
+  }
+  try {
     const require_ = createRequire(path.join(extensionRoot, 'package.json'));
     return path.dirname(require_.resolve('repo-tour/package.json'));
+  } catch {
+    // Not installed. Name where the dependency belongs rather than raising the resolver's
+    // error: the caller asked for a directory, and `loadCore` turns a directory with nothing
+    // in it into a sentence.
+    return path.join(extensionRoot, 'node_modules', 'repo-tour');
   }
-  return path.isAbsolute(trimmed) ? trimmed : path.resolve(extensionRoot, trimmed);
 }
 
 /** Reads repo-tour's own package.json directly — the found/not-found gate, no resolution involved. */

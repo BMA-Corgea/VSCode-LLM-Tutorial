@@ -12,8 +12,9 @@ import { CORE_MODULE_NAMES, loadCore, type CoreLoadResult, type ModuleLoad } fro
 
 // Re-exported so scripts/doctor-cli.mjs — which loads only dist/doctor.js, deliberately never
 // dist/extension.js, so it never touches `vscode` — has one bundle to import from instead of
-// needing a second dist/core.js entry point.
-export { resolveCoreRoot } from './core.js';
+// needing a second dist/core.js entry point. DEFAULT_REPO_TOUR_PATH travels with it so the CLI
+// doctor reads the setting's default rather than carrying its own copy of the string.
+export { DEFAULT_REPO_TOUR_PATH, resolveCoreRoot } from './core.js';
 
 export interface GrammarCheck {
   ok: boolean;
@@ -41,8 +42,17 @@ export interface DoctorReport {
   claude: ClaudeCheck;
 }
 
-/** The four grammars repo-tour ships (spec §10) — what `extract.initParsers()` loads by default. */
-const EXPECTED_GRAMMARS = ['python', 'javascript', 'typescript', 'tsx'];
+/**
+ * The four grammars repo-tour ships (spec §10) — what `extract.initParsers()` loads by default.
+ *
+ * Exported because `src/publish/disclosure.ts` checks the .vsix for exactly these files and
+ * used to hold its own second copy of the list, connected to this one by nothing but a comment
+ * saying "the four grammars src/doctor.ts asks initParsers for" (T-8 review, finding 11 — the
+ * same shape as T-7's recorded DETOUR_LIMITS lesson, one ticket later). Neither module imports
+ * `vscode`, so there is no reason for two lists: what the archive is checked for IS what the
+ * doctor asks for, and a fifth grammar added here has to be shipped by definition.
+ */
+export const EXPECTED_GRAMMARS = ['python', 'javascript', 'typescript', 'tsx'] as const;
 
 /** The env var this extension honours for an explicit claude binary — separate from repo-tour's own. */
 export const CLAUDE_ENV_VAR = 'BUILD_TUTORIALS_CLAUDE';
@@ -71,7 +81,7 @@ async function checkGrammars(core: CoreLoadResult): Promise<GrammarCheck> {
   try {
     // initParsers() is all-or-nothing over its language list: repo-tour exposes no way to
     // ask which of several succeeded, so a clean resolve IS the four-grammar guarantee.
-    await extractMod.initParsers(EXPECTED_GRAMMARS);
+    await extractMod.initParsers([...EXPECTED_GRAMMARS]);
     return { ok: true, loaded: [...EXPECTED_GRAMMARS], detail: `tree-sitter initialised; ${EXPECTED_GRAMMARS.length} grammars loaded` };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

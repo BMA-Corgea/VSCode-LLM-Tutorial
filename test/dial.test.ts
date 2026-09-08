@@ -58,7 +58,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
-import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../src/core.js';
+import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from '../src/core.js';
 import { commitSubject } from '../src/dial/commit.js';
 import { dialCoreFor, type DialCore, type FileRecord } from '../src/dial/core.js';
 import type { ExtensionApi } from '../src/extension.js';
@@ -176,7 +176,7 @@ function loadedCore(): Promise<CoreLoadResult> {
   coreOnce ??= (async () => {
     const ext = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(ext, `extension "${EXTENSION_ID}" is not installed in the test host`);
-    const setting = vscode.workspace.getConfiguration('buildTutorials').get<string>('repoTourPath', '../repo-tour');
+    const setting = vscode.workspace.getConfiguration('buildTutorials').get<string>('repoTourPath', DEFAULT_REPO_TOUR_PATH);
     const loaded = await loadCore(resolveCoreRoot(setting, ext.extensionUri.fsPath));
     assert.equal(loaded.found, true, loaded.reason ?? 'repo-tour should load from the configured checkout');
     return loaded;
