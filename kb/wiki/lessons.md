@@ -102,6 +102,29 @@ rejected alternative in a decision record names a failure mode someone already t
 avoiding; that list is free, specific, and written before anyone was invested in the
 implementation.
 
+## A trailing slash in .gitignore matches a directory, not a symlink to one (T-15)
+
+A worktree shared dependencies with the main checkout the obvious way — `ln -s
+../VSCode-LLM-Tutorial/node_modules node_modules`. `.gitignore` said `node_modules/`.
+
+**The trailing slash matches a DIRECTORY only.** A symlink is not a directory, so the link was
+not ignored, was committed, and on merge replaced the main checkout's real `node_modules` with a
+link pointing at itself. `require.resolve` then failed with `ELOOP`.
+
+> **Ignore both forms — `node_modules/` and `node_modules` — whenever a path might ever be a
+> link.** The slash is a promise about what the entry IS, and a symlink quietly breaks it.
+
+Two things worth keeping beyond the one-line fix:
+
+- **The tell was in the merge output**, not at the next build: `create mode 120000 node_modules`.
+  Mode `120000` is a symlink, and a symlink appearing in a merge that should have touched only
+  source is worth a second look. Reading what a merge says it created is cheap; discovering it
+  through a broken toolchain is not.
+- **The convenience caused it.** Sharing `node_modules` between worktrees saves a minute of
+  `npm install` and costs a class of failure that does not exist otherwise. The repo's own
+  conventions already say worktrees are siblings so `file:../repo-tour` resolves — which means
+  each worktree can afford its own install, and should have one.
+
 ## Red-checking is the only thing that separates a pin from a decoration (T-15)
 
 The pin written for T-15 was **worthless, and it took thirty seconds to find out.**
