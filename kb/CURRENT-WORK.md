@@ -14,40 +14,40 @@ here and found via the reference table below.
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
 - **T-8** (feature) — Package and publish — .vsix, Marketplace and Open VSX — build
-- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-goals
-- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-goals
+- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-scope
+- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-scope
 
 ### Where that stands
 
-**T-6 — the tutor. MERGED to main (`ca71146`), resting at the `accept` gate.** Both machine
-reviews ran at FULL depth against the ticket's stale `risk: low` label (override + reason:
-`.autodev/evidence/T-6/review-depth-override.md`). Code review returned **11 findings**, security
-**1 HIGH / 2 MEDIUM / 4 LOW / 5 INFO** — every one confirmed by driving, none argued from source.
+**Every work ticket is complete. T-1…T-8 and T-11…T-13 have shipped; T-9, T-10 and T-14 are
+direction/deferred.**
 
-Fixed as **two named seams**, not a patch per entry point:
-- **`Outbound`** (`src/tutor/context.ts`) — what may reach a paid third party. Closed the HIGH:
-  a `shape` step's `target.file` is a chapter DIRECTORY, so the diff walked two whole trees,
-  ignoring `.gitignore`, and the learner's `.env` reached the prompt. Non-regular-file targets are
-  now refused *before* git is spawned. Hostile plan 19,906,863 → 112,823 chars.
-- **`AskLedger`** (`src/tutor/ask.ts`) — what stops a runaway billed request. Owns the live
-  request set, the validated deadline, the provider's launch directory, and the running cost.
+**T-8 (package and publish) MERGED at `d990a2a`** — the `.vsix` now carries the core, so the
+extension installs for someone with no repo-tour checkout beside them. It was 11 files with no
+`node_modules`; it is **152 files / 6.57 MB** with `repo-tour/dist`, `web-tree-sitter` and 36
+`.wasm` grammars. AC1 PROVEN on **both** VSCodium and a real VS Code 1.136.1. Full account:
+`.autodev/handoffs/T-8.md`.
 
-**737 unit + 61 vscode-test** (from 653 + 58). The HIGH was re-driven by the driver using the
-security reviewer's own harness rebuilt against the fix — `.autodev/evidence/T-6/high-finding-redriven.md`.
-`stepRenderKey`'s completeness proof was re-earned (4 new fields keyed, 16 new mutations).
+**NOTHING IS PUBLISHED AND NO REGISTRY TOKEN EXISTS.** The publish steps are dry-run only, and the
+script **refuses** when a credential is present unless two separately-sourced, version-bound
+confirmations are given. Publishing remains the owner's act.
 
-**NOTHING IS PUSHED.** main is ahead of `origin/main`; pushing is the owner's call.
+**`main` is 2 commits ahead of `origin/main`, and they are T-8's.** The push authorisation was
+scoped to T-12 and T-13 (pushed at `8bb1f5b`) and does not stretch to T-8 — **ask before pushing**.
 
-**T-12 (bug, risk:high) is new and LIVE ON MERGED MAIN** — `reproduceFiles` copies a reference
-repo's `.claude/settings.json`, `.mcp.json` and `.env` into the learner's folder with no name
-allowlist. It is the delivery half of T-5 security finding 3, which the record has said was
-FIXED since 2026-09-06. At `intake`.
+**T-9 (Mode A) and T-10 (divergence) are at `dir-scope`**, unblocked by the sponsor's decision form
+of 2026-09-07 23:42 UTC (GA-8). Mode A's acceptance criterion is now mechanical and lives in T-9's
+spec as **AC-A1**: same idea, answers differing at exactly one decision D → the steps downstream of
+D differ **and** the steps independent of D do not. T-1 §9 gained **criterion 3a** for it, and
+criterion 3 is now marked **(MODE B ONLY)**. What AC-A1 does *not* cover — whether the plan is any
+good — is stated at length rather than implied.
 
-**T-4, T-5 and T-11 are complete.** T-7 (the detour) and T-8 (publish) are at `plan`; T-9 and
-T-10 untouched at `dir-goals`.
+**T-14 (undo a divergence)** filed at `intake` as the sponsor's deferral, carrying the observation
+that undo and the deferred replan diff need the same substrate.
 
-- **T-12** (bug) — reproduceFiles copies a reference repo's agent config and secrets into the lear… — intake
-- **T-13** (bug) — realGit spawns git with no timeout — the last unbounded member of the cost-and-… — intake
+**Test baseline on `main`: 1248 unit + 75 vscode-test.** It was 479 + 50 when T-6 began.
+
+- **T-14** (feature) — Undo a divergence — return to the pre-divergence plan — intake
 
 ## Waiting on
 
@@ -84,6 +84,8 @@ T-10 untouched at `dir-goals`.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-09-07 **T-13 COMPLETE** — realGit spawns git with no timeout — the last unbounded member of the cost-and-…
+- 2026-09-07 **T-12 COMPLETE** — reproduceFiles copies a reference repo's agent config and secrets into the lear…
 - 2026-09-07 **T-7 COMPLETE** — The detour — an unrelated worked example, in real tabs, that leaves nothing beh…
 - 2026-09-07 **T-6 COMPLETE** — The tutor — sql-gauntlet's pattern through repo-tour's brain, one transcript pe…
 - 2026-09-06 **T-5 COMPLETE** — The dial — manual, scaffolded, automated — with the structural check and a comm…

@@ -3,11 +3,20 @@
 The living code map (regenerable, Aider repo-map pattern): modules, their
 exported symbols, and local import edges. LOCATE reads this first, then
 verifies against reality; BUILD regenerates it at close-out.
-Regenerate with `node ${CLAUDE_PLUGIN_ROOT}/scripts/code-map.mjs` — the AutoDev plugin's script;
-this repo carries no local copy of it, so a bare `node scripts/code-map.mjs` will not run. Do not hand-edit; changes
+Regenerate with `node scripts/code-map.mjs`. Do not hand-edit; changes
 will be overwritten.
 
 ## scripts/doctor-cli.mjs
+
+- Exports: (none)
+- Imports: (none)
+
+## scripts/package.mjs
+
+- Exports: (none)
+- Imports: (none)
+
+## scripts/publish.mjs
 
 - Exports: (none)
 - Imports: (none)
@@ -17,9 +26,14 @@ will be overwritten.
 - Exports: (none)
 - Imports: (none)
 
+## scripts/verify-install.mjs
+
+- Exports: (none)
+- Imports: (none)
+
 ## src/core.ts
 
-- Exports: CORE_MODULE_NAMES, loadAnyModule, loadCore, resolveCoreRoot
+- Exports: CORE_MODULE_NAMES, DEFAULT_REPO_TOUR_PATH, loadAnyModule, loadCore, resolveCoreRoot
 - Imports: (none)
 
 ## src/detour/narrator.ts
@@ -69,17 +83,32 @@ will be overwritten.
 
 ## src/dial/writer.ts
 
-- Exports: fileShape, isRefusal, planWrite, reproduceEntries, reproduceFiles, writeTextAtomic
+- Exports: deliverableEntries, fileShape, isRefusal, planWrite, reproduceEntries, reproduceFiles, withheldReason, writeTextAtomic
 - Imports: (none)
 
 ## src/doctor.ts
 
-- Exports: CLAUDE_ENV_VAR, formatReport, runDoctor
+- Exports: CLAUDE_ENV_VAR, EXPECTED_GRAMMARS, formatReport, runDoctor
 - Imports: (none)
 
 ## src/extension.ts
 
 - Exports: activate, deactivate, resumeOnActivate
+- Imports: (none)
+
+## src/publish/disclosure.ts
+
+- Exports: PATH_RULES, PUBLIC_IDENTITIES, REQUIRED_CONTENT, REQUIRED_GRAMMARS, SECRET_RULES, VACUOUS_NAME_SCAN_FLAG, certifyNameScan, checkArchive, checkContent, checkPaths, checkRequiredContent, isWordScannable, looksTextual, ownerNeedlesFrom, relativeToExtension
+- Imports: (none)
+
+## src/publish/index.ts
+
+- Exports: (none)
+- Imports: (none)
+
+## src/publish/plan.ts
+
+- Exports: ARTIFACT_PLACEHOLDER, CONFIRM_ENV_VAR, CONFIRM_FLAG, DRY_RUN_FLAG, PINNED_TOOL_VERSIONS, REGISTRIES, commandLine, decidePublish, describeDecision, expectedArtifactName, expectedConfirmation, quoteForShell
 - Imports: (none)
 
 ## src/skins.ts
@@ -89,7 +118,7 @@ will be overwritten.
 
 ## src/start/build.ts
 
-- Exports: buildDir, buildFromRequest, completionMessage, coreFor, costLine, detectUnsupportedLanguages, languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, realGit, resolveRepo, resumeIfMarked, writeJsonAtomic
+- Exports: GIT_KILL_GRACE_MS, GIT_TIMEOUT_MS, GitTimeoutError, buildDir, buildFromRequest, completionMessage, coreFor, costLine, detectUnsupportedLanguages, gitRunnerWith, gitTimedOut, gitTimeoutMs, languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, realGit, resolveRepo, resumeIfMarked, writeJsonAtomic
 - Imports: (none)
 
 ## src/start/panel.ts
@@ -119,7 +148,7 @@ will be overwritten.
 
 ## src/tutor/context.ts
 
-- Exports: MAX_CONTEXT_CHARS, MAX_DIFF_CHARS, MAX_DIFF_INPUT_BYTES, MAX_OPTIONS_SENT, MAX_OPTION_TEXT, MAX_PAGE_TEXT, MAX_PROMPT_TEXT, MAX_TURN_CHARS, NOT_ONE_FILE, NOT_TEXT_MESSAGE, NO_DIFFERENCE, NO_FILE_YET, Outbound, diffNote, optionsOmittedNote, renderOptionsText, textCutNote, tooBigToDiff, turnCutNote, tutorContext
+- Exports: DIFF_TIMED_OUT, MAX_CONTEXT_CHARS, MAX_DIFF_CHARS, MAX_DIFF_INPUT_BYTES, MAX_OPTIONS_SENT, MAX_OPTION_TEXT, MAX_PAGE_TEXT, MAX_PROMPT_TEXT, MAX_TURN_CHARS, NOT_ONE_FILE, NOT_TEXT_MESSAGE, NO_DIFFERENCE, NO_FILE_YET, Outbound, diffNote, optionsOmittedNote, renderOptionsText, textCutNote, tooBigToDiff, turnCutNote, tutorContext
 - Imports: (none)
 
 ## src/tutor/core.ts

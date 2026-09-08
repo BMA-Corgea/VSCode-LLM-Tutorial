@@ -9,6 +9,53 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A test that types the default is not testing the default (T-8)
+
+T-8 changed `buildTutorials.repoTourPath`'s shipped default from `'../repo-tour'` to `''`. That
+one character routed `resolveCoreRoot` through `require.resolve`, which **throws** where the old
+branch returned a reportable failure — so the **Doctor**, the one command whose entire job is to
+be useful when the core is missing, printed a raw Node stack. `README.md` promised on the same
+page that a misconfiguration is *"a report in plain sentences, never a stack trace"*.
+
+**1,212 tests were green over it.** Not because the coverage was thin — because **all ten call
+sites passed `'../repo-tour'` as a literal**. Every test exercised the value the tests had typed,
+so the shipped default was untested by construction, and changing it changed nothing any test
+could observe.
+
+> **A test that types the default is testing the literal, not the default. Read the shipped value
+> from where it ships.**
+
+The fix that mattered was not making `resolveCoreRoot` total — that repairs this instance. It was
+the new test reading `contributes.configuration.properties[…].default` **out of `package.json`**
+and never typing the string, plus collapsing four scattered copies into one exported constant with
+a test asserting it equals the manifest's. That is what stops the next change re-hiding it.
+
+The general form, which is bigger than defaults: **any value that exists in two places — a
+manifest and a constant, a schema and a validator, a config default and a fallback — is a place
+where a test can agree with the wrong copy.** Import the one that ships, or assert the copies are
+identical. This is the fourth costume the same failure wore in one run: a hand-enumerated mutation
+sweep proving the list rather than the property; a 972-line suite proving a property of a function
+nothing called; a "binary" exclusion that was really a NUL probe with a shipped `.js` hidden inside
+its count; and this.
+
+## A process that dies before it can speak looks exactly like one that ran clean (T-8)
+
+Verifying the packaged extension in real VS Code needed `--no-sandbox`. Without it that build dies
+**before writing a single line to its log** — while the CLI still exits **0**. Every signal a
+verification script reads says success: no error, no stack, clean exit, and an empty log that a
+"no errors found" grep is delighted by.
+
+This is the same failure as a timed-out `git rev-parse` read as *"you are not in a repository"*
+and an unset `$C` expanding to nothing — **an absent value read as a meaningful one** — but the
+absent thing here is *the entire output*, which is the hardest case to notice because there is no
+wrong value to catch, only nothing where something should be.
+
+> **A verification that concludes from the absence of bad news must first prove there was news.**
+
+Assert something POSITIVE was produced — a known line in the log, a nonzero byte count, an
+expected marker — before drawing any conclusion from what is missing. The T-8 review then asked
+the right follow-up, which is the reusable part: *what else in this repo concludes from silence?*
+
 ## Give the prose to someone who has not seen the predicate (T-12)
 
 T-12's fix stated its rule in prose above the code — deliberately, because the instruction was to
