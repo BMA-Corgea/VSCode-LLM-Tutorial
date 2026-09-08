@@ -13,8 +13,8 @@ here and found via the reference table below.
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-scope
-- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-scope
+- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-route
+- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-route
 
 ### Where that stands
 
