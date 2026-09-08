@@ -1,4 +1,8 @@
 node_modules/
+# Without this second line a node_modules SYMLINK slips past — `node_modules/` matches a
+# DIRECTORY only, and a worktree sharing deps via `ln -s` therefore commits a link that, once
+# merged back, replaces the real directory with one pointing at itself. Happened on T-15.
+node_modules
 dist/
 out/
 *.vsix
