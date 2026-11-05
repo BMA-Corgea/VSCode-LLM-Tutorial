@@ -56,7 +56,7 @@ import {
   MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT,
   MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE,
   NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE,
-  SHAPE_NOTE_MESSAGE, T10_BADGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
+  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, PREPARING_MESSAGE,
@@ -309,7 +309,7 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     assert.ok(!html.includes(FILE_MISSING_MESSAGE), 'and it does not claim a missing file');
   });
 
-  test('the alternatives are not selectable — nothing in the options list to select at all', () => {
+  test('every alternative is choosable — and the road the step is already on is not a control (T-21)', () => {
     const state = stateAt('st-4-symbol-render'); // three options: one taken, two alternatives
     const html = renderStepHtml(state, FAKE_SKINS);
     const list = optionsList(html);
@@ -320,11 +320,10 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
       assert.ok(list.includes(alt.label), `the alternative "${alt.label}" is still SHOWN`);
       assert.ok(list.includes(alt.consequence), 'with its consequence');
     }
-    assert.equal(occurrences(list, new RegExp(T10_BADGE, 'g')), alternatives.length, 'every alternative is badged, where the eye is');
-
-    // The guarantee itself: not a `disabled` attribute, which a later edit could drop by
-    // accident, but the absence of anything to click.
-    assert.ok(!/<button/i.test(list), 'no <button> anywhere inside the options list');
+    // T-21: one real control per alternative, carrying that alternative's own id — and NONE on the
+    // author's option, the road this step is on (a control that changes nothing is a dead one).
+    assert.equal(occurrences(list, /<button/g), alternatives.length, 'one control per alternative, and no more');
+    for (const alt of alternatives) assert.ok(list.includes(`data-option-id="${alt.id}">${CHOOSE_LABEL}</button>`), `"${alt.label}" is choosable`);
     assert.ok(!/<input/i.test(list), 'no <input> anywhere inside the options list');
 
     // …and page-wide, so a control cannot hide just outside the <ul>. The count is the point:
@@ -335,8 +334,8 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     // always") and so is on this one.
     assert.equal(
       occurrences(html, /<button/g),
-      6,
-      'Previous, Open the file, Check my work, Next, Ask, Show me an unrelated example — and nothing else',
+      8,
+      'Previous, Open the file, Check my work, Next, Ask, Show me an unrelated example, and the two Choose this instead (T-21) — nothing else',
     );
     assert.equal(occurrences(html, /<input/g), 3, 'the three dial radios — and nothing else');
     assert.equal(occurrences(html, /<textarea/g), 1, 'the tutor\'s box, and only it');
@@ -345,23 +344,23 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     // count, and none of them adds anything to the options list — the alternatives stay
     // unselectable whatever else the page grows.
     const withOffer = renderStepHtml(stateAt('st-4-symbol-render', { reproduce: { count: 3, done: false } }), FAKE_SKINS);
-    assert.equal(occurrences(withOffer, /<button/g), 7, 'the four actions, Copy them in, Ask, and the detour');
+    assert.equal(occurrences(withOffer, /<button/g), 9, 'the four actions, Copy them in, Ask, the detour, and the two choices');
     assert.equal(occurrences(withOffer, /<input/g), 3, 'and still only the dial radios');
-    assert.ok(!/<button/i.test(optionsList(withOffer)), 'and nothing selectable moved into the options list');
+    assert.equal(occurrences(optionsList(withOffer), /<button/g), 2, 'and nothing else moved into the options list');
 
     // While an ask is in flight the tutor SWAPS its control rather than adding one: *Ask* is
     // gone from the markup entirely and *Cancel* stands in its place, so the count does not
     // move and there is no pressable *Ask* on a page that already has a question with the
     // model (the same "never rendered beats disabled" argument the options list makes).
     const thinking = renderStepHtml(stateAt('st-4-symbol-render', { tutor: { thinking: true } }), FAKE_SKINS);
-    assert.equal(occurrences(thinking, /<button/g), 6, 'still six: Cancel took Ask\'s place, and the detour button is untouched');
+    assert.equal(occurrences(thinking, /<button/g), 8, 'still eight: Cancel took Ask\'s place, and the detour button is untouched');
 
     // T-7 swaps the same way, and the two swaps are independent: an example being written
     // takes the detour's own button away and puts its *Cancel* there, while *Ask* stays
     // exactly where it was. Six either way, which is the property — a page that grew a
     // control while another was in flight would be a page with two ways to spend money on it.
     const writing = renderStepHtml(stateAt('st-4-symbol-render', { detour: { generating: true } }), FAKE_SKINS);
-    assert.equal(occurrences(writing, /<button/g), 6, 'still six: the detour\'s Cancel took its own button\'s place');
+    assert.equal(occurrences(writing, /<button/g), 8, 'still eight: the detour\'s Cancel took its own button\'s place');
     const inDetour = renderStepHtml(
       stateAt('st-4-symbol-render', { detour: { generating: false, open: { stepId: 'st-4-symbol-render', title: 'Vending machine' } } }),
       FAKE_SKINS,
@@ -372,7 +371,7 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     // is the one state where a learner has an example in front of them and needs a way to ask
     // for a different one; without it the cache had no escape hatch at all. It says what it
     // costs, in `DETOUR_REGENERATE_HINT`, right under itself.
-    assert.equal(occurrences(inDetour, /<button/g), 7, 'Back to my build took the detour button\'s place, and Write a new example joined it');
+    assert.equal(occurrences(inDetour, /<button/g), 9, 'Back to my build took the detour button\'s place, and Write a new example joined it');
     assert.ok(inDetour.includes('id="btn-detour-regenerate"'), 'the regenerate control is really there');
     assert.ok(inDetour.includes(DETOUR_REGENERATE_HINT), 'and it says that it is not free');
 
@@ -382,10 +381,38 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
       stateAt('st-4-symbol-render', { detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'Vending machine' } } }),
       FAKE_SKINS,
     );
-    assert.equal(occurrences(elsewhere, /<button/g), 6, 'a detour open elsewhere offers the way out and nothing more');
+    assert.equal(occurrences(elsewhere, /<button/g), 8, 'a detour open elsewhere offers the way out and nothing more');
     assert.ok(!elsewhere.includes('id="btn-detour-regenerate"'));
     assert.ok(!thinking.includes('id="btn-tutor-ask"'), 'no Ask button anywhere while a question is in flight');
     assert.ok(thinking.includes('id="btn-tutor-cancel"'), 'and a Cancel that really exists');
+  });
+
+  test('the learner\'s road is the highlighted row, marked as theirs, with the line that says nothing else moved (T-21)', () => {
+    const state = stateAt('st-4-symbol-render');
+    const before = optionsList(renderStepHtml(state, FAKE_SKINS));
+    assert.ok(!before.includes(DIVERGED_NOTE), 'no divergence yet, no line');
+    state.step.decision.chosen = 'stream';
+    const list = optionsList(renderStepHtml(state, FAKE_SKINS) );
+    const rows = optionRows(renderStepHtml(state, FAKE_SKINS));
+    assert.deepEqual(rows.filter((r) => r.cls === 'option option-taken').map((r) => r.id), ['stream'], 'his choice is where the author\'s was');
+    assert.ok(list.includes(`<span class="badge badge-chosen">${CHOSEN_BADGE}</span>`), 'marked as his');
+    assert.ok(list.includes('data-option-id="author">'), 'the author\'s option is still there');
+    assert.ok(list.includes(`data-option-id="author">${CHOOSE_LABEL}</button>`), 'and choosable again — latest wins');
+    assert.ok(!list.includes(`data-option-id="stream">${CHOOSE_LABEL}</button>`), 'his own road is not a control');
+    assert.ok(renderStepHtml(state, FAKE_SKINS).includes(DIVERGED_NOTE), 'and the line says the rest of the walk has not changed');
+  });
+
+  test('a choice moves the repaint key — or the panel would never redraw it, and the press would be silent (T-15)', () => {
+    const state = stateAt('st-4-symbol-render');
+    const before = stepRenderKey(state, FAKE_SKINS);
+    state.step.decision.chosen = 'stream';
+    assert.notEqual(stepRenderKey(state, FAKE_SKINS), before);
+  });
+
+  test('a step with one option offers nothing to choose (AC6) — every real provider:none plan', () => {
+    const state = stateAt('st-1-shape-src');
+    assert.equal(state.step.decision.options.length, 1, 'the fixture step this test needs');
+    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), /<button/g), 0);
   });
 
   test('the dial renders exactly three radios with the step\'s own override checked', () => {
@@ -479,7 +506,7 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     const list = optionsList(renderStepHtml(state, FAKE_SKINS));
     assert.ok(list.includes(`<span class="badge badge-taken">${AUTHOR_BADGE}</span>`), 'the badge comes back');
     assert.ok(list.includes('Split the tokenizer into its own module'), 'beside the plan\'s own label');
-    assert.equal(occurrences(list, new RegExp(T10_BADGE, 'g')), 1, 'and the one alternative is still badged for T-10');
+    assert.equal(occurrences(list, new RegExp(CHOOSE_LABEL, 'g')), 1, 'and the one alternative is choosable (T-21)');
   });
 
   test('the page renders the question and all four actions AC2 names', () => {
@@ -729,8 +756,8 @@ suite('renderStepHtml — every plan lookup is TOTAL: no throw from a render nob
 suite("renderStepHtml — the author's choice is marked from `taken` OR `authorChoice` (code review, finding 6)", () => {
   test('a plan with no `taken` anywhere still marks exactly one option — the one authorChoice names', () => {
     // Version skew, or a hand-edited plan. Without the fallback nothing is marked, every
-    // option wears a "coming with T-10" badge, and AC2 is silently unmet on a page that
-    // otherwise looks perfectly fine.
+    // option is offered as if none were the author's, and AC2 is silently unmet on a page
+    // that otherwise looks perfectly fine.
     const state = stateAt('st-4-symbol-render');
     const options = state.step.decision.options;
     assert.equal(options.length, 3, 'the fixture step this test needs');
@@ -741,8 +768,8 @@ suite("renderStepHtml — the author's choice is marked from `taken` OR `authorC
     const marked = rows.filter((r) => r.cls === 'option option-taken');
     assert.equal(marked.length, 1, 'exactly one option is marked');
     assert.equal(marked[0]!.id, options[1]!.id, 'and it is the one the plan named');
-    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), new RegExp(T10_BADGE, 'g')), 2,
-      'the other two are still badged for T-10');
+    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), new RegExp(CHOOSE_LABEL, 'g')), 2,
+      'the other two are choosable (T-21)');
   });
 
   test('`taken` wins when the two fields disagree — one row marked, never two', () => {
@@ -764,7 +791,7 @@ suite("renderStepHtml — the author's choice is marked from `taken` OR `authorC
 
     const list = optionsList(renderStepHtml(state, FAKE_SKINS));
     assert.equal(occurrences(list, /option option-taken/g), 0, 'marking an arbitrary row would be a confident lie');
-    assert.equal(occurrences(list, new RegExp(T10_BADGE, 'g')), 3, 'so all three are honestly badged for T-10');
+    assert.equal(occurrences(list, new RegExp(CHOOSE_LABEL, 'g')), 3, 'so all three are honestly offered — none is marked as the road taken');
   });
 
   test('a non-string authorChoice marks nothing rather than matching an id that is also missing', () => {

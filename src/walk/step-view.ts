@@ -239,7 +239,12 @@ const DIAL_LABEL: Record<Dial, string> = {
 /** Exported for the same reason `CHECK_NOTE` and `IDEA_FIRST_MESSAGE` are: a test should
  *  assert the string this page actually uses, never a copy of it that can drift. */
 export const AUTHOR_BADGE = 'What the author did';
-export const T10_BADGE = 'coming with T-10';
+/** T-21: the learner's own road, once it differs from the author's. */
+export const CHOSEN_BADGE = 'Your choice';
+/** T-21: the control on every option that is not the road this step is on. */
+export const CHOOSE_LABEL = 'Choose this instead';
+/** T-21: the line that says a choice has changed nothing else yet (T-22 is the replan). */
+export const DIVERGED_NOTE = 'You chose a different road. The rest of the walk still follows the author \u2014 re-planning from your choice isn\u2019t built yet.';
 
 // ── the render caps (T-4 security review, finding 3) ───────────────────────────────────────
 // See the file header for the threat: `webview.html = ...` is synchronous on the extension
@@ -725,7 +730,7 @@ main, section, .option { min-width:0; }
  *     whose label was not a string, in a render nobody was listening to (security, finding 5).
  *     `planText`/`planId` make every read total.
  */
-function optionsHtml(options: OptionLike[], authorChoice: unknown): string {
+function optionsHtml(options: OptionLike[], authorChoice: unknown, chosen: unknown = null): string {
   const all = Array.isArray(options) ? options : [];
 
   // `taken` first — it is what every real plan carries, and what a learner's own future
@@ -748,28 +753,46 @@ function optionsHtml(options: OptionLike[], authorChoice: unknown): string {
   }
   const omitted = all.length - shown.length;
 
+  // T-21: the road this step is ON — the learner's choice when it names a shown option, else the
+  // author's. That row is the highlighted one ("his choice where the author's was"); every other
+  // option with a real id is choosable; nothing is choosable when there is nothing to choose.
+  const chosenId = planId(chosen);
+  const learnersIndex = chosenId === '' ? -1 : shown.findIndex((opt) => planId(opt?.id) === chosenId);
+  const onIndex = learnersIndex !== -1 ? learnersIndex : markedIndex;
+  const diverged = learnersIndex !== -1 && learnersIndex !== markedIndex;
+  const choosable = shown.length >= 2;
+
   const items = shown
     .map((opt, i) => {
       const isAuthors = i === markedIndex;
-      const cls = isAuthors ? 'option option-taken' : 'option option-alt';
+      const isOn = i === onIndex;
+      const cls = isOn ? 'option option-taken' : 'option option-alt';
       const label = planText(opt?.label);
+      const id = planId(opt?.id);
       // The badge is suppressed when it would only repeat the option's own label. That is
       // not a rare tidy-up: a plan built with no interpretation gives every step exactly one
       // option, labelled "What the author did" by repo-tour itself, so the badge said it
       // twice in a row on all 61 steps of the first real plan we rendered. The author's
       // choice is still marked — `.option-taken` carries the accent border and highlight —
       // and the badge comes back the moment a plan has options whose labels differ.
-      const badge = isAuthors
-        ? (label.trim().toLowerCase() === AUTHOR_BADGE.toLowerCase() ? '' : `<span class="badge badge-taken">${AUTHOR_BADGE}</span>`)
-        : `<span class="badge badge-t10">${T10_BADGE}</span>`;
-      return `<li class="${cls}" data-option-id="${escapeAttr(planId(opt?.id))}">${badge}<span class="option-label">${escapeHtml(label)}</span><p class="option-consequence">${escapeHtml(planText(opt?.consequence))}</p></li>`;
+      const authorBadge = isAuthors && label.trim().toLowerCase() !== AUTHOR_BADGE.toLowerCase()
+        ? `<span class="badge badge-taken">${AUTHOR_BADGE}</span>`
+        : '';
+      const chosenBadge = isOn && diverged ? `<span class="badge badge-chosen">${CHOSEN_BADGE}</span>` : '';
+      // A real control, and only where pressing it would change something: not on the road this
+      // step is already on, not on an option whose id the page could not name (T-15, honest controls).
+      const choose = choosable && !isOn && id !== ''
+        ? `<button type="button" class="btn option-choose" id="choose-${i}" data-option-id="${escapeAttr(id)}">${CHOOSE_LABEL}</button>`
+        : '';
+      return `<li class="${cls}" data-option-id="${escapeAttr(id)}">${authorBadge}${chosenBadge}<span class="option-label">${escapeHtml(label)}</span><p class="option-consequence">${escapeHtml(planText(opt?.consequence))}</p>${choose}</li>`;
     })
     .join('');
 
   const omittedNote = omitted > 0
     ? `<p class="options-omitted">${escapeHtml(optionsOmittedMessage(omitted))}</p>`
     : '';
-  return `<ul class="options">${items}</ul>${omittedNote}`;
+  const divergedNote = diverged ? `<p class="options-diverged" role="note">${escapeHtml(DIVERGED_NOTE)}</p>` : '';
+  return `<ul class="options">${items}</ul>${omittedNote}${divergedNote}`;
 }
 
 /** `NO_HISTORY_MESSAGE`, verbatim, when there is nothing to show — gated on `sha`, matching
@@ -1419,7 +1442,7 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
 
   <section>
     <h2>Options</h2>
-    ${optionsHtml(step.decision.options, step.decision.authorChoice)}
+    ${optionsHtml(step.decision.options, step.decision.authorChoice, step.decision.chosen)}
   </section>
 
   <section>
@@ -1533,6 +1556,14 @@ const CLIENT_SCRIPT = `
   on('btn-open', 'click', function () { post('step:open', {}); });
   on('btn-check', 'click', function () { post('step:check', {}); });
   on('btn-next', 'click', function () { post('step:next', {}); });
+  // T-21: one button per choosable option, ids choose-0 … choose-N; each posts its option's id,
+  // read from its own data attribute (an escaped attribute, never page-assembled markup).
+  for (var ci = 0; ci < ${MAX_OPTIONS_RENDERED}; ci++) {
+    (function (button) {
+      if (!button) { return; }
+      button.addEventListener('click', function () { post('step:choose', { optionId: button.getAttribute('data-option-id') }); });
+    })(document.getElementById('choose-' + ci));
+  }
   // Only on the page while the offer stands (see reproduceHtml); \`on\` is null-safe, so the
   // rest of the time this line hooks nothing rather than needing a condition of its own.
   on('btn-reproduce', 'click', function () { post('reproduce:run', {}); });
@@ -1827,6 +1858,7 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
       keyOf(option?.id), keyOf(option?.label), keyOf(option?.consequence), option?.taken,
     ]),
     keyOf(decision.authorChoice),
+    keyOf(decision.chosen), // T-21: a choice must repaint, or the press is silent
     keyOf(decision.why, MAX_PLAN_TEXT),
     decision.whySource,
     [keyOf(witness?.sha), keyOf(witness?.subject), keyOf(witness?.date)],
