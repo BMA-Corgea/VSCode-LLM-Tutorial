@@ -199,7 +199,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await press(page);
     await until(read, (s) => s.button === 'Building… [disabled]' && s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
     failing.end({ ok: false, reason: 'could not clone the reference repo' });
-    const failed = await until(read, (s) => s.button === 'Build the plan', 'a failed build gives the button back');
+    const failed = await until(read, (s) => s.button === 'Build the plan' && s.note !== SUBMIT_NOTES.building, 'a failed build gives the button back');
     assert.equal(failed.note, SUBMIT_NOTES.failed);
     assert.equal(failed.problems[1], 'could not clone the reference repo', 'and the reason is under Reference repo, as the note says');
     assert.equal(panel!.getStateForTest().building, false, 'the host must forget the build too, or a re-render brings "Building…" back');
@@ -244,7 +244,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await fill(page, validRequest());
     await until(read, (s) => s.problems.every((p) => p === ''), 'valid form');
     await press(page);
-    const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== '', 'a build that threw gives the button back');
+    const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== '' && s.note !== SUBMIT_NOTES.building, 'a build that threw gives the button back');
     assert.equal(ended.note, SUBMIT_NOTES.failed);
     assert.equal(ended.problems[1], 'EACCES: the target folder is read-only');
     await run;

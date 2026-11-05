@@ -137,10 +137,20 @@ function buildContextFor(
 function reportOutcome(outcome: BuildOutcome | undefined, fromStartScreen: boolean): void {
   // FIRST, and for every outcome: the start screen's button was disabled when the build started
   // and nothing else brings it back (T-15 review finding 2), and its note says how the build ended.
+  // Nothing here throws, so nothing below can be skipped by it.
   // `StartPanel.buildFinished` reaches whichever start screen is open NOW — never the one captured
   // when the build began, which the learner may have closed (that threw "Webview is disposed" here
   // and swallowed everything below it).
-  if (fromStartScreen) StartPanel.buildFinished(buildEnding(outcome));
+  if (fromStartScreen) {
+    // The reason first, then the ending: the note the ending writes points at the line under
+    // Reference repo, so that line must already say why. Posted the other way round, the page
+    // drew a frame with the note pointing at an empty line (driven 2026-11-05, a race the screen
+    // tests caught). Neither call can throw: both reach only the panel open NOW.
+    if (outcome && !outcome.ok && !outcome.cancelled) {
+      StartPanel.reportBuildProblem({ repo: outcome.reason ?? 'the build failed' });
+    }
+    StartPanel.buildFinished(buildEnding(outcome));
+  }
   if (!outcome) return;
   // Not awaited, any of them (T-15, 2026-11-05). A message without buttons settles only when the
   // person CLOSES it — so awaiting it inside `withProgress` kept "reading the repository…" and a
@@ -149,7 +159,6 @@ function reportOutcome(outcome: BuildOutcome | undefined, fromStartScreen: boole
   if (outcome.ok) {
     void vscode.window.showInformationMessage(`Build Tutorials: ${completionMessage(outcome.plan!, outcome.cost!)}`);
   } else if (!outcome.cancelled) {
-    if (fromStartScreen) StartPanel.reportBuildProblem({ repo: outcome.reason ?? 'the build failed' });
     void vscode.window.showErrorMessage(`Build Tutorials: ${outcome.reason ?? 'the build failed'}`);
   } else {
     void vscode.window.showInformationMessage(`Build Tutorials: ${outcome.reason ?? 'build cancelled'}`);
