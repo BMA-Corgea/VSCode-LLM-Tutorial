@@ -35,6 +35,9 @@ interface Pending {
 export interface Frame {
   sessionId: string;
   contextId: number;
+  /** The DevTools target (one per webview iframe). A test that disposes a panel passes its frame's
+   *  target to `webview(…, exclude)` so a lingering, torn-down frame is never read as the new one. */
+  targetId?: string;
 }
 
 /**
@@ -117,13 +120,13 @@ export class Screen {
    * (`webview.html = …`) replaces the frame, so call this again after one rather than reusing
    * an old `Frame`.
    */
-  async webview(title: string, timeoutMs = 15_000): Promise<Frame> {
+  async webview(title: string, timeoutMs = 15_000, exclude: ReadonlySet<string> = new Set()): Promise<Frame> {
     const deadline = Date.now() + timeoutMs;
     const seen: string[] = [];
     while (Date.now() < deadline) {
       const { targetInfos } = await this.send<{ targetInfos: Array<{ targetId: string; type: string; url: string }> }>('Target.getTargets');
       for (const target of targetInfos) {
-        if (target.type !== 'iframe' || !target.url.startsWith('vscode-webview://')) continue;
+        if (target.type !== 'iframe' || !target.url.startsWith('vscode-webview://') || exclude.has(target.targetId)) continue;
         let sessionId: string;
         try {
           sessionId = await this.session(target.targetId);
@@ -137,7 +140,7 @@ export class Screen {
             'Page.createIsolatedWorld', { frameId: frame.id, worldName: 'build-tutorials-screen' }, sessionId,
           ).catch(() => undefined);
           if (!world) continue;
-          const candidate: Frame = { sessionId, contextId: world.executionContextId };
+          const candidate: Frame = { sessionId, contextId: world.executionContextId, targetId: target.targetId };
           const found = await this.evaluate<string>(candidate, 'document.title').catch(() => '');
           if (found === title) return candidate;
           if (found) seen.push(found);
@@ -153,12 +156,43 @@ export class Screen {
     const { targetInfos } = await this.send<{ targetInfos: Array<{ targetId: string; type: string; url: string }> }>('Target.getTargets');
     const page = targetInfos.find((t) => t.type === 'page' && t.url.includes('workbench'));
     if (!page) throw new ScreenUnreadable(`no workbench page among ${targetInfos.length} DevTools targets`);
-    const sessionId = await this.session(page.targetId);
+    try {
+      return await this.worldIn(page.targetId);
+    } catch (err) {
+      if (!stale(err)) throw err;
+      this.sessions.delete(page.targetId); // the cached session died (seen under heavy load) — attach afresh, once
+      return this.worldIn(page.targetId);
+    }
+  }
+
+  private async worldIn(targetId: string): Promise<Frame> {
+    const sessionId = await this.session(targetId);
     const tree = await this.send<{ frameTree: FrameNode }>('Page.getFrameTree', {}, sessionId);
     const world = await this.send<{ executionContextId: number }>(
       'Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'build-tutorials-screen' }, sessionId,
     );
     return { sessionId, contextId: world.executionContextId };
+  }
+
+  /**
+   * A reader for the webview titled `title` that survives its frame being replaced: when a read
+   * fails because the session or the isolated world it used has gone (a re-render, an iframe the
+   * renderer moved, a session dropped under load), it finds the frame again and retries ONCE. Any
+   * other failure — and a second stale one — is thrown, never swallowed.
+   */
+  reader<T>(title: string, expression: string, first?: Frame, exclude: ReadonlySet<string> = new Set()): () => Promise<T> {
+    let frame = first;
+    return async () => {
+      frame ??= await this.webview(title, undefined, exclude);
+      try {
+        return await this.evaluate<T>(frame, expression);
+      } catch (err) {
+        if (!stale(err)) throw err;
+        for (const [targetId, sessionId] of this.sessions) if (sessionId === frame.sessionId) this.sessions.delete(targetId);
+        frame = await this.webview(title, undefined, exclude);
+        return this.evaluate<T>(frame, expression);
+      }
+    };
   }
 
   /** Evaluates `expression` in the frame's isolated world and returns its value (JSON-serialisable). */
@@ -216,6 +250,11 @@ interface FrameNode {
 
 function flatten(node: FrameNode): Array<{ id: string; url: string }> {
   return [node.frame, ...(node.childFrames ?? []).flatMap(flatten)];
+}
+
+/** The two ways a DevTools handle goes stale: its session detached, or its isolated world went with the frame. */
+function stale(err: unknown): boolean {
+  return err instanceof Error && /Session with given id not found|Cannot find context with specified id|No frame with given id/.test(err.message);
 }
 
 export function sleep(ms: number): Promise<void> {

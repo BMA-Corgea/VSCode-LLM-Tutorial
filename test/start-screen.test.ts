@@ -38,10 +38,11 @@ const SNAPSHOT = `(() => {
     button: btn.textContent + (btn.disabled ? ' [disabled]' : ''),
     note: q('submit-note').textContent,
     problems: ['idea', 'repo', 'target'].map((f) => q('problem-' + f).textContent),
+    fields: [q('repo').value, q('target').value],
     focus: document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '',
   };
 })()`;
-interface Snap { button: string; note: string; problems: string[]; focus: string }
+interface Snap { button: string; note: string; problems: string[]; fields: string[]; focus: string }
 
 async function getContext(): Promise<vscode.ExtensionContext> {
   const ext = vscode.extensions.getExtension<ExtensionApi>('bma-corgea.build-tutorials');
@@ -56,6 +57,10 @@ function tmpDir(prefix: string): string {
 function validRequest(): BuildRequest {
   return { idea: '', recreate: true, repo: tmpDir('screen-repo-'), target: tmpDir('screen-target-'), dial: 'manual' };
 }
+
+/** The valid form is on the page: both paths typed in, and no problem line showing. (Problems alone
+ *  would be vacuous — an untouched form shows none either.) */
+const filled = (s: Snap): boolean => s.fields.every((v) => v !== '') && s.problems.every((p) => p === '');
 
 /** A build body the test controls. `end` settles it; `isCancelled` sees the real Cancel button. */
 function heldBuild(): { build: (r: BuildRequest, ctx: BuildContext) => Promise<BuildOutcome>; end: (o: BuildOutcome) => void; started: () => number } {
@@ -87,6 +92,9 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   let core: CoreLoadResult;
   let skins: StartPanelDeps['skins'];
   let panel: StartPanel | undefined;
+  let frame: Frame | undefined;
+  /** Webview targets of panels this suite has disposed — never to be read as a live page again. */
+  const gone = new Set<string>();
   const unhandled: string[] = [];
   const onUnhandled = (reason: unknown): void => { unhandled.push(reason instanceof Error ? reason.message : String(reason)); };
 
@@ -110,6 +118,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   });
 
   teardown(async () => {
+    if (frame?.targetId) gone.add(frame.targetId);
     panel?.dispose();
     panel = undefined;
     StartPanel.buildFinished('cancelled'); // never let one test's build leak "running" into the next
@@ -117,17 +126,19 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   });
 
   async function open(onSubmit: (r: BuildRequest) => void): Promise<{ page: Frame; read: () => Promise<Snap> }> {
+    if (panel && frame?.targetId) gone.add(frame.targetId);
     panel = StartPanel.show(context, { skins, onSubmit });
-    const page = await screen.webview(TITLE);
-    return { page, read: () => screen.evaluate<Snap>(page, SNAPSHOT) };
+    const page = await screen.webview(TITLE, undefined, gone);
+    frame = page;
+    return { page, read: screen.reader<Snap>(TITLE, SNAPSHOT, page, gone) };
   }
 
-  const press = (page: Frame): Promise<unknown> => screen.evaluate(page, `document.getElementById('build-btn').click()`);
-  const fill = (page: Frame, r: BuildRequest): Promise<unknown> => screen.evaluate(page, `((r) => {
+  const press = (page: Frame): Promise<unknown> => screen.reader(TITLE, `document.getElementById('build-btn').click()`, page, gone)();
+  const fill = (page: Frame, r: BuildRequest): Promise<unknown> => screen.reader(TITLE, `((r) => {
     const q = (id) => document.getElementById(id);
     q('idea').value = r.idea; q('recreate').checked = r.recreate; q('repo').value = r.repo; q('target').value = r.target;
     q('start-form').dispatchEvent(new Event('change', { bubbles: true }));
-  })(${JSON.stringify(r)})`);
+  })(${JSON.stringify(r)})`, page, gone)();
 
   /**
    * Every notification not yet closed, read from the notification CENTRE (the bell's list). The
@@ -179,7 +190,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     let builds = 0;
     const { page, read } = await open(() => { builds += 1; });
     await fill(page, validRequest());
-    const ready = await until(read, (s) => s.problems.every((p) => p === ''), 'the valid form shows no problems');
+    const ready = await until(read, filled, 'the valid form shows no problems');
 
     // Two clicks in one instant: the second leaves the page before the first reply disables the button.
     await screen.evaluate(page, `(() => { const b = document.getElementById('build-btn'); b.click(); b.click(); })()`);
@@ -195,7 +206,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     const failing = heldBuild();
     const { page, read } = await open((r) => { void runBuild(context, core, r, failing.build); });
     await fill(page, validRequest());
-    await until(read, (s) => s.problems.every((p) => p === ''), 'valid form');
+    await until(read, filled, 'valid form');
     await press(page);
     await until(read, (s) => s.button === 'Building… [disabled]' && s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
     failing.end({ ok: false, reason: 'could not clone the reference repo' });
@@ -210,7 +221,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     const second = await open((r) => { void runBuild(context, core, r, cancelling.build); });
     assert.equal((await second.read()).button, 'Build the plan', 'a start screen opened after a build ended must be idle');
     await fill(second.page, validRequest());
-    await until(second.read, (s) => s.problems.every((p) => p === ''), 'valid form');
+    await until(second.read, filled, 'valid form');
     await press(second.page);
     await until(second.read, (s) => s.note === SUBMIT_NOTES.building, 'building');
     const deadline = Date.now() + 10_000;
@@ -228,7 +239,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     panel!.dispose();
     const third = await open((r) => { void runBuild(context, core, r, building.build); });
     await fill(third.page, validRequest());
-    await until(third.read, (s) => s.problems.every((p) => p === ''), 'valid form');
+    await until(third.read, filled, 'valid form');
     await press(third.page);
     await until(third.read, (s) => s.note === SUBMIT_NOTES.building, 'building');
     building.end({ ok: true, plan: { chapters: [], steps: [] }, cost: { metered: false, usd: 0, inputTokens: 0, outputTokens: 0 } });
@@ -242,7 +253,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     const throwing = (): Promise<BuildOutcome> => Promise.reject(new Error('EACCES: the target folder is read-only'));
     const { page, read } = await open((r) => { run = runBuild(context, core, r, throwing); });
     await fill(page, validRequest());
-    await until(read, (s) => s.problems.every((p) => p === ''), 'valid form');
+    await until(read, filled, 'valid form');
     await press(page);
     const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== '' && s.note !== SUBMIT_NOTES.building, 'a build that threw gives the button back');
     assert.equal(ended.note, SUBMIT_NOTES.failed);
@@ -251,7 +262,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     panel!.dispose();
     panel = StartPanel.show(context, { skins, onSubmit: () => undefined });
     const again = await screen.webview(TITLE);
-    assert.equal((await screen.evaluate<Snap>(again, SNAPSHOT)).button, 'Build the plan', 'a reopened screen must not be stuck building');
+    assert.equal((await screen.reader<Snap>(TITLE, SNAPSHOT, again)()).button, 'Build the plan', 'a reopened screen must not be stuck building');
     assert.deepEqual(unhandled, []);
   });
 
@@ -260,14 +271,14 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     let run: Promise<void> | undefined;
     const { page, read } = await open((r) => { run = runBuild(context, core, r, held.build); });
     await fill(page, validRequest());
-    await until(read, (s) => s.problems.every((p) => p === ''), 'valid form');
+    await until(read, filled, 'valid form');
     await press(page);
     await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
 
     panel!.dispose(); // the learner closes the tab while the build runs
     panel = StartPanel.show(context, { skins, onSubmit: () => { throw new Error('a reopened screen must not start a second build'); } });
     const reopened = await screen.webview(TITLE);
-    const readAgain = (): Promise<Snap> => screen.evaluate<Snap>(reopened, SNAPSHOT);
+    const readAgain = screen.reader<Snap>(TITLE, SNAPSHOT, reopened);
     const mid = await readAgain();
     assert.equal(mid.button, 'Building… [disabled]', 'a start screen opened mid-build offered a live button for a second build');
     assert.equal(mid.note, SUBMIT_NOTES.building);
@@ -292,7 +303,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     const request = validRequest();
     const { page, read } = await open((r) => { run = runBuild(context, core, r, held.build); });
     await fill(page, request);
-    await until(read, (s) => s.problems.every((p) => p === ''), 'valid form');
+    await until(read, filled, 'valid form');
     await press(page);
     await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
     assert.equal(context.workspaceState.get(BOOKMARK), request.target);
