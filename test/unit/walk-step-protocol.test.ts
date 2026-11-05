@@ -36,7 +36,7 @@ import * as assert from 'node:assert/strict';
 import { DIALS, type Dial } from '../../src/start/request.js';
 import { currentStep, setCurrent, stepDial } from '../../src/walk/model.js';
 import {
-  MAX_ASK_TEXT, NOTHING_TO_ASK_MESSAGE, askTooLongMessage, handleStepMessage, parseStepMessage,
+  MAX_ASK_TEXT, MAX_OPTION_ID, NOTHING_TO_ASK_MESSAGE, askTooLongMessage, handleStepMessage, parseStepMessage,
   type StepEffects, type StepViewState,
 } from '../../src/walk/step-protocol.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
@@ -47,6 +47,8 @@ interface Calls {
   runCheck: number;
   reproduce: number;
   persistDial: Array<[string, Dial]>;
+  /** T-21: every choice that reached the session, as [step id, option id]. */
+  choose: Array<[string, string]>;
   persistSkin: string[];
   /** T-6: every question that actually reached the session, exactly as it was handed over —
    *  which is how the two refusals below are proved to be refusals and not merely quiet. */
@@ -62,7 +64,7 @@ interface Calls {
 
 function noCalls(): Calls {
   return {
-    goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [],
+    goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], choose: [], persistSkin: [], ask: [],
     cancelAsk: 0, clearConversation: 0, startDetour: 0, regenerateDetour: 0, returnFromDetour: 0,
   };
 }
@@ -77,6 +79,7 @@ function fakeEffects(): { effects: StepEffects; calls: Calls } {
     runCheck: () => { calls.runCheck += 1; },
     reproduce: () => { calls.reproduce += 1; },
     persistDial: (stepId, dial) => { calls.persistDial.push([stepId, dial]); },
+    choose: (stepId, optionId) => { calls.choose.push([stepId, optionId]); },
     persistSkin: (name) => { calls.persistSkin.push(name); },
     // The one effect in this protocol that can spend money, and it is a recorder here like
     // every other — nothing in this suite has a provider anywhere near it.
@@ -262,6 +265,33 @@ suite('handleStepMessage — dial:set / skin:set (persist, reply with nothing)',
 });
 
 // ── the gate: nothing reaches handleStepMessage unparsed ────────────────────────────────────
+
+suite('step:choose — the learner takes a road (T-21)', () => {
+  test('a well-formed choice reaches the session for the HOST\'s current step, with nothing else', () => {
+    const { effects, calls } = fakeEffects();
+    const parsed = parseStepMessage({ type: 'step:choose', payload: { optionId: 'stream' } });
+    assert.deepEqual(parsed, { type: 'step:choose', payload: { optionId: 'stream' } });
+    const state = stateAt('st-4-symbol-render');
+    if (!parsed) throw new Error("a well-formed choice did not parse");
+    handleStepMessage(state, parsed, effects);
+    assert.deepEqual(calls.choose, [['st-4-symbol-render', 'stream']]);
+    assert.deepEqual({ ...calls, choose: [] }, NOTHING);
+  });
+
+  for (const [label, raw] of [
+    ['no payload', { type: 'step:choose' }],
+    ['an id that is not a string', { type: 'step:choose', payload: { optionId: 7 } }],
+    ['an empty id', { type: 'step:choose', payload: { optionId: '' } }],
+    ['an id longer than any key', { type: 'step:choose', payload: { optionId: 'x'.repeat(MAX_OPTION_ID + 1) } }],
+    ['a step id smuggled in beside it is dropped, never trusted', { type: 'step:choose', payload: { optionId: 'stream', stepId: 'st-1' } }],
+  ] as const) {
+    test(`${label}`, () => {
+      const parsed = parseStepMessage(raw);
+      if (label.startsWith('a step id')) assert.deepEqual(parsed, { type: 'step:choose', payload: { optionId: 'stream' } });
+      else assert.equal(parsed, null);
+    });
+  }
+});
 
 suite('parseStepMessage — malformed input is null, never a throw', () => {
   test('nothing at all, or the wrong kind of thing entirely', () => {

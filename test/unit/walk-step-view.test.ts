@@ -206,6 +206,7 @@ function recordingEffects(): { effects: StepEffects; asked: string[] } {
     regenerateDetour: () => undefined,
     returnFromDetour: () => undefined,
     persistDial: () => undefined,
+    choose: () => undefined,
     persistSkin: () => undefined,
     ask: (text) => { asked.push(text); },
     cancelAsk: () => undefined,

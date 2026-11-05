@@ -259,6 +259,11 @@ export type InboundMessage =
   | { type: 'step:check' }
   | { type: 'reproduce:run' }
   | { type: 'dial:set'; payload: { dial: Dial } }
+  // T-21: the learner takes a road. The option id IS a webview-supplied key — unlike the detour
+  // messages below, there is no way to say WHICH option without one — so it is bounded here and
+  // matched against the current step's real options by the session; the step is always the
+  // host's current one (`state.step.id`), never one named by the page.
+  | { type: 'step:choose'; payload: { optionId: string } }
   | { type: 'skin:set'; payload: { skin: string } }
   | { type: 'tutor:ask'; payload: { text: string } }
   | { type: 'tutor:cancel' }
@@ -292,6 +297,8 @@ export interface StepEffects {
    */
   reproduce(): void;
   persistDial(stepId: string, dial: Dial): void;
+  /** T-21: records the learner's choice at a step (`WalkSession.choose`). */
+  choose(stepId: string, optionId: string): void;
   persistSkin(name: string): void;
 
   // ── T-6: the tutor ────────────────────────────────────────────────────────────────────
@@ -396,6 +403,10 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
       effects.persistDial(state.step.id, message.payload.dial);
       return { state };
     }
+    case 'step:choose': {
+      effects.choose(state.step.id, message.payload.optionId);
+      return { state };
+    }
     case 'skin:set': {
       effects.persistSkin(message.payload.skin);
       return { state: { ...state, skin: message.payload.skin } };
@@ -473,8 +484,11 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
 
 // ── validating what actually arrives from the webview (mirrors src/start/protocol.ts) ──────
 
+/** The longest option id `step:choose` accepts (T-21) — ids are keys, and a key longer than this is not one a plan carries. */
+export const MAX_OPTION_ID = 256;
+
 const INBOUND_TYPES = [
-  'step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'dial:set', 'skin:set',
+  'step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'dial:set', 'step:choose', 'skin:set',
   'tutor:ask', 'tutor:cancel', 'tutor:clear',
   // T-7. Both are payload-less, and that is the design rather than an omission: WHICH step a
   // detour is for and WHICH one is open are the session's answers, and a payload here would
@@ -535,6 +549,14 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
       const dial = payload['dial'];
       if (typeof dial !== 'string' || !(DIALS as readonly string[]).includes(dial)) return null;
       return { type, payload: { dial: dial as Dial } };
+    }
+    case 'step:choose': {
+      const payload = raw['payload'];
+      if (!isRecord(payload)) return null;
+      const optionId = payload['optionId'];
+      // A KEY, bounded: non-empty, and no longer than any id a plan could sensibly carry.
+      if (typeof optionId !== 'string' || optionId.length === 0 || optionId.length > MAX_OPTION_ID) return null;
+      return { type, payload: { optionId } };
     }
     case 'skin:set': {
       const payload = raw['payload'];
