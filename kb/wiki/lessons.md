@@ -9,6 +9,36 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A defence that makes a defect harmless also makes it invisible to the tests (T-17)
+
+Twice in one build, a test passed against the exact defect it was named for. Both were caught
+only because each new pin was broken by hand and the failures counted
+(`.autodev/evidence/T-17/red-checks.md`):
+
+- **A refactor "kept the tests green".** The detour's path rule was hoisted into a shared function
+  that takes the folder's name as an argument. Passing the WRONG name left all 271 detour tests
+  green, because they match refusals loosely (`/deep/i`, `/longer than/i`). "Green after a
+  refactor" proved only what those tests pinned, and the wording was not among it.
+- **A cache that kept garbage looked identical to one that did not.** The rule is "only a reply
+  that parsed is cached". The mutant cached every reply before parsing it, and **nothing failed**:
+  every cached reply is re-parsed on the way back in, so a cached bad reply is refused there and
+  the next call happens anyway. The defence (re-parse every cached read) made the defect harmless,
+  and harmless is exactly what a behaviour test cannot see. The claim had to be pinned where it
+  lives, by asserting that nothing is on disk after a refused reply.
+
+> **When one safeguard covers for another, a test of the behaviour cannot tell whether the second
+> safeguard exists. Pin each claim at the place it is true.**
+
+The trap is that the first green is honest. Nothing about reading the test says it would miss the
+defect: it only misses it because something else catches the defect first. Stacked defences are
+right — two halves of containment, a parser behind a cache. But each half needs its own pin, or
+the day the covering half is loosened, both go at once and the suite notices neither.
+
+Tooling note from the same build: the file-writing tool turned the escapes ` ` and ` `
+into the raw characters, and a raw U+2028 ends a JavaScript line. It broke a regex mid-literal.
+`String.fromCharCode(0x2028)` writes the same value with no escape for a tool to "helpfully"
+decode. Check new files with `grep -cP "\x{2028}|\x{2029}"`.
+
 ## A test that types the default is not testing the default (T-8)
 
 T-8 changed `buildTutorials.repoTourPath`'s shipped default from `'../repo-tour'` to `''`. That
