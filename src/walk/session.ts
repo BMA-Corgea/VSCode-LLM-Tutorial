@@ -219,6 +219,8 @@ import {
   // to work that out from scratch.
   markDone as markDoneIn,
   setDial as setDialIn,
+  setChosen as setChosenIn,
+  withChosen,
   type PlanLike,
   type Progress,
   type StepLike,
@@ -239,6 +241,11 @@ import { resolveInsideTarget } from './paths.js';
  * coherent (merely stale) picture — which is exactly what makes the panel's "did the step
  * actually change?" comparison against its previous view meaningful.
  */
+/** What the panel says when a choice names no option of the step (T-21) — a stale or forged page. */
+export const CHOICE_NOT_AN_OPTION = 'That is not one of this step\u2019s options, so nothing was recorded.';
+/** What the panel says when the road pressed is the one already taken (T-21, T-15). */
+export const CHOICE_ALREADY_TAKEN = 'That is already the road this step is on.';
+
 export interface WalkView {
   plan: PlanLike;
   progress: Progress;
@@ -771,6 +778,33 @@ export class WalkSession {
     }
     this.commit(false);
     if (current) this.enterCurrentStep();
+  }
+
+  /**
+   * The learner takes a road at a step — the Current Step panel's *Choose this instead* (T-21,
+   * T-10 E1). Recorded in progress, shown on the plan (`withChosen`), and NOTHING ELSE changes:
+   * re-deriving the rest of the walk from it is T-22's. Latest wins until then; choosing the
+   * author's option returns to the author's road.
+   *
+   * `optionId` came from a webview and is only a KEY: it is matched against the step's real
+   * options, and one that names none of them writes nothing and says so — as does choosing the
+   * road already taken, so a press always changes something on screen (T-15).
+   */
+  choose(stepId: string, optionId: string): void {
+    if (this.disposed || !this.hasStep(stepId)) return;
+    const step = withChosen(this.plan, this.progress).steps.find((s) => s.id === stepId);
+    const options = Array.isArray(step?.decision?.options) ? step.decision.options : [];
+    if (!options.some((option) => option?.id === optionId)) {
+      this.noteFor(stepId, CHOICE_NOT_AN_OPTION);
+      return;
+    }
+    const taken = step?.decision.chosen ?? step?.decision.authorChoice;
+    if (taken === optionId) {
+      this.noteFor(stepId, CHOICE_ALREADY_TAKEN);
+      return;
+    }
+    this.progress = setChosenIn(this.progress, stepId, optionId);
+    this.commit(false);
   }
 
   /**
@@ -2343,7 +2377,10 @@ export class WalkSession {
   }
 
   private buildView(): WalkView | undefined {
-    const step = currentStep(this.plan, this.progress);
+    // The plan every surface is shown carries the learner's choices (T-21) — overlaid here, in
+    // ONE place, onto a new plan object; `this.plan` stays exactly what repo-tour wrote.
+    const shown = withChosen(this.plan, this.progress);
+    const step = currentStep(shown, this.progress);
     if (!step) return undefined;
     // `resolveInsideTarget`, NOT `path.join` — security review finding 2, argued in full in
     // `./paths.ts`. `path.join('/home/you/repo', '../../../.ssh/id_rsa')` is a perfectly real
@@ -2365,7 +2402,7 @@ export class WalkSession {
     const reproducible = deliverableEntries(this.plan).length;
     const check = this.checks.get(step.id);
     return {
-      plan: this.plan,
+      plan: shown,
       progress: this.progress,
       step,
       fileExists: absPath !== null && this.adapters.fileExists(absPath),

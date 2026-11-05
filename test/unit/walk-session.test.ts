@@ -72,7 +72,7 @@ import {
 } from '../../src/walk/model.js';
 import type { AskMessage, Availability, LlmReply, TutorCore } from '../../src/tutor/core.js';
 import { getTranscript } from '../../src/tutor/transcript.js';
-import { WalkSession, type WalkAdapters, type WalkView } from '../../src/walk/session.js';
+import { CHOICE_ALREADY_TAKEN, CHOICE_NOT_AN_OPTION, WalkSession, type WalkAdapters, type WalkView } from '../../src/walk/session.js';
 import { fixturePlan, fixtureProgress, writeFixtureTarget } from './walk-fixtures.js';
 
 /** The in-memory target: nothing under it exists, so `readText` answers `undefined` for every
@@ -763,6 +763,77 @@ suite('next / prev — and the two ends of the plan (AC2)', () => {
 
     assert.deepEqual(fake.log, []);
     assert.equal(session.getView()?.step.id, 'st-1-shape-src');
+  });
+});
+
+suite('choose — the learner takes a road at a step (T-21, T-10 E1)', () => {
+  const STEP = 'st-4-symbol-render';
+
+  test('a real alternative is recorded, pushed on the plan as decision.chosen, and nothing else moves', () => {
+    const { session, fake } = opened();
+    session.goTo(STEP);
+    fake.clearLog();
+    session.choose(STEP, 'stream');
+
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, 'stream', 'the choice is recorded in progress.json');
+    const view = pick(fake, 'setPanel').at(-1)?.view;
+    const step = view?.plan.steps.find((s) => s.id === STEP);
+    assert.equal(step?.decision.chosen, 'stream', 'the plan the panel is handed shows the learner\'s road');
+    assert.equal(step?.decision.authorChoice, 'author', 'and the author\'s road is still the author\'s');
+    assert.deepEqual(step?.decision.options.map((o) => o.taken), [true, false, false]);
+    assert.deepEqual(view?.plan.steps.map((s) => s.id), fixturePlan().steps.map((s) => s.id), 'the walk itself did not change');
+    assert.deepEqual(pick(fake, 'revealEditor'), [], 'a choice moves nothing in the editor');
+  });
+
+  test('latest wins, and the author\'s option returns to the author\'s road', () => {
+    const { session, fake } = opened();
+    session.goTo(STEP);
+    fake.clearLog();
+    session.choose(STEP, 'stream');
+    session.choose(STEP, 'template-string');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, 'template-string');
+    session.choose(STEP, 'author');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, 'author');
+  });
+
+  test('an id that is not one of the step\'s options writes nothing and SAYS so (the page is a stale or forged one)', () => {
+    const { session, fake, plan } = opened();
+    session.goTo(STEP);
+    fake.clearLog();
+    session.choose(STEP, 'an-option-nobody-offered');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined, 'a forged id must never reach progress.json');
+    void plan;
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.writeNote, CHOICE_NOT_AN_OPTION, 'and the press is answered in words');
+  });
+
+  test('pressing the road already taken writes nothing and is answered in words (T-15)', () => {
+    const { session, fake, plan } = opened();
+    session.goTo(STEP);
+    fake.clearLog();
+    session.choose(STEP, 'author'); // nothing chosen yet: the author's road is the one this step is on
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined);
+    void plan;
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.writeNote, CHOICE_ALREADY_TAKEN);
+  });
+
+  test('an unknown step is ignored entirely, like setDial', () => {
+    const { session, fake, plan } = opened();
+    session.choose('st-99-from-the-old-plan', 'stream');
+    assert.deepEqual(fake.log, []);
+    assert.deepEqual(fake.stored(), fixtureProgress(plan));
+  });
+
+  test('the reload drill: a session opened fresh on the same store shows the same choice', () => {
+    const { session, fake } = opened();
+    session.goTo(STEP);
+    fake.clearLog();
+    session.choose(STEP, 'stream');
+    const saved = fake.stored()!;
+    session.dispose();
+    const again = opened({ progress: saved });
+    again.session.goTo(STEP);
+    const step = pick(again.fake, 'setPanel').at(-1)?.view?.plan.steps.find((s) => s.id === STEP);
+    assert.equal(step?.decision.chosen, 'stream', 'a reload forgot the learner\'s road');
   });
 });
 
