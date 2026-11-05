@@ -7,7 +7,10 @@ import globals from 'globals';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'out/**', '.vscode-test/**', '.scratch/**', 'node_modules/**', '*.vsix'],
+    // .autodev/ and kb/days/ are the local factory ledger and day pages: untracked by design
+    // (autodev/instructions/public-repo.md), so they exist only in the main checkout, never in a
+    // worktree or a clone, and their working files are not this project's source.
+    ignores: ['dist/**', 'out/**', '.vscode-test/**', '.scratch/**', 'node_modules/**', '*.vsix', '.autodev/**', 'kb/days/**'],
   },
   js.configs.recommended,
   {
