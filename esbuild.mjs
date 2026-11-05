@@ -106,6 +106,12 @@ const builds = [
     outfile: 'dist/test/screen/start-screen.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
   },
+  {
+    ...shared,
+    entryPoints: ['test/step-screen.test.ts'],
+    outfile: 'dist/test/screen/step-screen.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
   ...(unitEntryPoints.length > 0
     ? [
         {
