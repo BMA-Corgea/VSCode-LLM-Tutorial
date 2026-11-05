@@ -22,7 +22,7 @@ function tmpEmptyDir(): string {
 }
 
 function freshState(overrides: Partial<PanelState> = {}): PanelState {
-  return { request: emptyRequest(), problems: {}, skin: 'system', building: false, ...overrides };
+  return { request: emptyRequest(), problems: {}, skin: 'system', building: false, refusedInARow: 0, ...overrides };
 }
 
 function fakeEffects(overrides: Partial<StartEffects> = {}): StartEffects & { submitted: BuildRequest[]; persisted: string[] } {
@@ -82,6 +82,40 @@ suite('handleStartMessage — form:submit (AC1 protocol test)', () => {
     assert.deepEqual(result.state.problems, {}, 'a valid submit must leave no problems behind');
     assert.equal(result.state.building, true, 'and must record that a build is in flight');
     assert.deepEqual(effects.submitted, [request]);
+  });
+});
+
+suite('handleStartMessage — a press always says something new (T-15, 2026-11-05)', () => {
+  const BAD: BuildRequest = { ...emptyRequest(), recreate: true, repo: '' };
+
+  test('a refusal repeated with nothing edited replies with a DIFFERENT message (review finding 3)', async () => {
+    const effects = fakeEffects();
+    const one = await handleStartMessage(freshState(), { type: 'form:submit', payload: { request: BAD } }, effects);
+    const two = await handleStartMessage(one.state, { type: 'form:submit', payload: { request: BAD } }, effects);
+    assert.notDeepEqual(two.post, one.post, 'the second refusal was byte-identical to the first — a press nobody can see');
+    assert.equal(one.post?.type === 'form:rejected' ? one.post.payload.inARow : undefined, 1);
+    assert.equal(two.post?.type === 'form:rejected' ? two.post.payload.inARow : undefined, 2);
+  });
+
+  test('an edit or a folder pick resets the count — the note was cleared by the edit already', async () => {
+    const effects = fakeEffects({ pickFolder: () => Promise.resolve(tmpEmptyDir()) });
+    const one = await handleStartMessage(freshState(), { type: 'form:submit', payload: { request: BAD } }, effects);
+    const edited = await handleStartMessage(one.state, { type: 'form:changed', payload: { request: BAD } }, effects);
+    const again = await handleStartMessage(edited.state, { type: 'form:submit', payload: { request: BAD } }, effects);
+    assert.equal(again.post?.type === 'form:rejected' ? again.post.payload.inARow : undefined, 1);
+    const picked = await handleStartMessage(again.state, { type: 'pick:target' }, effects);
+    assert.equal(picked.state.refusedInARow, 0);
+  });
+
+  test('a press while a build is running starts NOTHING and replies form:busy (a double-click)', async () => {
+    const effects = fakeEffects();
+    const request: BuildRequest = { idea: '', recreate: true, repo: tmpEmptyDir(), target: tmpEmptyDir(), dial: 'manual' };
+    const first = await handleStartMessage(freshState(), { type: 'form:submit', payload: { request } }, effects);
+    assert.deepEqual(first.post, { type: 'form:accepted' });
+    const second = await handleStartMessage(first.state, { type: 'form:submit', payload: { request } }, effects);
+    assert.deepEqual(second.post, { type: 'form:busy' });
+    assert.equal(effects.submitted.length, 1, 'two presses in one instant started two builds of the same target');
+    assert.equal(second.state.building, true);
   });
 });
 

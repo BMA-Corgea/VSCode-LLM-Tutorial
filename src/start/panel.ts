@@ -16,7 +16,8 @@ import * as vscode from 'vscode';
 import { readSkin, writeSkin } from '../skins.js';
 import { emptyRequest, type BuildRequest, type RequestField } from './request.js';
 import {
-  handleStartMessage, parseInboundMessage, type OutboundMessage, type PanelState, type PickTarget, type StartEffects,
+  handleStartMessage, parseInboundMessage, type BuildEnding, type OutboundMessage, type PanelState, type PickTarget,
+  type StartEffects,
 } from './protocol.js';
 import { renderStartHtml, type SkinsModule } from './view.js';
 
@@ -46,6 +47,13 @@ export interface StartPanelDeps {
 
 export class StartPanel {
   private static current: StartPanel | undefined;
+  /**
+   * A build started from the start screen is running (T-15). WINDOW-wide, not per panel: the tab
+   * can be closed and reopened while a build runs, and a fresh panel that believed nothing was
+   * running offered a live button for a second build of the same target. Set when a press is
+   * accepted; cleared by `buildFinished`.
+   */
+  private static running = false;
 
   private readonly panel: vscode.WebviewPanel;
   private readonly effects: StartEffects;
@@ -55,7 +63,7 @@ export class StartPanel {
 
   private constructor(context: vscode.ExtensionContext, private readonly deps: StartPanelDeps) {
     const skin = readSkin(context.globalState, deps.skins.DEFAULT_SKIN);
-    this.state = { request: emptyRequest(), problems: {}, skin, building: false };
+    this.state = { request: emptyRequest(), problems: {}, skin, building: StartPanel.running, refusedInARow: 0 };
 
     this.effects = {
       pickFolder: async (which: PickTarget) => {
@@ -126,18 +134,32 @@ export class StartPanel {
   }
 
   /**
-   * The build ended — however it ended (T-15 review finding 2).
+   * The build ended — however it ended (T-15 review finding 2) — and the note says how.
    *
    * Called for EVERY outcome, including a failure and a cancel, because the button was disabled
    * on submit and nothing else brings it back. A cancel posts nothing else at all, so without
-   * this the only way out of a dead "Building…" button was to switch tabs and back — which no
-   * user has a reason to try.
+   * this the only way out of a dead "Building…" button was to switch tabs and back.
+   *
+   * STATIC, and it reaches the panel that is open NOW (T-15, 2026-11-05). The September version was
+   * an instance method on the panel captured when the build started; if the learner closed that tab
+   * mid-build, `this.panel.webview` threw "Webview is disposed" from inside `reportOutcome`, and the
+   * build's ending — the error, the completion, opening the walk — was swallowed whole. `current`
+   * is cleared on dispose, so it is never a disposed panel; with no start screen open, this is a
+   * no-op and returns `undefined`.
    */
-  buildFinished(): OutboundMessage {
-    this.state = { ...this.state, building: false };
-    const post: OutboundMessage = { type: 'form:idle' };
-    void this.panel.webview.postMessage(post);
+  static buildFinished(ended: BuildEnding): OutboundMessage | undefined {
+    StartPanel.running = false;
+    const open = StartPanel.current;
+    if (!open) return undefined;
+    open.state = { ...open.state, building: false, refusedInARow: 0 };
+    const post: OutboundMessage = { type: 'form:idle', payload: { ended } };
+    void open.panel.webview.postMessage(post);
     return post;
+  }
+
+  /** `reportProblem` on the start screen that is open now, if any — never a disposed one (see `buildFinished`). */
+  static reportBuildProblem(problems: Partial<Record<RequestField, string>>): OutboundMessage | undefined {
+    return StartPanel.current?.reportProblem(problems);
   }
 
   private render(): void {
@@ -166,6 +188,7 @@ export class StartPanel {
     }
     const { state, post } = await handleStartMessage(this.state, message, this.effects);
     this.state = state;
+    if (state.building) StartPanel.running = true;
     if (post) void this.panel.webview.postMessage(post);
     return post;
   }

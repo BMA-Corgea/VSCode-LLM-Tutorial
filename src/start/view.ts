@@ -31,6 +31,19 @@ const DIAL_LABEL: Record<Dial, string> = {
   automated: 'Watch me build it',
 };
 
+/**
+ * What the note under the button says once a press has been accepted, and after each way a build
+ * can end (T-15). One table, read by the markup (a re-render mid-build) and by the client script,
+ * so the two can never say different things about the same state.
+ */
+export const SUBMIT_NOTES = {
+  building: 'Building the plan — its progress and a Cancel button are in the notification in the corner.',
+  busy: 'Already building — one build at a time. Its progress and Cancel are in the corner.',
+  built: 'Done — the plan is built.',
+  failed: 'The build failed — the reason is under Reference repo.',
+  cancelled: 'Build cancelled.',
+} as const;
+
 const PAGE_CSS = `
 .start-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
 .start-head h1 { font-size:16px; margin:0; }
@@ -47,6 +60,10 @@ main { max-width:640px; margin:0 auto; padding:20px 24px 40px; }
 fieldset.dial { border:1px solid var(--line); border-radius:var(--radius); padding:10px 14px; margin:0 0 20px; }
 fieldset.dial legend { font-weight:600; padding:0 4px; }
 fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6px 18px 2px 0; font-weight:400; }
+/* T-15: the note under the button is NOT a problem line. Only a refusal or a failure takes the
+   validation colour; "building" or "done" in the error colour reads as an error. */
+.submit-note { font-size:12px; margin-top:8px; min-height:14px; }
+.submit-note[data-kind="rejected"], .submit-note[data-kind="failed"] { color:var(--kw); }
 `;
 
 function problemDiv(field: 'idea' | 'repo' | 'target', message: string | undefined): string {
@@ -103,13 +120,11 @@ function bodyHtml(state: PanelState, skins: SkinsModule): string {
     <button type="submit" class="btn primary" id="build-btn"${state.building ? ' disabled' : ''}>${state.building ? 'Building…' : 'Build the plan'}</button>
     <!-- T-15. One line, BELOW the button, empty until a press. It exists because the problem
          lines under each field are already on screen before the button is touched, so they
-         cannot also be the ANSWER to pressing it.
-         It carries a press ordinal in data-press, because the words alone are not enough: two
-         identical refused presses would otherwise write the same sentence over itself. What is
-         guaranteed to differ across a press is this element — its text, or failing that its
-         ordinal — plus the button on the accepted path. The build's own progress notification
-         appears in the corner, not here, which is why the accepted path needs this too. -->
-    <p class="problem" id="submit-note" role="status" aria-live="polite" data-press="0">${state.building ? 'Starting the build…' : ''}</p>
+         cannot also be the ANSWER to pressing it. Every press changes its WORDS: a refusal names
+         what to fix, a repeated refusal says "Still" and how many times, an accepted press says
+         the build is running and where its progress is, and the end of a build says how it
+         ended. The build's own progress notification is in the corner, not here. -->
+    <p class="submit-note" id="submit-note" role="status" aria-live="polite" data-kind="${state.building ? 'building' : ''}">${state.building ? escapeHtml(SUBMIT_NOTES.building) : ''}</p>
   </form>
 </main>`;
 }
@@ -148,18 +163,39 @@ const CLIENT_SCRIPT = `
     });
   }
 
-  // T-15, and review finding 3. Cleared on every edit so the NEXT press is observable — but the
-  // words alone are not enough. Press Enter in the field this fix's own focus move just landed
-  // you in and no change event fires, so the note is never cleared and the same sentence is
-  // written over itself: byte-identical, which is the defect again one keystroke later. The
-  // ordinal makes every press differ whether or not the words do.
-  var presses = 0;
-  function setNote(text, counts) {
+  // T-15. The note under the button, and what it says for each state. Cleared on every edit so the
+  // NEXT press is a change on its own — except while a build runs, when the note is the only line
+  // on this page saying so. A refusal repeated with nothing edited between (Enter in the field the
+  // focus move just landed you in fires no change event) says "Still …" and how many times, so its
+  // WORDS differ: September's fix moved an invisible data-press attribute instead, and a person
+  // pressing twice saw nothing change at all (review finding 3, re-driven 2026-11-05).
+  var NOTES = ${JSON.stringify(SUBMIT_NOTES)};
+  var FIELD_NAMES = { idea: 'the idea', repo: 'the reference repo', target: 'the folder to build in' };
+  var buildBtn = document.getElementById('build-btn');
+  var building = !!(buildBtn && buildBtn.disabled);
+
+  function setNote(kind, text) {
     var el = document.getElementById('submit-note');
     if (!el) { return; }
     el.textContent = text || '';
-    if (counts) { presses += 1; }
-    el.setAttribute('data-press', String(text ? presses : 0));
+    el.setAttribute('data-kind', text ? kind : '');
+  }
+
+  function refusal(problems, inARow) {
+    var names = ['idea', 'repo', 'target'].filter(function (f) { return problems && problems[f]; })
+      .map(function (f) { return FIELD_NAMES[f]; });
+    var what = names.length === 0 ? 'the form'
+      : names.length === 1 ? names[0]
+      : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+    return inARow > 1
+      ? 'Still can\u2019t build \u2014 fix ' + what + '. Tried ' + inARow + ' times.'
+      : 'Can\u2019t build yet \u2014 fix ' + what + '.';
+  }
+
+  function setBuilding(on) {
+    building = on;
+    var btn = document.getElementById('build-btn');
+    if (btn) { btn.disabled = on; btn.textContent = on ? 'Building\u2026' : 'Build the plan'; }
   }
 
   function firstProblemField(problems) {
@@ -173,7 +209,7 @@ const CLIENT_SCRIPT = `
   form.addEventListener('change', function () {
     var request = currentRequest();
     save({ request: request });
-    setNote('', false);
+    if (!building) { setNote('', ''); }
     post('form:changed', { request: request });
   });
 
@@ -203,36 +239,38 @@ const CLIENT_SCRIPT = `
     if (msg.type === 'form:problems') {
       showProblems(msg.payload.problems);
     } else if (msg.type === 'form:rejected') {
-      // The note first, then focus. Both change; the note is the one a test can see and the one
-      // that survives the button already having focus.
+      // The note first, then focus. Both change; the note is the one that survives the field
+      // already having focus.
       showProblems(msg.payload.problems);
-      setNote(msg.payload.count === 1
-        ? 'One thing needs fixing before this can build.'
-        : msg.payload.count + ' things need fixing before this can build.', true);
+      setNote('rejected', refusal(msg.payload.problems, msg.payload.inARow));
       var target = firstProblemField(msg.payload.problems);
       if (target && target.focus) { target.focus(); }
     } else if (msg.type === 'form:accepted') {
       // The build is real from here. The button goes quiet because pressing it again would
       // start a second one, and the note says so on the surface the reader is looking at —
       // the progress notification appears in the corner, not in this panel.
-      setNote('Starting the build…', true);
-      var btn = document.getElementById('build-btn');
-      if (btn) { btn.disabled = true; btn.textContent = 'Building…'; }
+      setBuilding(true);
+      setNote('building', NOTES.building);
+    } else if (msg.type === 'form:busy') {
+      // A press that arrived while the build was already running (the second click of a
+      // double-click). It started nothing, and the note says so rather than staying silent.
+      setBuilding(true);
+      setNote('busy', NOTES.busy);
     } else if (msg.type === 'form:idle') {
-      // Every build ends, including the failed and cancelled ones. Without this the button that
-      // was disabled on submit stayed disabled reading "Building…" beside a note still claiming
-      // the build was starting — a dead control with a false explanation, which is the family
-      // this whole ticket was filed about.
-      setNote('', false);
-      var doneBtn = document.getElementById('build-btn');
-      if (doneBtn) { doneBtn.disabled = false; doneBtn.textContent = 'Build the plan'; }
+      // Every build ends, including the failed and cancelled ones: the button comes back and the
+      // note says HOW it ended. A button that silently re-enables after a failure looks exactly
+      // like one that was never pressed.
+      setBuilding(false);
+      var ended = msg.payload && msg.payload.ended;
+      var said = (ended === 'built' || ended === 'failed' || ended === 'cancelled') ? NOTES[ended] : '';
+      setNote(ended, said);
     } else if (msg.type === 'field:set') {
       var el = document.getElementById(msg.payload.field);
       if (el) { el.value = msg.payload.value; }
       showProblems(msg.payload.problems);
-      // A folder pick changes the problems, so a note counting the OLD ones is now wrong — and
+      // A folder pick changes the problems, so a note naming the OLD ones is now wrong — and
       // leaving it stale is also how the next press becomes unobservable (review finding 4).
-      setNote('', false);
+      if (!building) { setNote('', ''); }
     }
   });
 })();

@@ -16,6 +16,7 @@
  *   - test/dial.test.ts       -> dist/test/dial.test.js        (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/tutor.test.ts      -> dist/test/tutor.test.js       (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/detour.test.ts     -> dist/test/detour.test.js      (external: vscode, repo-tour, mocha) — vscode-test
+ *   - test/start-screen.test.ts -> dist/test/start-screen.test.js (external: vscode, repo-tour, mocha) — vscode-test, reads the real screen (T-15)
  *   - test/unit/*.test.ts     -> dist/test/unit/*.js           (external: repo-tour, mocha)  — plain mocha, no vscode
  *
  * The unit/vscode-test split is a directory split on purpose: `.vscode-test.mjs`'s own
@@ -96,6 +97,12 @@ const builds = [
     ...shared,
     entryPoints: ['test/detour.test.ts'],
     outfile: 'dist/test/detour.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
+    entryPoints: ['test/start-screen.test.ts'],
+    outfile: 'dist/test/start-screen.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
   },
   ...(unitEntryPoints.length > 0
