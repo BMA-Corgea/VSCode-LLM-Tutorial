@@ -345,6 +345,38 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     assert.equal(same.referenceRoot, b.first.referenceRoot);
   });
 
+  test('a replan may open a NEW chapter, shape step first, and the plan stays a plan', async () => {
+    const b = await base();
+    const opts = [{ id: 'a', label: 'A', consequence: 'x' }, { id: 'b', label: 'B', consequence: 'y' }];
+    const widen = fakeModel({}, (input) => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      return {
+        chapters: [{ key: 'ui', title: 'The prompt', subtitle: 'how the tally talks back' }],
+        steps: [
+          { kind: 'shape', chapter: 'ui', path: 'ui', question: 'Where does the prompt live?', options: opts, recommended: 'a', why: 'w', dependsOn: [] },
+          { kind: 'file', chapter: 'ui', path: 'ui/prompt.mjs', question: 'What does it ask?', options: opts, recommended: 'a', why: 'w', dependsOn: ['ui'] },
+          ...out.steps,
+        ],
+      };
+    });
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'cli'), 'repl', [], deps(widen.run, b.gs, b.target));
+    if (!out.ok) assert.fail(out.reason);
+    assert.deepEqual(validateBuildPlan(BUILD_PLAN_SCHEMA, out.plan), []);
+    assert.deepEqual(out.plan.chapters.map((c) => c.key), ['core', 'cli', 'ui']);
+    const ui = out.plan.steps.filter((st) => st.chapter === 'ui');
+    assert.deepEqual(ui.map((st) => st.kind), ['shape', 'file'], 'the new chapter opens with its shape step');
+    const cliId = idOf(b.first.state, 'cli');
+    for (const st of ui) assert.ok(st.dependsOn.includes(cliId), `${st.target.file}: the honesty rule — it depends on the decision it was derived from`);
+  });
+
+  test('a replan that re-lists a chapter the plan already has is refused', async () => {
+    const b = await base();
+    const relist = fakeModel({}, (input) => ({ ...(followTheAnswer(input) as object), chapters: [{ key: 'core', title: 'Again', subtitle: 'again' }] }));
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'cli'), 'repl', [], deps(relist.run, b.gs, b.target));
+    assert.ok(!out.ok);
+    assert.match(out.reason, /already has/);
+  });
+
   test('a replan that replaces the entry file without naming a new one is refused', async () => {
     const b = await base();
     const moved = fakeModel({}, (input) => {
