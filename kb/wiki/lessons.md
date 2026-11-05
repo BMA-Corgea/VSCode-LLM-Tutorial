@@ -675,3 +675,23 @@ where the eye already is. T-4's alternatives carry a "coming with T-10" label an
 `<button>` or `<input>` at all — nothing in the DOM to click is a straighter answer than
 something greyed out. T-5 deleted the "arrives with T-5" placeholder the moment the real
 thing existed, because by then the placeholder was the lie.
+
+## A polish audit compares consecutive states, not frames (T-16)
+
+The design-polish probe measures each state as its own fresh page, and every per-page number
+came back clean on the Current Step panel's press outcomes. The defect was between pages: at a
+side-bar width, the first screen after *Check my work* is byte-identical for a pass and a fail,
+and idle, "writing an example…" and an open detour are one picture. The outcome renders below
+the action row and the page re-renders from the top. Hash the first-screen screenshot of the
+state before a press and the state after it; identical hashes are a finding whatever the
+metrics say. This is T-15's lesson again, one layer up: a press must change what is on screen.
+
+## A theme token can be legal and still wrong for its role (T-16)
+
+The bridge sheet maps every colour to a `--vscode-*` variable, and the hard-coded-colour check
+proved it: zero on every page. But the status colours borrowed `symbolIcon.keywordForeground`
+and `symbolIcon.stringForeground`, which every default theme sets to plain `foreground`. Pass,
+fail and the "news" lines all rendered as body text, and in Light Modern `descriptionForeground`
+is `foreground` too, so "muted" collapsed as well. Pick a token by its role (`testing.icon*`,
+`errorForeground`, `notificationsInfoIcon.foreground`), then check in every theme that two
+states meant to differ really do.
