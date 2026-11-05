@@ -222,7 +222,7 @@ function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = []) {
   elements.get('step-main')!.setAttribute('data-step-id', stepId);
   const windowCalls: unknown[] = [];
   const windowListeners = new Map<string, Array<(e: unknown) => void>>();
-  const fakeWindow = {
+  const fakeWindow: { scrollY?: number; addEventListener: (t: string, fn: (e: unknown) => void) => void; scrollTo: (...a: unknown[]) => void } = {
     addEventListener: (t: string, fn: (e: unknown) => void) => { windowListeners.set(t, [...(windowListeners.get(t) ?? []), fn]); },
     scrollTo: (...args: unknown[]) => { windowCalls.push(args); },
   };
@@ -243,7 +243,9 @@ function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = []) {
   // eslint-disable-next-line @typescript-eslint/no-implied-eval -- fake DOM, no untrusted input
   new Function('document', 'window', 'acquireVsCodeApi', code)(fakeDocument, fakeWindow, api);
   const send = (data: unknown) => { for (const fn of windowListeners.get('message') ?? []) fn({ data }); };
-  return { elements, posted, states, windowCalls, send };
+  const scroll = (y: number) => { fakeWindow.scrollY = y; for (const fn of windowListeners.get('scroll') ?? []) fn({}); };
+  const setScrollY = (y: number) => { fakeWindow.scrollY = y; };
+  return { elements, posted, states, windowCalls, send, scroll, setScrollY };
 }
 
 const CHECK_PASS: Partial<StepViewState> = {
@@ -282,7 +284,7 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
 
   test('the page after the repaint scrolls that outcome into view, once', () => {
     const html = renderStepHtml(stateAt('st-2-file-parse', CHECK_PASS), FAKE_SKINS);
-    const dom = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: 'check' });
+    const dom = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: 'check', revealAt: Date.now() });
     assert.deepEqual(dom.elements.get('outcome-check')!.scrolled, [{ block: 'nearest', behavior: 'auto' }]);
     const last = dom.states[dom.states.length - 1] as { reveal?: string };
     assert.equal(last.reveal, undefined, 'a reveal is one-shot: the next repaint must not jump again');
@@ -290,12 +292,17 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
 
   test('a reveal saved on another step, or naming no known outcome, scrolls nothing', () => {
     const html = renderStepHtml(stateAt('st-2-file-parse', CHECK_PASS), FAKE_SKINS);
-    const other = runStepScript(html, { stepId: 'st-1-shape-src', note: '', draft: '', reveal: 'check' });
+    const other = runStepScript(html, { stepId: 'st-1-shape-src', note: '', draft: '', reveal: 'check', revealAt: Date.now() });
     assert.deepEqual(other.elements.get('outcome-check')!.scrolled, []);
     for (const bogus of ['__proto__', 'step-main', 'check"', '']) {
-      const dom = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: bogus });
+      const dom = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: bogus, revealAt: Date.now() });
       assert.deepEqual(dom.elements.get('outcome-check')!.scrolled, [], `reveal ${JSON.stringify(bogus)} must be ignored`);
     }
+    // An id the page does have, named by a key outside the list: only the list stops it
+    // (code review 8: without this case the loop above could not fail).
+    const evilHtml = html.replace('<main id="step-main"', '<span id="outcome-evil"></span><main id="step-main"');
+    const dom = runStepScript(evilHtml, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: 'evil', revealAt: Date.now() });
+    assert.deepEqual(dom.elements.get('outcome-evil')!.scrolled, [], 'a key outside the fixed list never reaches getElementById');
   });
 
   test('a repaint on the same step returns to where the learner was', () => {
@@ -328,6 +335,45 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
     dom.send({ type: 'step:note', payload: { note: '' } });
     assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, 'tutor');
     assert.deepEqual(dom.elements.get('step-note')!.scrolled, [], 'an empty note is not an answer to bring into view');
+  });
+
+  test('a reveal older than its lifetime is ignored: a press the host never answered cannot jump the page later', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', CHECK_PASS), FAKE_SKINS);
+    const stale = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: 'check', revealAt: Date.now() - 60000 });
+    assert.deepEqual(stale.elements.get('outcome-check')!.scrolled, []);
+    const undated = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: 'check' });
+    assert.deepEqual(undated.elements.get('outcome-check')!.scrolled, [], 'no time, no reveal');
+  });
+
+  test('scrolling on another step does not erase the draft left on the previous one', async () => {
+    const left = { stepId: 'st-1-shape-src', note: '', draft: 'half a question' };
+    const onB = runStepScript(renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS), left);
+    onB.scroll(300);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(onB.states[onB.states.length - 1], left, 'a page that does not own the blob keeps its scroll in memory');
+    const backOnA = runStepScript(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS), onB.states[onB.states.length - 1]);
+    assert.equal(backOnA.elements.get('tutor-input')!.value, 'half a question');
+  });
+
+  test('scrolling a step this page owns saves where the learner is', async () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
+    const dom = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '' });
+    dom.scroll(480);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: '', y: 480 });
+  });
+
+  test('a press inside the scroll debounce saves the live position, not a stale one', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
+    const dom = runStepScript(html);
+    dom.setScrollY(512);
+    dom.elements.get('btn-check')!.dispatch('click');
+    assert.equal((dom.states[dom.states.length - 1] as { y?: number }).y, 512);
+  });
+
+  test('the note is the page\'s live region, so a refusal written into it is announced', () => {
+    const dom = runStepScript(renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS));
+    assert.equal(dom.elements.get('step-note')!.getAttribute('role'), 'status');
   });
 
   test('with nothing to reveal and nowhere to return to, the saved state keeps its old shape', () => {
