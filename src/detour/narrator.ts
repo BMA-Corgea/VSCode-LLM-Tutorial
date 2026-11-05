@@ -243,14 +243,14 @@ function stopWhere(stop: unknown): string {
 const PAGE_CSS = `
 main { max-width:640px; margin:0 auto; padding:20px 24px 40px; }
 h1 { font-size:1.25rem; margin:0 0 4px; }
-h2 { font-size:0.95rem; margin:24px 0 8px; opacity:0.85; }
+h2 { font-size:0.95rem; margin:24px 0 8px; }
 .detour-domain { margin:0 0 4px; }
-.detour-aside { margin:0 0 16px; opacity:0.7; font-size:0.9rem; }
-.stop-progress { margin:0 0 8px; opacity:0.85; font-size:0.9rem; }
+.detour-aside { margin:0 0 16px; color:var(--muted); font-size:0.9rem; }
+.stop-progress { margin:0 0 8px; font-size:0.9rem; }
 .stop-list { list-style:none; margin:0 0 16px; padding:0; }
-.stop-list .stop { display:flex; gap:8px; padding:4px 8px; border-left:3px solid transparent; opacity:0.6; }
-.stop-list .stop-current { border-left-color:var(--accent, currentColor); opacity:1; font-weight:600; }
-.stop-ord { min-width:1.5em; text-align:right; opacity:0.7; }
+.stop-list .stop { display:flex; gap:8px; padding:4px 8px; border-left:3px solid transparent; color:var(--muted); }
+.stop-list .stop-current { border-left-color:var(--accent, currentColor); color:var(--ink); font-weight:600; }
+.stop-ord { min-width:1.5em; text-align:right; }
 .stop-where { overflow-wrap:anywhere; }
 .stop-now { padding:12px 0; }
 .now-where { margin:0 0 8px; font-family:var(--mono, monospace); overflow-wrap:anywhere; }
@@ -258,12 +258,12 @@ h2 { font-size:0.95rem; margin:24px 0 8px; opacity:0.85; }
 .actions { display:flex; gap:8px; flex-wrap:wrap; margin:20px 0 4px; }
 .btn { padding:4px 12px; border-radius:var(--radius, 4px); cursor:pointer; }
 .btn[disabled] { cursor:default; opacity:0.5; }
-.detour-hint { margin:0 0 8px; min-height:1.2em; opacity:0.7; font-size:0.9rem; }
-.note { margin:8px 0; opacity:0.85; }
-.rows-omitted { margin:0 0 12px; opacity:0.7; font-size:0.9rem; }
+.detour-hint { margin:0 0 8px; min-height:1.2em; color:var(--muted); font-size:0.9rem; }
+.note { margin:8px 0; color:var(--muted); }
+.rows-omitted { margin:0 0 12px; color:var(--muted); font-size:0.9rem; }
 .file-list { margin:0; padding-left:20px; }
 .file-path { overflow-wrap:anywhere; }
-.empty { opacity:0.85; }
+.empty { color:var(--muted); }
 `;
 
 /** The stop list — `<li>`/`<span>` only. See property 3 in the file header: there is nothing

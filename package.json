@@ -27,39 +27,39 @@
     "commands": [
       {
         "command": "buildTutorials.start",
-        "title": "Build Tutorials: Start",
+        "title": "Start",
         "category": "Build Tutorials"
       },
       {
         "command": "buildTutorials.doctor",
-        "title": "Build Tutorials: Doctor",
+        "title": "Doctor",
         "category": "Build Tutorials"
       },
       {
         "command": "buildTutorials.openWalk",
-        "title": "Build Tutorials: Open the walk",
+        "title": "Open the walk",
         "category": "Build Tutorials"
       },
       {
         "command": "buildTutorials.prevStep",
-        "title": "Build Tutorials: Previous step",
+        "title": "Previous step",
         "category": "Build Tutorials",
         "icon": "$(arrow-left)"
       },
       {
         "command": "buildTutorials.nextStep",
-        "title": "Build Tutorials: Next step",
+        "title": "Next step",
         "category": "Build Tutorials",
         "icon": "$(arrow-right)"
       },
       {
         "command": "buildTutorials.goToStep",
-        "title": "Build Tutorials: Go to step",
+        "title": "Go to step",
         "category": "Build Tutorials"
       },
       {
         "command": "buildTutorials.reproduceFiles",
-        "title": "Build Tutorials: Copy the files that aren’t taught",
+        "title": "Copy the files that aren’t taught",
         "category": "Build Tutorials"
       }
     ],
@@ -85,6 +85,12 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "buildTutorials.decisions",
+        "contents": "Build a tutorial from a repo or an idea, then walk it here one decision at a time.\n[Start a tutorial](command:buildTutorials.start)"
+      }
+    ],
     "menus": {
       "commandPalette": [
         {

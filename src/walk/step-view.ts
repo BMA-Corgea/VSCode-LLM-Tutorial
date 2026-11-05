@@ -386,6 +386,10 @@ export const REPRODUCE_BUTTON_LABEL = 'Copy them in';
 /** The section's heading, and the two control labels. Exported like every other visible
  *  string on this page: one home, asserted rather than copied. */
 export const TUTOR_HEADING = 'Ask the tutor';
+/** T-16: the notice page's heading. True of every notice it heads (no tutorial in this folder;
+ *  the core not loaded; this folder's tutorial could not be opened), so it never claims a
+ *  cause, or a wait, that the sentence under it does not give. */
+export const NOTICE_HEADING = 'No step to show';
 export const ASK_BUTTON_LABEL = 'Ask';
 export const CANCEL_BUTTON_LABEL = 'Cancel';
 /** The retention control's label (code review finding 6). "Forget" rather than "Clear",
@@ -603,10 +607,9 @@ section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; col
    simply decided how much of a very large plan it is willing to draw at once. */
 .options-omitted { color:var(--muted); font-size:12px; margin:8px 0 0; }
 section h3 { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; margin:12px 0 6px; }
-/* One monospace stack, declared once. repo-tour's base sheet has no code token to borrow and
-   the bridge maps no VS Code font variable, so this is a plain stack rather than an invented
-   \`--mono\` that would look like a token other files could rely on. */
-.check-name, .shape-line { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+/* One monospace stack, declared once. T-16 (F-07): under System the bridge sheet defines --mono
+   as the editor's own font; a named skin has no --mono and keeps this plain stack. */
+.check-name, .shape-line { font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size:12px; }
 .check-list, .shape-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
 .check-row { display:flex; align-items:baseline; gap:8px; }
 /* The verdict colours the SUMMARY and nothing else. A red section would read as "everything
@@ -656,7 +659,7 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 /* A fenced block is the ONE construct this page renders from a reply. It scrolls inside itself
    rather than widening the panel: code has no wrap opportunities, and overflow-wrap:anywhere
    on an example would break identifiers across lines, which is worse than a scrollbar. */
-.turn-text pre.tutor-code { white-space:pre; overflow-x:auto; margin:8px 0; padding:8px 10px; background:var(--chip); border-radius:var(--radius); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+.turn-text pre.tutor-code { white-space:pre; overflow-x:auto; margin:8px 0; padding:8px 10px; background:var(--chip); border-radius:var(--radius); font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size:12px; }
 .tutor-empty { color:var(--muted); font-size:12px; margin:0 0 12px; }
 /* The note takes the same colour as the write note — both are news about something that just
    happened, and both are the panel's answer to a control the learner pressed. The unreachable
@@ -704,6 +707,44 @@ main, section, .option { min-width:0; }
   .step-head h1 { max-width:100%; }
   fieldset.dial label { margin-right:12px; }
 }
+
+/* T-16, native polish. Additions only, so the rules above read as they did.
+   F-03: under System the taken option's highlight is the editor's translucent search-match
+   colour, and muted text on it measured 4.09:1 in Dark Modern. Inside the highlight, the
+   consequence takes the full ink colour; the badge, border and background still set the taken
+   option apart from the others. Unscoped on purpose: in a named skin, ink on the highlight is
+   only ever more contrast. Coupled to the option markup's class names (T-21 rewrites it). */
+.option-taken .option-consequence { color:var(--ink); }
+/* F-02: status roles. Under System, --kw and --str resolve to symbolIcon colours that every
+   default theme sets to plain foreground, so a pass, a fail and every "news" line rendered as
+   body text. The text keeps its colour; a MARKER (a left rule) carries the status, in VS Code's
+   own status colours. A named skin keeps its own palette for the marker. */
+:root { --status-ok:var(--str); --status-bad:var(--kw); --status-news:var(--accent); }
+:root:not([data-theme]) {
+  --status-ok:var(--vscode-testing-iconPassed, var(--vscode-charts-green, var(--vscode-foreground)));
+  --status-bad:var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--vscode-foreground)));
+  --status-news:var(--vscode-notificationsInfoIcon-foreground, var(--vscode-textLink-foreground, var(--vscode-foreground)));
+}
+.check-summary { border-left:3px solid transparent; padding-left:8px; }
+.check-summary.check-pass { border-left-color:var(--status-ok); }
+.check-summary.check-fail { border-left-color:var(--status-bad); }
+.check-missing .check-status { outline:1px solid var(--status-bad); outline-offset:-1px; }
+/* Under System the missing chip takes the same neutral fill as the others, so the ring alone
+   says "missing" (a blue fill under a red ring read as two signals at once). */
+:root:not([data-theme]) .check-missing .check-status { background:var(--chip); color:var(--ink); }
+/* F-01: a revealed outcome stops short of the panel's edge instead of sitting flush on it. */
+#outcome-check, #outcome-tutor, #outcome-detour { scroll-margin:12px 0 16px; }
+/* :not(:empty) because the open-file hint is always on the page, empty when the file exists,
+   and an empty line must not grow a stray mark. */
+.hint:not(:empty), .write-note:not(:empty), .tutor-note:not(:empty), .detour-note:not(:empty),
+.detour-open:not(:empty), .tutor-elsewhere:not(:empty), .tutor-spend:not(:empty) {
+  border-left:2px solid var(--status-news); padding-left:8px;
+}
+.notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
+/* F-11: where in the plan this step sits. */
+.step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
+/* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
+.turn-text pre.tutor-code:focus-visible { outline:1px solid var(--focus); outline-offset:2px; }
 `;
 
 /**
@@ -931,12 +972,12 @@ function checkHtml(outcome: CheckOutcome): string {
     const reasonHtml = reason === '' || reason === outcome.summary
       ? ''
       : `<p class="check-reason">${escapeHtml(planText(reason))}</p>`;
-    return `<section class="check"><h2>${escapeHtml(CHECK_HEADING)}</h2>${summaryHtml}${reasonHtml}<p class="check-aside">${escapeHtml(CHECK_PARSE_MESSAGE)}</p></section>`;
+    return `<section class="check" id="outcome-check"><h2>${escapeHtml(CHECK_HEADING)}</h2>${summaryHtml}${reasonHtml}<p class="check-aside">${escapeHtml(CHECK_PARSE_MESSAGE)}</p></section>`;
   }
 
   const symbols = checkListHtml(report.symbols, 'export', true);
   const imports = checkListHtml(report.imports, 'import', false);
-  return `<section class="check"><h2>${escapeHtml(CHECK_HEADING)}</h2>${summaryHtml}${symbols}${imports}</section>`;
+  return `<section class="check" id="outcome-check"><h2>${escapeHtml(CHECK_HEADING)}</h2>${summaryHtml}${symbols}${imports}</section>`;
 }
 
 // ── the manual-mode shape block (AC2) ──────────────────────────────────────────────────────
@@ -1203,7 +1244,7 @@ function tutorHtml(state: StepViewState): string {
     + note
     + unreachable
     + elsewhereHtml(state)
-    + `<div class="tutor-ask">${input}<div class="tutor-controls">${controls}</div></div>`
+    + `<div class="tutor-ask" id="outcome-tutor">${input}<div class="tutor-controls">${controls}</div></div>`
     + spendHtml(tutor?.spend)
     + detourHtml(state)
     + '</section>';
@@ -1262,7 +1303,7 @@ function detourHtml(state: StepViewState): string {
       ? `<button type="button" class="btn btn-quiet" id="btn-detour-regenerate">${escapeHtml(DETOUR_REGENERATE_LABEL)}</button>`
       : '';
     const cost = here ? `<p class="detour-hint">${escapeHtml(DETOUR_REGENERATE_HINT)}</p>` : '';
-    return '<div class="detour">'
+    return '<div class="detour" id="outcome-detour">'
       + note
       + where
       + `<p class="detour-open">${escapeHtml(planText(open.title, MAX_CHECK_TEXT))}</p>`
@@ -1274,7 +1315,7 @@ function detourHtml(state: StepViewState): string {
   }
 
   if (detour?.generating === true) {
-    return '<div class="detour">'
+    return '<div class="detour" id="outcome-detour">'
       + note
       + `<div class="tutor-controls"><span class="detour-waiting" id="detour-waiting">${escapeHtml(DETOUR_WAITING_MESSAGE)}</span>`
       + `<button type="button" class="btn" id="btn-tutor-cancel-detour">${escapeHtml(CANCEL_BUTTON_LABEL)}</button></div>`
@@ -1284,7 +1325,7 @@ function detourHtml(state: StepViewState): string {
   const unreachable = typeof state.tutor?.unreachable === 'string' && state.tutor.unreachable !== ''
     ? `<p class="detour-hint">${escapeHtml(DETOUR_UNREACHABLE_MESSAGE)}</p>`
     : '';
-  return '<div class="detour">'
+  return '<div class="detour" id="outcome-detour">'
     + note
     + `<div class="tutor-controls"><button type="button" class="btn btn-quiet" id="btn-detour-start">${escapeHtml(DETOUR_BUTTON_LABEL)}</button></div>`
     + unreachable
@@ -1406,12 +1447,25 @@ function waitingMessage(stage: unknown): string {
   return stage === 'preparing' ? PREPARING_MESSAGE : THINKING_MESSAGE;
 }
 
+/**
+ * T-16 (F-11): "Step N of M", from the plan's own order. Empty when the plan does not list this
+ * step: a count that might be wrong is worse than none. Shared by the markup and
+ * `stepRenderKey`, so a plan whose length changes repaints.
+ */
+function stepCountText(state: StepViewState): string {
+  const steps = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+  const index = steps.findIndex((s) => s?.id === state.step.id);
+  return index >= 0 ? `Step ${index + 1} of ${steps.length}` : '';
+}
+
 function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   const step = state.step;
   const currentDial: Dial = resolvedDial(state.dial);
+  const count = stepCountText(state);
 
   return `
 <main id="step-main" data-step-id="${escapeAttr(planId(step.id))}">
+  ${count ? `<p class="step-count">${escapeHtml(count)}</p>` : ''}
   <div class="step-head">
     <h1>${escapeHtml(planText(step.decision.question))}</h1>
     ${pickerHtml(skins.SKINS, state.skin)}
@@ -1485,15 +1539,51 @@ const CLIENT_SCRIPT = `
   // authoritative for everything else (spec §5.1).
   var savedNote = '';
   var savedDraft = '';
+  // T-16 (F-01): every press re-renders this whole page, which starts at the top, so the result
+  // of a press below the fold (the check report, the tutor, the detour line) used to arrive
+  // out of sight. Two values ride in the same saved blob as the draft, and only when set:
+  // y, where the learner was on THIS step, and reveal, the one outcome the last press asked
+  // to see. reveal is checked against a fixed list and is only ever used to find an element
+  // by id; it never reaches markup.
+  var REVEALS = ['check', 'tutor', 'detour'];
+  // A reveal is honoured only by a repaint within this long of its press. A press the host
+  // answers with no repaint and no note (a second identical check) must not leave a reveal
+  // armed for some unrelated repaint much later (code review 2).
+  var REVEAL_LIFETIME_MS = 20000;
+  var savedY = 0;
+  var revealKey = '';
+  var revealAt = 0;
+  var restored = false;
   var initial = restore();
+  // The blob is ONE per view, written for one step. This page owns it when it was written for
+  // this step, or once the learner does something here. Until then a scroll on this page keeps
+  // y in memory only, so visiting another step and scrolling there cannot erase the draft left
+  // on the previous one (code review 3).
+  var owns = !!(initial && initial.stepId === stepId);
   if (initial && initial.stepId === stepId) {
     if (typeof initial.note === 'string') { savedNote = initial.note; }
     if (typeof initial.draft === 'string') { savedDraft = initial.draft; }
+    if (typeof initial.y === 'number' && isFinite(initial.y) && initial.y > 0) { savedY = Math.round(initial.y); }
+    var age = typeof initial.revealAt === 'number' && isFinite(initial.revealAt) ? Date.now() - initial.revealAt : Infinity;
+    if (typeof initial.reveal === 'string' && REVEALS.indexOf(initial.reveal) >= 0 && age >= -1000 && age <= REVEAL_LIFETIME_MS) {
+      revealKey = initial.reveal;
+      revealAt = initial.revealAt;
+    }
   }
   // ONE blob, written whole every time. Two writers each calling save() with only their own
   // field would each erase the other's — the note would eat the draft on the next reply, and
   // the draft would eat the note on the next keystroke.
-  function persist() { save({ stepId: stepId, note: savedNote, draft: savedDraft }); }
+  function persist() {
+    owns = true;
+    // After the restore below, the live position wins over the debounced one, so a press
+    // within the scroll debounce still saves where the learner really is (code review 7).
+    if (restored && typeof window.scrollY === 'number') { savedY = window.scrollY > 0 ? Math.round(window.scrollY) : 0; }
+    var blob = { stepId: stepId, note: savedNote, draft: savedDraft };
+    if (savedY > 0) { blob.y = savedY; }
+    if (revealKey) { blob.reveal = revealKey; blob.revealAt = revealAt; }
+    save(blob);
+  }
+  function reveal(key) { revealKey = key; revealAt = Date.now(); persist(); }
 
   var initialNoteEl = document.getElementById('step-note');
   if (savedNote && initialNoteEl) { initialNoteEl.textContent = savedNote; }
@@ -1524,6 +1614,50 @@ const CLIENT_SCRIPT = `
   }
   if (inputEl && savedDraft) { inputEl.value = savedDraft; }
 
+  // T-16 (F-01): back to where the learner was on this step, then the outcome of their last
+  // press into view. block 'nearest' moves only as far as needed and not at all when the
+  // outcome is already visible; behavior 'auto' never animates. One-shot: the reveal is
+  // cleared here, so a later repaint on the same step does not jump again.
+  if (savedY > 0 && typeof window.scrollTo === 'function') { window.scrollTo(0, savedY); }
+  restored = true;
+  if (revealKey) {
+    var outcome = document.getElementById('outcome-' + revealKey);
+    if (outcome && typeof outcome.scrollIntoView === 'function') {
+      outcome.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    }
+    revealKey = '';
+    persist();
+  }
+  // The note is the one node the host changes WITHOUT a repaint (a refusal, a check note), so
+  // it is the page's live region: a screen reader hears it when it changes (WCAG 4.1.3). Set
+  // here, not in the markup the existing tests pin. A repainted region cannot announce this
+  // way, since every repaint is a fresh document.
+  var liveNote = document.getElementById('step-note');
+  if (liveNote) { liveNote.setAttribute('role', 'status'); }
+  // T-16 (F-10): a code block in an answer scrolls sideways rather than wrap, so it must take
+  // keyboard focus to be scrolled without a mouse (WCAG 2.1.1). Only a block that really
+  // overflows gets a tab stop, and only the newest twelve: a reply is model output, and a
+  // conversation stuffed with wide blocks must not put hundreds of stops between the step's
+  // controls and Ask (security review N-1). Set here, not in the markup the escaping tests pin.
+  if (typeof document.querySelectorAll === 'function') {
+    var blocks = document.querySelectorAll('pre.tutor-code');
+    var stops = 0;
+    for (var b = blocks.length - 1; b >= 0 && stops < 12; b--) {
+      if (blocks[b].scrollWidth > blocks[b].clientWidth) { blocks[b].setAttribute('tabindex', '0'); stops++; }
+    }
+  }
+  var scrollQueued = false;
+  window.addEventListener('scroll', function () {
+    if (scrollQueued) { return; }
+    scrollQueued = true;
+    setTimeout(function () {
+      scrollQueued = false;
+      var y = typeof window.scrollY === 'number' ? window.scrollY : 0;
+      savedY = y > 0 ? Math.round(y) : 0;
+      if (owns) { persist(); }
+    }, 150);
+  });
+
   function on(id, type, handler) {
     var el = document.getElementById(id);
     if (el) { el.addEventListener(type, handler); }
@@ -1531,7 +1665,7 @@ const CLIENT_SCRIPT = `
 
   on('btn-prev', 'click', function () { post('step:prev', {}); });
   on('btn-open', 'click', function () { post('step:open', {}); });
-  on('btn-check', 'click', function () { post('step:check', {}); });
+  on('btn-check', 'click', function () { reveal('check'); post('step:check', {}); });
   on('btn-next', 'click', function () { post('step:next', {}); });
   // Only on the page while the offer stands (see reproduceHtml); \`on\` is null-safe, so the
   // rest of the time this line hooks nothing rather than needing a condition of its own.
@@ -1560,29 +1694,31 @@ const CLIENT_SCRIPT = `
     if (!box) { return; }
     var text = box.value;
     savedDraft = text;
+    revealKey = 'tutor';
+    revealAt = Date.now();
     persist();
     post('tutor:ask', { text: text });
   }
 
   on('btn-tutor-ask', 'click', askTutor);
-  on('btn-tutor-cancel', 'click', function () { post('tutor:cancel', {}); });
+  on('btn-tutor-cancel', 'click', function () { reveal('tutor'); post('tutor:cancel', {}); });
   // The same message from the line about an ask on ANOTHER step: the host's cancel goes
   // through the ledger and stops every live request, so one message is the whole control.
-  on('btn-tutor-cancel-elsewhere', 'click', function () { post('tutor:cancel', {}); });
-  on('btn-tutor-clear', 'click', function () { post('tutor:clear', {}); });
+  on('btn-tutor-cancel-elsewhere', 'click', function () { reveal('tutor'); post('tutor:cancel', {}); });
+  on('btn-tutor-clear', 'click', function () { reveal('tutor'); post('tutor:clear', {}); });
 
   // ── T-7: the detour ───────────────────────────────────────────────────────────────────
 
   // Each of these is on the page only in the state it belongs to (see detourHtml); \`on\` is
   // null-safe, so the rest of the time these lines hook nothing rather than needing a
   // condition of their own — the same shape \`btn-reproduce\` above uses.
-  on('btn-detour-start', 'click', function () { post('detour:start', {}); });
-  on('btn-detour-regenerate', 'click', function () { post('detour:regenerate', {}); });
-  on('btn-detour-back', 'click', function () { post('detour:back', {}); });
+  on('btn-detour-start', 'click', function () { reveal('detour'); post('detour:start', {}); });
+  on('btn-detour-regenerate', 'click', function () { reveal('detour'); post('detour:regenerate', {}); });
+  on('btn-detour-back', 'click', function () { reveal('detour'); post('detour:back', {}); });
   // The same \`tutor:cancel\` the ask uses: the host's cancel goes through the ledger and stops
   // every live request, and a detour being written is one of them. One message is the whole
   // control, exactly as it is for the ask-on-another-step line.
-  on('btn-tutor-cancel-detour', 'click', function () { post('tutor:cancel', {}); });
+  on('btn-tutor-cancel-detour', 'click', function () { reveal('detour'); post('tutor:cancel', {}); });
 
   // Enter sends, Shift+Enter makes a newline — sql-gauntlet's pattern, which the owner asked
   // for by name. Every other key falls straight through, so nothing here interferes with
@@ -1633,7 +1769,16 @@ const CLIENT_SCRIPT = `
       // channel exists is that it reaches the page WITHOUT a repaint; a save that dropped the
       // draft would undo that in a different way.
       savedNote = note;
+      // T-16 (F-01): a NON-EMPTY note is the host answering a press without a repaint (an
+      // empty ask, a refusal), so that press has had its answer: drop the pending reveal and
+      // bring the note itself into view, because the learner pressed from further down the
+      // page. An EMPTY note only clears an old one: an accepted ask posts it just before the
+      // repaint to "thinking", and that repaint still needs its reveal.
+      if (note) { revealKey = ''; }
       persist();
+      if (el && note && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      }
     }
   });
 })();
@@ -1660,7 +1805,7 @@ export function renderNoticeHtml(notice: string): string {
     bridgeCss: bridgeCss(),
     pageCss: PAGE_CSS,
     skin: 'system',
-    body: `<main class="notice-only"><p class="notice">${escapeHtml(notice)}</p></main>`,
+    body: `<main class="notice-only"><h1>${escapeHtml(NOTICE_HEADING)}</h1><p class="notice">${escapeHtml(notice)}</p></main>`,
     script: '',
   });
 }
@@ -1822,6 +1967,7 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
   const report = state.check?.report;
   return JSON.stringify([
     keyOf(id),
+    stepCountText(state),
     keyOf(decision.question),
     keyOfList<OptionLike | undefined>(decision.options, MAX_OPTIONS_RENDERED, (option) => [
       keyOf(option?.id), keyOf(option?.label), keyOf(option?.consequence), option?.taken,
