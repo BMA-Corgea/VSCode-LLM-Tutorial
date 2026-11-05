@@ -201,6 +201,26 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     });
   }
 
+  test('AC10: the plan\'s cost is the run\'s, honestly: summed, named, and a floor once any reply was unmetered', async () => {
+    const model = fakeModel();
+    let n = 0;
+    const halfMetered: TutorCore['runLlm'] = async (prompt, choice, cwd, ms) => {
+      const reply = await model.run(prompt, choice, cwd, ms);
+      n += 1;
+      return n === 2 ? { ...reply, metered: false } : reply;
+    };
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(halfMetered, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    if (!out.ok) assert.fail(out.reason);
+    const cost = out.plan.cost;
+    assert.equal(cost.provider, 'claude');
+    assert.equal(cost.model, 'claude-sonnet-5');
+    assert.equal(cost.calls, 3);
+    assert.equal(cost.inputTokens, 30, 'summed across the three replies');
+    assert.equal(cost.outputTokens, 15);
+    assert.equal(cost.metered, false, 'one unmetered reply makes the totals a floor, never a figure');
+    assert.deepEqual(cost.failures, []);
+  });
+
   test('a node: import is one of Node\'s own modules, and is allowed', async () => {
     const tally = "import { strict as assert } from 'node:assert';\nexport function total(xs) {\n  assert.ok(Array.isArray(xs));\n  return xs.reduce((a, b) => a + b, 0);\n}\n";
     const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': tally, 'cli/main.mjs': MAIN }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
