@@ -107,15 +107,15 @@ suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
   });
 
   test('automated: walking every file step writes the reference bytes, and the app STARTS', async () => {
-    const { plan, referenceRoot, target, outline } = await derived();
+    const { plan, referenceRoot, target, state } = await derived();
     for (const step of plan.steps.filter((s) => s.kind === 'file')) {
       const write = planWrite(step, 'automated', referenceRoot, target, plan, dialCore);
       assert.ok(write !== null && !isRefusal(write), `${step.target.file}: ${write !== null && isRefusal(write) ? write.refused : 'nothing to write'}`);
       writeTextAtomic(write.path, write.content, target);
       assert.equal(fs.readFileSync(path.join(target, step.target.file), 'utf8'), fs.readFileSync(path.join(referenceRoot, step.target.file), 'utf8'));
     }
-    const ran = await nodeRun(outline.entry, target);
-    assert.equal(ran.code, 0, `node ${outline.entry} exited ${String(ran.code)}: ${ran.stderr}`);
+    const ran = await nodeRun(state.entry, target);
+    assert.equal(ran.code, 0, `node ${state.entry} exited ${String(ran.code)}: ${ran.stderr}`);
     assert.equal(ran.stdout, 'total: 6\n');
   });
 });
