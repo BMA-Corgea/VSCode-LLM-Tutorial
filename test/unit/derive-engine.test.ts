@@ -328,6 +328,19 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     assert.deepEqual(once.files, second.files);
   });
 
+  test('two answers, the second to a step the first one CREATED: one derivePlan call equals the walk of two replans', async () => {
+    const { gs, target, model, second, tallyId } = await replanned();
+    const newMainId = idOf(second.state, 'cli/main.mjs');
+    const walked = second.plan.steps.filter((st) => st.ordinal < second.plan.steps.find((x) => x.id === newMainId)!.ordinal).map((st) => st.id);
+    const third = await replanPlan(second.state, newMainId, 'steps', walked, deps(model.run, gs, target));
+    if (!third.ok) assert.fail(third.reason);
+    const once = await derivePlan({ idea: FIXTURE_IDEA, answers: { [tallyId]: 'object', [newMainId]: 'steps' } }, deps(model.run, gs, target));
+    if (!once.ok) assert.fail(once.reason);
+    assert.equal(contentOf(once.plan), contentOf(third.plan));
+    assert.equal(once.referenceRoot, third.referenceRoot);
+    assert.equal(once.plan.steps.find((st) => st.id === newMainId)?.decision.chosen, 'steps', 'the second answer landed on the step the first created');
+  });
+
   test('the same idea and answers derived again make ZERO calls', async () => {
     const { gs, target, tallyId } = await replanned();
     const again = await derivePlan({ idea: FIXTURE_IDEA, answers: { [tallyId]: 'object' } }, deps(POISONED, gs, target));
