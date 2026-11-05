@@ -245,6 +245,18 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.deepEqual({ calls: again.plan.cost.calls, cachedStops: again.plan.cost.cachedStops }, { calls: 1, cachedStops: 2 });
   });
 
+  test('cancelled midway: the derivation stops before its next question, says so, and writes no tree', async () => {
+    const gs = tempDir('derive-engine-gs-');
+    const model = fakeModel();
+    const d = deps(model.run, gs, tempDir('derive-engine-target-'));
+    d.isCancelled = () => model.asked.length >= 2;
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, d);
+    assert.ok(!out.ok);
+    assert.match(out.reason, /cancelled/);
+    assert.equal(model.asked.length, 2, 'nothing was sent after the cancel');
+    assert.equal(fs.existsSync(path.join(gs, 'derived')), false);
+  });
+
   test('a node: import is one of Node\'s own modules, and is allowed', async () => {
     const tally = "import { strict as assert } from 'node:assert';\nexport function total(xs) {\n  assert.ok(Array.isArray(xs));\n  return xs.reduce((a, b) => a + b, 0);\n}\n";
     const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': tally, 'cli/main.mjs': MAIN }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
