@@ -16,7 +16,7 @@ import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
 import { renderPage } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import { DIALS, type Dial } from './request.js';
-import type { PanelState } from './protocol.js';
+import type { BuildEnding, PanelState } from './protocol.js';
 
 /** The shape `repo-tour/skins` actually exports — everything `view.ts` reads from it. */
 export interface SkinsModule {
@@ -65,6 +65,12 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .submit-note { font-size:12px; margin-top:8px; min-height:14px; }
 .submit-note[data-kind="rejected"], .submit-note[data-kind="failed"] { color:var(--kw); }
 `;
+
+/** What the note says on a fresh render: a running build, else how the last one ended, else nothing. */
+function noteKind(state: PanelState): '' | 'building' | BuildEnding {
+  if (state.building) return 'building';
+  return state.ended ?? '';
+}
 
 function problemDiv(field: 'idea' | 'repo' | 'target', message: string | undefined): string {
   return `<div class="problem" data-field="${field}" id="problem-${field}">${escapeHtml(message ?? '')}</div>`;
@@ -124,7 +130,7 @@ function bodyHtml(state: PanelState, skins: SkinsModule): string {
          what to fix, a repeated refusal says "Still" and how many times, an accepted press says
          the build is running and where its progress is, and the end of a build says how it
          ended. The build's own progress notification is in the corner, not here. -->
-    <p class="submit-note" id="submit-note" role="status" aria-live="polite" data-kind="${state.building ? 'building' : ''}">${state.building ? escapeHtml(SUBMIT_NOTES.building) : ''}</p>
+    <p class="submit-note" id="submit-note" role="status" aria-live="polite" data-kind="${noteKind(state)}">${noteKind(state) ? escapeHtml(SUBMIT_NOTES[noteKind(state) as keyof typeof SUBMIT_NOTES]) : ''}</p>
   </form>
 </main>`;
 }

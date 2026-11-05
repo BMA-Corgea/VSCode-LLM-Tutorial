@@ -55,6 +55,9 @@ suite('the start screen — real WebviewPanel wiring (AC1, AC2, AC6)', () => {
   teardown(() => {
     panel?.dispose();
     panel = undefined;
+    // A test here accepts a press with a fake onSubmit that never ends a build, and "a build is
+    // running" is window-wide (T-15): end it, or every later valid press in this host is busy.
+    StartPanel.buildFinished('cancelled');
   });
 
   test('AC1: form:submit with recreate ticked and no repo is REJECTED, naming repo', async () => {
@@ -167,6 +170,9 @@ suite('StartPanel.reportProblem — a build-time refusal surfaces in the form (A
   teardown(() => {
     panel?.dispose();
     panel = undefined;
+    // A test here accepts a press with a fake onSubmit that never ends a build, and "a build is
+    // running" is window-wide (T-15): end it, or every later valid press in this host is busy.
+    StartPanel.buildFinished('cancelled');
   });
 
   test('posts a form:problems message and merges onto whatever was already there', async () => {
@@ -264,6 +270,9 @@ suite('StartPanel ignores malformed webview messages (review finding 3)', () => 
   teardown(() => {
     panel?.dispose();
     panel = undefined;
+    // A test here accepts a press with a fake onSubmit that never ends a build, and "a build is
+    // running" is window-wide (T-15): end it, or every later valid press in this host is busy.
+    StartPanel.buildFinished('cancelled');
   });
 
   const PROBES: Array<[string, unknown]> = [

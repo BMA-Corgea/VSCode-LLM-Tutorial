@@ -59,6 +59,13 @@ export interface PanelState {
    * replies with identical words — the defect again, one press later.
    */
   refusedInARow: number;
+  /**
+   * How the last build ended, until the next edit or press (code review finding 4). Without it a
+   * re-render — every tab switch re-renders, since the page is not kept while hidden — wiped the
+   * note, and a screen whose build had been built or cancelled became byte-identical to one never
+   * pressed.
+   */
+  ended?: BuildEnding;
 }
 
 /** How a build that the start screen started came to an end — what its note says afterwards. */
@@ -116,7 +123,7 @@ export async function handleStartMessage(
   switch (message.type) {
     case 'form:changed': {
       const { problems } = validateRequest(message.payload.request);
-      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0 };
+      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined };
       return { state: next, post: { type: 'form:problems', payload: { problems } } };
     }
     // T-15: split from `form:changed`, which it used to share a case with. The old shared
@@ -129,7 +136,7 @@ export async function handleStartMessage(
       // time a person can see it, but a double-click lands both clicks before that reply arrives.
       if (state.building) return { state, post: { type: 'form:busy' } };
       const { ok, problems } = validateRequest(message.payload.request);
-      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0 };
+      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined };
       if (ok) {
         effects.submit(message.payload.request);
         next.building = true;
@@ -156,7 +163,7 @@ export async function handleStartMessage(
       if (picked === undefined) return { state }; // cancelled — nothing changed
       const request: BuildRequest = { ...state.request, [field]: picked };
       const { problems } = validateRequest(request);
-      return { state: { ...state, request, problems, refusedInARow: 0 }, post: { type: 'field:set', payload: { field, value: picked, problems } } };
+      return { state: { ...state, request, problems, refusedInARow: 0, ended: undefined }, post: { type: 'field:set', payload: { field, value: picked, problems } } };
     }
     case 'skin:set': {
       effects.persistSkin(message.payload.skin);

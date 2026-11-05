@@ -186,27 +186,33 @@ export async function runBuild(
   request: BuildRequest,
   build: typeof buildFromRequest = buildFromRequest,
 ): Promise<void> {
-  await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
-  const outcome = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
-    async (progress, token) => {
-      let built: BuildOutcome;
-      try {
-        built = await build(request, buildContextFor(context, core, progress, token));
-      } catch (err) {
-        // `buildFromRequest` reports its failures rather than throwing — except where it cannot,
-        // e.g. the write-ahead marker failing to write to the target. A throw here used to skip
-        // `reportOutcome` entirely and leave the start screen at "Building…" for good (and, since
-        // the build became window-wide, every start screen opened after it too). It is a failed
-        // build like any other, and the person is told so.
-        built = { ok: false, reason: err instanceof Error ? err.message : String(err) };
-      }
-      reportOutcome(built, true);
-      return built;
-    },
-  );
+  // The press was accepted the moment this runs, so the window believes a build is running — and
+  // ONLY `reportOutcome` lets it stop believing that. So every path below reaches it exactly once:
+  // a build body that throws, and the bookmark write before it, included. Either one escaping used
+  // to leave every start screen in the window at "Building…" until a reload (code review finding 1,
+  // security review finding 3). `buildFromRequest` itself reports failures rather than throwing,
+  // except where it cannot — the write-ahead marker failing to write to the target.
+  let outcome: BuildOutcome;
+  try {
+    await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
+    outcome = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
+      async (progress, token): Promise<BuildOutcome> => {
+        try {
+          return await build(request, buildContextFor(context, core, progress, token));
+        } catch (err) {
+          return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    );
+  } catch (err) {
+    outcome = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+  // After the progress has closed: the ending is told once, on screen and in a notification, and
+  // nothing waits on the person to dismiss anything.
+  reportOutcome(outcome, true);
   await forgetUnlessResumable(context, request.target);
-  if (outcome?.ok) await openOrOfferWalk(context, request.target);
+  if (outcome.ok) await openOrOfferWalk(context, request.target);
 }
 
 async function runStartCommand(context: vscode.ExtensionContext): Promise<void> {

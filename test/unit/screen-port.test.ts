@@ -23,11 +23,22 @@ function filesUnder(dir: string): string[] {
 }
 
 suite('the screen-reading DevTools port never reaches what ships (T-15)', () => {
-  test('nothing under src/, nor package.json, names the debugging flag', () => {
-    const shipped = [...filesUnder(path.join(ROOT, 'src')), path.join(ROOT, 'package.json')];
+  test('nothing that ships names the debugging flag — the sources, the manifest, the launchers, the built bundles', () => {
+    // The launchers and the bundles are in the .vsix too (security review finding 4): a flag added to
+    // `build-tutorials` or compiled into `dist/extension.js` would ship while a src-only scan stayed green.
+    const shipped = [
+      ...filesUnder(path.join(ROOT, 'src')),
+      ...['package.json', 'build-tutorials', 'start.sh', 'dist/extension.js', 'dist/doctor.js'].map((p) => path.join(ROOT, p)),
+    ];
+    for (const p of shipped) assert.ok(fs.existsSync(p), `expected to read ${p} (built first by \`npm run build\`)`);
     assert.ok(shipped.length > 10, `expected to read the shipped sources, found ${shipped.length} files`);
     const naming = shipped.filter((f) => fs.readFileSync(f, 'utf8').includes(FLAG));
     assert.deepEqual(naming, [], 'a shipped file names the DevTools debugging flag');
+  });
+
+  test('no shipped source imports the test harness', () => {
+    const importing = filesUnder(path.join(ROOT, 'src')).filter((f) => /from ['"][./]*\.\.\/test\/|test\/support\//.test(fs.readFileSync(f, 'utf8')));
+    assert.deepEqual(importing, [], 'a file under src/ imports from test/ — the screen client would be bundled into the extension');
   });
 
   test('the only file that sets it is the test config, and the package excludes that file and test/', () => {

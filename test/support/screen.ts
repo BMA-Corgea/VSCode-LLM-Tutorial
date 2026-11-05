@@ -103,7 +103,17 @@ export class Screen {
     const id = ++this.next;
     this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+      // A command sent into a frame that is being torn down can go unanswered for good. Without a
+      // deadline that is a test hanging until mocha's own timeout, which says nothing about why;
+      // with one it is a failure that names the command — and `stale`-shaped, so a reader retries.
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        reject(new ScreenUnreadable(`no answer to ${method} within 10 s — Session with given id not found (presumed)`));
+      }, 10_000);
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timer); (resolve as (value: unknown) => void)(value); },
+        reject: (err) => { clearTimeout(timer); reject(err); },
+      });
     });
   }
 

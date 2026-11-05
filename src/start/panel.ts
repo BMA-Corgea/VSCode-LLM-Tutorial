@@ -48,10 +48,16 @@ export interface StartPanelDeps {
 export class StartPanel {
   private static current: StartPanel | undefined;
   /**
-   * A build started from the start screen is running (T-15). WINDOW-wide, not per panel: the tab
-   * can be closed and reopened while a build runs, and a fresh panel that believed nothing was
-   * running offered a live button for a second build of the same target. Set when a press is
-   * accepted; cleared by `buildFinished`.
+   * A build started from the start screen is running (T-15). THE one record of it: WINDOW-wide, not
+   * per panel, because the tab can be closed and reopened while a build runs and a fresh panel that
+   * believed nothing was running offered a live button for a second build.
+   *
+   * Set SYNCHRONOUSLY inside `submit`, before any `await`, so a second press handled in the same
+   * tick already sees it (review: the gate was not atomic). Cleared only by `buildFinished`. And
+   * never written from a `PanelState` snapshot: `onMessage` awaits the handler — for a folder pick
+   * that is the native dialog, open for as long as the person likes — and a snapshot taken before
+   * the dialog said "building" after the build had ended, which wedged every start screen in the
+   * window at "Building…" until a reload (code review finding 2, security review finding 2).
    */
   private static running = false;
 
@@ -75,7 +81,10 @@ export class StartPanel {
         });
         return picked?.[0]?.fsPath;
       },
-      submit: (request) => this.deps.onSubmit(request),
+      submit: (request) => {
+        StartPanel.running = true;
+        this.deps.onSubmit(request);
+      },
       persistSkin: (name) => { void writeSkin(context.globalState, name); },
     };
 
@@ -151,7 +160,7 @@ export class StartPanel {
     StartPanel.running = false;
     const open = StartPanel.current;
     if (!open) return undefined;
-    open.state = { ...open.state, building: false, refusedInARow: 0 };
+    open.state = { ...open.state, building: false, refusedInARow: 0, ended };
     const post: OutboundMessage = { type: 'form:idle', payload: { ended } };
     void open.panel.webview.postMessage(post);
     return post;
@@ -163,7 +172,7 @@ export class StartPanel {
   }
 
   private render(): void {
-    this.panel.webview.html = renderStartHtml(this.state, this.deps.skins);
+    this.panel.webview.html = renderStartHtml({ ...this.state, building: StartPanel.running }, this.deps.skins);
   }
 
   /**
@@ -186,9 +195,10 @@ export class StartPanel {
       }
       return undefined;
     }
-    const { state, post } = await handleStartMessage(this.state, message, this.effects);
-    this.state = state;
-    if (state.building) StartPanel.running = true;
+    const { state, post } = await handleStartMessage({ ...this.state, building: StartPanel.running }, message, this.effects);
+    // Everything the message decided, EXCEPT whether a build is running: that is read live, after
+    // the await (see `running`).
+    this.state = { ...state, building: StartPanel.running };
     if (post) void this.panel.webview.postMessage(post);
     return post;
   }

@@ -63,10 +63,12 @@ function validRequest(): BuildRequest {
 const filled = (s: Snap): boolean => s.fields.every((v) => v !== '') && s.problems.every((p) => p === '');
 
 /** A build body the test controls. `end` settles it; `isCancelled` sees the real Cancel button. */
+const held: Array<(o: BuildOutcome) => void> = [];
+
 function heldBuild(): { build: (r: BuildRequest, ctx: BuildContext) => Promise<BuildOutcome>; end: (o: BuildOutcome) => void; started: () => number } {
   let release: ((o: BuildOutcome) => void) | undefined;
   let done = false;
-  const ended = new Promise<BuildOutcome>((resolve) => { release = resolve; }).finally(() => { done = true; });
+  const ended = new Promise<BuildOutcome>((resolve) => { release = resolve; held.push(resolve); }).finally(() => { done = true; });
   let calls = 0;
   return {
     build: async (_r, ctx) => {
@@ -81,6 +83,7 @@ function heldBuild(): { build: (r: BuildRequest, ctx: BuildContext) => Promise<B
       ]);
     },
     end: (o) => release?.(o),
+    // (registered below, so teardown can end a build a failing test never did)
     started: () => calls,
   };
 }
@@ -118,6 +121,9 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   });
 
   teardown(async () => {
+    // A test that failed before ending its build would leave a live progress and a running flag for
+    // the next one (code review finding 6): end them all.
+    for (const release of held.splice(0)) release({ ok: false, cancelled: true, reason: 'ended by the test teardown' });
     if (frame?.targetId) gone.add(frame.targetId);
     panel?.dispose();
     panel = undefined;
@@ -259,10 +265,12 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     assert.equal(ended.note, SUBMIT_NOTES.failed);
     assert.equal(ended.problems[1], 'EACCES: the target folder is read-only');
     await run;
+    if (frame?.targetId) gone.add(frame.targetId);
     panel!.dispose();
     panel = StartPanel.show(context, { skins, onSubmit: () => undefined });
-    const again = await screen.webview(TITLE);
-    assert.equal((await screen.reader<Snap>(TITLE, SNAPSHOT, again)()).button, 'Build the plan', 'a reopened screen must not be stuck building');
+    const again = await screen.webview(TITLE, undefined, gone);
+    frame = again;
+    assert.equal((await screen.reader<Snap>(TITLE, SNAPSHOT, again, gone)()).button, 'Build the plan', 'a reopened screen must not be stuck building');
     assert.deepEqual(unhandled, []);
   });
 
@@ -275,10 +283,12 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await press(page);
     await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
 
+    if (frame?.targetId) gone.add(frame.targetId);
     panel!.dispose(); // the learner closes the tab while the build runs
     panel = StartPanel.show(context, { skins, onSubmit: () => { throw new Error('a reopened screen must not start a second build'); } });
-    const reopened = await screen.webview(TITLE);
-    const readAgain = screen.reader<Snap>(TITLE, SNAPSHOT, reopened);
+    const reopened = await screen.webview(TITLE, undefined, gone);
+    frame = reopened;
+    const readAgain = screen.reader<Snap>(TITLE, SNAPSHOT, reopened, gone);
     const mid = await readAgain();
     assert.equal(mid.button, 'Building… [disabled]', 'a start screen opened mid-build offered a live button for a second build');
     assert.equal(mid.note, SUBMIT_NOTES.building);
@@ -295,6 +305,82 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     }
     assert.ok(shown.some((n) => n.includes('the network went away')), `the build's ending never reached the person: ${JSON.stringify(shown)}`);
     assert.deepEqual(unhandled, [], 'the ending threw where nobody was listening');
+  });
+
+  test('a folder picker left open across the END of a build never brings "Building…" back (review: code 2, security 2)', async () => {
+    // The native dialog is held open by the test; the real page's Browse… button opens it.
+    const original = vscode.window.showOpenDialog;
+    let closeDialog: ((v: vscode.Uri[] | undefined) => void) | undefined;
+    (vscode.window as { showOpenDialog: typeof original }).showOpenDialog = () =>
+      new Promise<vscode.Uri[] | undefined>((resolve) => { closeDialog = resolve; });
+    try {
+      const build = heldBuild();
+      let builds = 0;
+      const { page, read } = await open((r) => { builds += 1; void runBuild(context, core, r, build.build); });
+      await fill(page, validRequest());
+      await until(read, filled, 'valid form');
+      await press(page);
+      await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+
+      await screen.reader(TITLE, `document.getElementById('browse-target').click()`, page, gone)();
+      const deadline = Date.now() + 5_000;
+      while (!closeDialog && Date.now() < deadline) await sleep(50);
+      assert.ok(closeDialog, 'Browse… never opened the (held) folder dialog');
+
+      build.end({ ok: false, reason: 'failed while the picker was open' });
+      await until(read, (s) => s.button === 'Build the plan', 'the build ended while the dialog was open');
+      closeDialog(undefined); // the person cancels the dialog AFTER the build has ended
+      await sleep(300);
+
+      assert.equal(panel!.getStateForTest().building, false, 'a dialog opened before the ending wrote "building" back');
+      await press(page); // the form is still valid: this must start a build, not be told one is running
+      const next = await until(read, (s) => s.note === SUBMIT_NOTES.building || s.note === SUBMIT_NOTES.busy, 'the next press is answered');
+      assert.equal(next.note, SUBMIT_NOTES.building, 'the window still believed a finished build was running');
+      assert.equal(builds, 2);
+    } finally {
+      (vscode.window as { showOpenDialog: typeof original }).showOpenDialog = original;
+    }
+  });
+
+  test('a tab switch keeps how the build ended — a finished screen never looks unpressed (code review 4)', async () => {
+    const build = heldBuild();
+    const { page, read } = await open((r) => { void runBuild(context, core, r, build.build); });
+    await fill(page, validRequest());
+    await until(read, filled, 'valid form');
+    await press(page);
+    await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+    build.end({ ok: false, cancelled: true, reason: 'build cancelled before reading the repository' });
+    await until(read, (s) => s.note === SUBMIT_NOTES.cancelled, 'cancelled');
+
+    // Another editor in the same column hides the start tab; the page is not kept while hidden.
+    await vscode.commands.executeCommand('workbench.action.files.newUntitledFile');
+    await sleep(500);
+    StartPanel.show(context, { skins, onSubmit: () => undefined }); // reveal it again: a fresh render
+    const back = await until(read, (s) => s.button === 'Build the plan', 'the start tab is back');
+    assert.equal(back.note, SUBMIT_NOTES.cancelled, 'the re-render forgot how the build ended');
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  test('AC6 for a SUCCESSFUL build: the progress closes and the bookmark clears with nobody closing a message', async () => {
+    const build = heldBuild();
+    const request = validRequest();
+    const { page, read } = await open((r) => { void runBuild(context, core, r, build.build); });
+    await fill(page, request);
+    await until(read, filled, 'valid form');
+    await press(page);
+    await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+    build.end({ ok: true, plan: { chapters: [], steps: [] }, cost: { metered: false, usd: 0, inputTokens: 0, outputTokens: 0 } });
+    await until(read, (s) => s.note === SUBMIT_NOTES.built, 'built');
+    const deadline = Date.now() + 3_000;
+    while (context.workspaceState.get(BOOKMARK) !== undefined && Date.now() < deadline) await sleep(100);
+    assert.equal(context.workspaceState.get(BOOKMARK), undefined, 'the bookmark waited on a toast nobody had closed');
+    let left = await centre();
+    const until2 = Date.now() + 2_000;
+    while (left.some((n) => n.includes('Cancel')) && Date.now() < until2) {
+      await sleep(200);
+      left = await centre();
+    }
+    assert.ok(!left.some((n) => n.includes('Cancel')), `a progress notification with Cancel outlived a successful build: ${JSON.stringify(left)}`);
   });
 
   test('AC6: the progress closes when the build ends — nothing after it waits for a message to be closed', async () => {

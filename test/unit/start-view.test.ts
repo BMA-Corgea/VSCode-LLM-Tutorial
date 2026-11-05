@@ -434,6 +434,14 @@ suite('a press always changes something on the page (T-15)', () => {
     assert.equal(dom.elements.get('submit-note')?.textContent, SUBMIT_NOTES.building);
   });
 
+  test('a re-render after a build ended still says how it ended (code review finding 4)', () => {
+    for (const ended of ['built', 'failed', 'cancelled'] as const) {
+      const html = renderStartHtml(state({ ended }), FAKE_SKINS);
+      assert.ok(html.includes(`data-kind="${ended}">${SUBMIT_NOTES[ended]}</p>`), `a re-render after "${ended}" forgot how the build ended`);
+    }
+    assert.ok(renderStartHtml(state(), FAKE_SKINS).includes('data-kind=""></p>'), 'and a fresh screen says nothing (discriminates)');
+  });
+
   test('the note under the button is not drawn as a problem line (N5)', () => {
     const html = renderStartHtml(state({ building: true }), FAKE_SKINS);
     assert.match(html, /<p class="submit-note" id="submit-note"[^>]*data-kind="building"/);

@@ -107,6 +107,19 @@ suite('handleStartMessage — a press always says something new (T-15, 2026-11-0
     assert.equal(picked.state.refusedInARow, 0);
   });
 
+  test('how the last build ended is kept until the next edit, press or pick — and no longer', async () => {
+    const effects = fakeEffects({ pickFolder: () => Promise.resolve(tmpEmptyDir()) });
+    const after = freshState({ ended: 'built' });
+    for (const message of [
+      { type: 'form:changed', payload: { request: BAD } },
+      { type: 'form:submit', payload: { request: BAD } },
+      { type: 'pick:repo' },
+    ] as const) {
+      const result = await handleStartMessage(after, message, effects);
+      assert.equal(result.state.ended, undefined, `${message.type} left a stale ending on the screen`);
+    }
+  });
+
   test('a press while a build is running starts NOTHING and replies form:busy (a double-click)', async () => {
     const effects = fakeEffects();
     const request: BuildRequest = { idea: '', recreate: true, repo: tmpEmptyDir(), target: tmpEmptyDir(), dial: 'manual' };
