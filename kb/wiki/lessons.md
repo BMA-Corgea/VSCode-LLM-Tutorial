@@ -34,7 +34,7 @@ defect: it only misses it because something else catches the defect first. Stack
 right — two halves of containment, a parser behind a cache. But each half needs its own pin, or
 the day the covering half is loosened, both go at once and the suite notices neither.
 
-Tooling note from the same build: the file-writing tool turned the escapes ` ` and ` `
+Tooling note from the same build: the file-writing tool turned the escapes `\u2028` and `\u2029`
 into the raw characters, and a raw U+2028 ends a JavaScript line. It broke a regex mid-literal.
 `String.fromCharCode(0x2028)` writes the same value with no escape for a tool to "helpfully"
 decode. Check new files with `grep -cP "\x{2028}|\x{2029}"`.
