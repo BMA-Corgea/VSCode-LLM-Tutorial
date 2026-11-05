@@ -403,6 +403,28 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     assert.match(out.reason, /already has/);
   });
 
+  test('a state handed in from outside is re-checked: a hostile step path is refused before anything is asked or written', async () => {
+    const b = await base();
+    const tampered: DerivationState = JSON.parse(JSON.stringify(b.first.state)) as DerivationState;
+    const main = tampered.nodes.find((n) => n.path === 'cli/main.mjs')!;
+    main.path = 'cli/../../escape.mjs';
+    tampered.files['cli/../../escape.mjs'] = tampered.files['cli/main.mjs']!;
+    delete tampered.files['cli/main.mjs'];
+    tampered.entry = main.path;
+    const out = await replanPlan(tampered, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(POISONED, b.gs, b.target));
+    assert.ok(!out.ok);
+    assert.match(out.reason, /cannot be replanned: .*climbs out of the reference tree/);
+  });
+
+  test('a state that holds code for a path the plan does not have is refused', async () => {
+    const b = await base();
+    const tampered: DerivationState = JSON.parse(JSON.stringify(b.first.state)) as DerivationState;
+    tampered.files['cli/stray.mjs'] = 'export {};\n';
+    const out = await replanPlan(tampered, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(POISONED, b.gs, b.target));
+    assert.ok(!out.ok);
+    assert.match(out.reason, /not one of its file steps/);
+  });
+
   test('a replan that replaces the entry file without naming a new one is refused', async () => {
     const b = await base();
     const moved = fakeModel({}, (input) => {

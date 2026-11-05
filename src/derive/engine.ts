@@ -38,11 +38,12 @@ import os from 'node:os';
 import path from 'node:path';
 import type { DialCore, FileRecord } from '../dial/core.js';
 import { languageOf } from '../dial/core.js';
+import { writeTextAtomic } from '../dial/writer.js';
 import { askOnce, newTally, type AskTally, type DeriveAskDeps } from './ask.js';
 import { assemblePlan, lineCountOf, stepIdFor, type DeriveCost, type DerivedPlan, type ExtractLike } from './assemble.js';
 import { ancestorsOf, externalDependencies, insertInOrder, keptBy } from './graph.js';
 import {
-  codePrompt, outlinePrompt, parseCodeReply, parseOutlineReply, parseReplanReply, replanPrompt, validatePlan,
+  codePrompt, outlinePrompt, parseCodeReply, parseOutlineReply, parseReplanReply, replanPrompt, unsafeDerivedFileReason, validatePlan,
   type DecisionForPrompt, type DependencyForPrompt, type ShownStep,
 } from './prompt.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
@@ -151,9 +152,12 @@ async function extractAll(core: Pick<DialCore, 'extract'>, files: readonly Deriv
   try {
     const records: FileRecord[] = [];
     for (const f of files) {
+      // Contained, lexically and on disk: `writeTextAtomic` proves the destination is really
+      // inside the scratch folder before a byte moves. The paths were checked when they were
+      // parsed, but this write runs BEFORE the tree writer's own check, so it must not be the
+      // place a bad path gets through first.
       const abs = path.join(scratch, ...f.path.split('/'));
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, f.content);
+      writeTextAtomic(abs, f.content, scratch);
       const language = languageOf(f.path);
       if (language === undefined) return `${f.path} has no grammar`;
       records.push({
@@ -313,6 +317,30 @@ async function replanCore(
 }
 
 /**
+ * Why a state handed in from OUTSIDE may not be replanned, or `null`. T-22 will keep each version
+ * of a `DerivationState` on disk, so a state reaching `replanPlan` is model output re-entering from
+ * a file. That makes it a second door exactly as the cache is (T-7), and it gets the same rules
+ * the parser applied the first time: the whole-plan rules, the file-path rule for every file
+ * step, and no code filed under a path the plan does not have.
+ */
+export function unsoundStateReason(state: DerivationState): string | null {
+  if (state.language !== 'javascript' && state.language !== 'python') return 'it names a language this engine does not write';
+  const problem = validatePlan(state.chapters, state.nodes, state.entry);
+  if (problem !== null) return problem.refused;
+  const filePaths = new Set<string>();
+  for (const n of state.nodes) {
+    if (n.kind !== 'file') continue;
+    const unsafe = unsafeDerivedFileReason(n.path, n.chapter, state.language);
+    if (unsafe !== null) return `its step ${JSON.stringify(n.path.slice(0, 60))} ${unsafe}`;
+    filePaths.add(n.path);
+  }
+  for (const p of Object.keys(state.files)) {
+    if (!filePaths.has(p)) return `it holds code for ${JSON.stringify(p.slice(0, 60))}, which is not one of its file steps`;
+  }
+  return null;
+}
+
+/**
  * The walk's door: the learner answered `stepId` with `answer`; `prefixStepIds` are the steps they
  * have walked, kept verbatim whatever the answer reaches. Returns the NEW plan and its new tree;
  * `prev` is untouched.
@@ -322,6 +350,8 @@ export async function replanPlan(
 ): Promise<DeriveOutcome> {
   const tally = newTally();
   const fail = (reason: string): DeriveOutcome => ({ ok: false, reason, cost: costOf(tally, deps) });
+  const unsound = unsoundStateReason(prev);
+  if (unsound !== null) return fail(`the plan handed in cannot be replanned: ${unsound}`);
   const byId = new Map(prev.nodes.map((n) => [stepIdFor(n), n] as const));
   const node = byId.get(stepId);
   if (node === undefined) return fail(`there is no step ${JSON.stringify(stepId)} in this plan`);
