@@ -4,9 +4,10 @@
  *
  * `.vscode-test.mjs` launches the test host with `--remote-debugging-port=0`. A debugging port in
  * the SHIPPED extension would let any local process drive a learner's editor, so this pins the two
- * things that keep it out: nothing that ships names the flag, and `.vscodeignore` keeps the test
- * config and the test sources out of the package. (Checked by reading the files that ship, not by
- * test — a new file under `src/` is covered because the walk below reads all of them.)
+ * things that keep it out: nothing that ships names the flag or imports the harness, and
+ * `.vscodeignore` keeps the test config and the test sources out of the package. It reads the
+ * sources (every file under `src/`, so a new one is covered), the manifest, the two launchers and
+ * the two built bundles — not the packed `.vsix`, whose contents `scripts/package.mjs` verifies.
  */
 import * as assert from 'node:assert/strict';
 import fs from 'node:fs';

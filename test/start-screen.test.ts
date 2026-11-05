@@ -307,6 +307,37 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     assert.deepEqual(unhandled, [], 'the ending threw where nobody was listening');
   });
 
+  test('AC5: a start tab closed mid-build and LEFT closed still hears the ending — the failure, and on success the walk offer (code review 7)', async () => {
+    for (const outcome of [
+      { ok: false, reason: 'refused while nobody was looking' } as BuildOutcome,
+      { ok: true, plan: { chapters: [], steps: [] }, cost: { metered: false, usd: 0, inputTokens: 0, outputTokens: 0 } } as BuildOutcome,
+    ]) {
+      await vscode.commands.executeCommand('notifications.clearAll');
+      const build = heldBuild();
+      let run: Promise<void> | undefined;
+      const { page, read } = await open((r) => { run = runBuild(context, core, r, build.build); });
+      await fill(page, validRequest());
+      await until(read, filled, 'valid form');
+      await press(page);
+      await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+      if (frame?.targetId) gone.add(frame.targetId);
+      panel!.dispose(); // closed, and never reopened
+      panel = undefined;
+
+      build.end(outcome);
+      const expected = outcome.ok ? 'Plan built — open the folder to start?' : 'refused while nobody was looking';
+      const deadline = Date.now() + 5_000;
+      let shown: string[] = [];
+      while (Date.now() < deadline && !shown.some((n) => n.includes(expected))) {
+        shown = await centre();
+        await sleep(100);
+      }
+      assert.ok(shown.some((n) => n.includes(expected)), `with the tab closed, the ending never reached the person: ${JSON.stringify(shown)}`);
+      if (!outcome.ok) await run;
+      assert.deepEqual(unhandled, [], 'the ending threw where nobody was listening');
+    }
+  });
+
   test('a folder picker left open across the END of a build never brings "Building…" back (review: code 2, security 2)', async () => {
     // The native dialog is held open by the test; the real page's Browse… button opens it.
     const original = vscode.window.showOpenDialog;
