@@ -27,9 +27,7 @@
  */
 
 import * as assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { resolveCoreRoot } from '../../src/core.js';
+import { BUILD_PLAN_SCHEMA, validateBuildPlan, type JsonSchema } from './plan-schema.js';
 import { currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCheck, setCurrent, setDial, statusText, stepDial, treeModel, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
@@ -298,88 +296,10 @@ suite('statusText — the status bar line (AC6)', () => {
   });
 });
 
-// ── the fixture plan, against repo-tour's real schema ───────────────────────────────────────
-//
-// A hand-rolled draft-07 subset checker, mirroring test/unit/build.test.ts's own (which in
-// turn mirrors repo-tour's T-12 test) — no ajv, same reasoning: a small checker over exactly
-// the subset schema/build-plan.schema.json uses ($ref, const, enum, oneOf, type,
-// required/properties, items/minItems) needs no runtime dependency, and duplicating it per
-// test file is the deliberate house pattern rather than a shared helper in src/.
+// ── repo-tour's real schema, through the ONE shared checker (test/unit/plan-schema.ts, hoisted
+// by T-17 from the two byte-identical copies this file and its sibling used to carry). ──
 
-const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
-
-type JsonSchema = Record<string, unknown>;
-
-function resolveRef(root: JsonSchema, ref: string): JsonSchema {
-  const parts = ref.replace(/^#\//, '').split('/');
-  let cur: unknown = root;
-  for (const p of parts) cur = (cur as Record<string, unknown>)[p];
-  return cur as JsonSchema;
-}
-
-function validateAgainst(root: JsonSchema, schema: JsonSchema, value: unknown, at: string, errors: string[]): void {
-  if (typeof schema['$ref'] === 'string') {
-    validateAgainst(root, resolveRef(root, schema['$ref']), value, at, errors);
-    return;
-  }
-  if ('const' in schema) {
-    if (value !== schema['const']) errors.push(`${at}: expected ${JSON.stringify(schema['const'])}, got ${JSON.stringify(value)}`);
-    return;
-  }
-  if (Array.isArray(schema['enum'])) {
-    if (!schema['enum'].includes(value)) errors.push(`${at}: expected one of ${JSON.stringify(schema['enum'])}, got ${JSON.stringify(value)}`);
-    return;
-  }
-  if (Array.isArray(schema['oneOf'])) {
-    const matches = (schema['oneOf'] as JsonSchema[]).filter((s) => {
-      const sub: string[] = [];
-      validateAgainst(root, s, value, at, sub);
-      return sub.length === 0;
-    });
-    if (matches.length !== 1) errors.push(`${at}: expected exactly one oneOf branch to match, ${matches.length} did`);
-    return;
-  }
-  if (schema['type'] !== undefined) {
-    const types = Array.isArray(schema['type']) ? (schema['type'] as string[]) : [schema['type'] as string];
-    const ok = types.some((t) => {
-      if (t === 'null') return value === null;
-      if (t === 'array') return Array.isArray(value);
-      if (t === 'integer') return typeof value === 'number' && Number.isInteger(value);
-      if (t === 'object') return typeof value === 'object' && value !== null && !Array.isArray(value);
-      return typeof value === t;
-    });
-    if (!ok) {
-      errors.push(`${at}: expected type ${JSON.stringify(schema['type'])}, got ${JSON.stringify(value)}`);
-      return;
-    }
-  }
-  if (schema['type'] === 'object' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    const obj = value as Record<string, unknown>;
-    for (const key of (schema['required'] as string[] | undefined) ?? []) {
-      if (!(key in obj)) errors.push(`${at}: missing required key "${key}"`);
-    }
-    const props = (schema['properties'] as Record<string, JsonSchema> | undefined) ?? {};
-    for (const [key, sub] of Object.entries(props)) {
-      if (key in obj) validateAgainst(root, sub, obj[key], `${at}.${key}`, errors);
-    }
-  }
-  if (schema['type'] === 'array' && Array.isArray(value)) {
-    if (typeof schema['minItems'] === 'number' && value.length < schema['minItems']) {
-      errors.push(`${at}: expected at least ${schema['minItems']} items, got ${value.length}`);
-    }
-    if (schema['items']) value.forEach((v, i) => validateAgainst(root, schema['items'] as JsonSchema, v, `${at}[${i}]`, errors));
-  }
-}
-
-function validateBuildPlan(schema: JsonSchema, value: unknown): string[] {
-  const errors: string[] = [];
-  validateAgainst(schema, schema, value, '$', errors);
-  return errors;
-}
-
-const SCHEMA: JsonSchema = JSON.parse(
-  fs.readFileSync(path.join(CORE_ROOT, 'schema', 'build-plan.schema.json'), 'utf8'),
-) as JsonSchema;
+const SCHEMA: JsonSchema = BUILD_PLAN_SCHEMA;
 
 suite('the fixture plan itself — a legitimate BuildPlan, not merely a plausible-looking one', () => {
   test('validates against repo-tour\'s real schema/build-plan.schema.json', () => {
