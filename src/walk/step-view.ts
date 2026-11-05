@@ -727,6 +727,11 @@ main, section, .option { min-width:0; }
 .check-summary.check-pass { border-left-color:var(--status-ok); }
 .check-summary.check-fail { border-left-color:var(--status-bad); }
 .check-missing .check-status { outline:1px solid var(--status-bad); outline-offset:-1px; }
+/* Under System the missing chip takes the same neutral fill as the others, so the ring alone
+   says "missing" (a blue fill under a red ring read as two signals at once). */
+:root:not([data-theme]) .check-missing .check-status { background:var(--chip); color:var(--ink); }
+/* F-01: a revealed outcome stops short of the panel's edge instead of sitting flush on it. */
+#outcome-check, #outcome-tutor, #outcome-detour { scroll-margin:12px 0 16px; }
 /* :not(:empty) because the open-file hint is always on the page, empty when the file exists,
    and an empty line must not grow a stray mark. */
 .hint:not(:empty), .write-note:not(:empty), .tutor-note:not(:empty), .detour-note:not(:empty),
@@ -734,6 +739,8 @@ main, section, .option { min-width:0; }
   border-left:2px solid var(--status-news); padding-left:8px;
 }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
+/* F-11: where in the plan this step sits. */
+.step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
 /* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
 .turn-text pre.tutor-code:focus-visible { outline:1px solid var(--focus); outline-offset:2px; }
 `;
@@ -1438,12 +1445,25 @@ function waitingMessage(stage: unknown): string {
   return stage === 'preparing' ? PREPARING_MESSAGE : THINKING_MESSAGE;
 }
 
+/**
+ * T-16 (F-11): "Step N of M", from the plan's own order. Empty when the plan does not list this
+ * step: a count that might be wrong is worse than none. Shared by the markup and
+ * `stepRenderKey`, so a plan whose length changes repaints.
+ */
+function stepCountText(state: StepViewState): string {
+  const steps = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+  const index = steps.findIndex((s) => s?.id === state.step.id);
+  return index >= 0 ? `Step ${index + 1} of ${steps.length}` : '';
+}
+
 function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   const step = state.step;
   const currentDial: Dial = resolvedDial(state.dial);
+  const count = stepCountText(state);
 
   return `
 <main id="step-main" data-step-id="${escapeAttr(planId(step.id))}">
+  ${count ? `<p class="step-count">${escapeHtml(count)}</p>` : ''}
   <div class="step-head">
     <h1>${escapeHtml(planText(step.decision.question))}</h1>
     ${pickerHtml(skins.SKINS, state.skin)}
@@ -1588,11 +1608,14 @@ const CLIENT_SCRIPT = `
   }
   // T-16 (F-10): a code block in an answer scrolls sideways rather than wrap, so it must take
   // keyboard focus to be scrolled without a mouse (WCAG 2.1.1). Only a block that really
-  // overflows gets a tab stop. Set here, not in the markup, which the escaping tests pin.
+  // overflows gets a tab stop, and only the newest twelve: a reply is model output, and a
+  // conversation stuffed with wide blocks must not put hundreds of stops between the step's
+  // controls and Ask (security review N-1). Set here, not in the markup the escaping tests pin.
   if (typeof document.querySelectorAll === 'function') {
     var blocks = document.querySelectorAll('pre.tutor-code');
-    for (var b = 0; b < blocks.length; b++) {
-      if (blocks[b].scrollWidth > blocks[b].clientWidth) { blocks[b].setAttribute('tabindex', '0'); }
+    var stops = 0;
+    for (var b = blocks.length - 1; b >= 0 && stops < 12; b--) {
+      if (blocks[b].scrollWidth > blocks[b].clientWidth) { blocks[b].setAttribute('tabindex', '0'); stops++; }
     }
   }
   var scrollQueued = false;
@@ -1717,10 +1740,12 @@ const CLIENT_SCRIPT = `
       // channel exists is that it reaches the page WITHOUT a repaint; a save that dropped the
       // draft would undo that in a different way.
       savedNote = note;
-      // T-16 (F-01): a note is the host answering a press WITHOUT a repaint (an empty ask, a
-      // refusal), so that press has had its answer: drop the pending reveal, and bring the
-      // note itself into view, because the learner pressed from further down the page.
-      revealKey = '';
+      // T-16 (F-01): a NON-EMPTY note is the host answering a press without a repaint (an
+      // empty ask, a refusal), so that press has had its answer: drop the pending reveal and
+      // bring the note itself into view, because the learner pressed from further down the
+      // page. An EMPTY note only clears an old one: an accepted ask posts it just before the
+      // repaint to "thinking", and that repaint still needs its reveal.
+      if (note) { revealKey = ''; }
       persist();
       if (el && note && typeof el.scrollIntoView === 'function') {
         el.scrollIntoView({ block: 'nearest', behavior: 'auto' });
@@ -1913,6 +1938,7 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
   const report = state.check?.report;
   return JSON.stringify([
     keyOf(id),
+    stepCountText(state),
     keyOf(decision.question),
     keyOfList<OptionLike | undefined>(decision.options, MAX_OPTIONS_RENDERED, (option) => [
       keyOf(option?.id), keyOf(option?.label), keyOf(option?.consequence), option?.taken,

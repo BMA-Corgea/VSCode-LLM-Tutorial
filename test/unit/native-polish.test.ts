@@ -24,7 +24,7 @@ import * as path from 'node:path';
 import { type SkinsModule } from '../../src/start/view.js';
 import { stepDial } from '../../src/walk/model.js';
 import type { StepViewState } from '../../src/walk/step-protocol.js';
-import { renderNoticeHtml, renderStepHtml } from '../../src/walk/step-view.js';
+import { renderNoticeHtml, renderStepHtml, stepRenderKey } from '../../src/walk/step-view.js';
 import { renderNarratorHtml, type NarratorViewState } from '../../src/detour/narrator.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
@@ -214,7 +214,7 @@ class El {
   scrollIntoView(opts: unknown): void { this.scrolled.push(opts); }
 }
 
-function runStepScript(html: string, saved?: unknown) {
+function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = []) {
   const elements = new Map<string, El>();
   for (const m of html.matchAll(/\sid="([^"]+)"/g)) elements.set(m[1]!, new El());
   const stepId = /<main id="step-main" data-step-id="([^"]*)"/.exec(html)?.[1];
@@ -236,6 +236,7 @@ function runStepScript(html: string, saved?: unknown) {
   const fakeDocument = {
     documentElement: { setAttribute: () => undefined, removeAttribute: () => undefined },
     getElementById: (id: string) => elements.get(id) ?? null,
+    querySelectorAll: (sel: string) => (sel === 'pre.tutor-code' ? codeBlocks : []),
   };
   const [, code] = /<script[^>]*>([\s\S]*?)<\/script>/.exec(html) ?? [];
   assert.ok(code);
@@ -317,6 +318,18 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
     assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, undefined);
   });
 
+  test('the empty note an ACCEPTED ask posts keeps the reveal pending for the repaint that follows', () => {
+    // step-protocol.ts answers an accepted ask with step:note '' (clearing an old note) and
+    // THEN the session repaints to "thinking". The reveal must survive that empty note.
+    const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
+    const dom = runStepScript(html);
+    dom.elements.get('tutor-input')!.value = 'why?';
+    dom.elements.get('btn-tutor-ask')!.dispatch('click');
+    dom.send({ type: 'step:note', payload: { note: '' } });
+    assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, 'tutor');
+    assert.deepEqual(dom.elements.get('step-note')!.scrolled, [], 'an empty note is not an answer to bring into view');
+  });
+
   test('with nothing to reveal and nowhere to return to, the saved state keeps its old shape', () => {
     const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
     const dom = runStepScript(html);
@@ -340,5 +353,66 @@ suite('T-16 F-07 — under System the webviews use the editor\'s own fonts', () 
     for (const sel of ['.check-name', '.turn-text pre.tutor-code']) {
       assert.match(declarationsFor(css, sel), /font-family:var\(--mono,ui-monospace/, `${sel} should take the editor font`);
     }
+  });
+});
+
+// ── F-11 ─────────────────────────────────────────────────────────────────────────────────────
+
+suite('T-16 F-11 — the step panel says where in the plan you are', () => {
+  test('every step names its place as "Step N of M", in plan order', () => {
+    const plan = fixturePlan();
+    plan.steps.forEach((s, i) => {
+      const html = renderStepHtml(stateAt(s.id), FAKE_SKINS);
+      assert.match(html, new RegExp(`<p class="step-count">Step ${i + 1} of ${plan.steps.length}</p>`), `step ${s.id}`);
+    });
+  });
+
+  test('a step the plan does not list gets no count rather than a wrong one', () => {
+    const state = stateAt('st-1-shape-src');
+    const html = renderStepHtml({ ...state, step: { ...state.step, id: 'not-in-the-plan' } }, FAKE_SKINS);
+    assert.ok(!html.includes('class="step-count"'));
+  });
+
+  test('the count is part of the repaint key, so a changed plan repaints', () => {
+    const state = stateAt('st-2-file-parse');
+    const shorter = { ...state, plan: { ...state.plan, steps: state.plan.steps.slice(0, 2) } };
+    assert.notEqual(stepRenderKey(state, FAKE_SKINS), stepRenderKey(shorter, FAKE_SKINS));
+  });
+});
+
+// ── auto-review (visual) ─────────────────────────────────────────────────────────────────────
+
+suite('T-16 visual review — headings stay at full strength; the missing chip has one signal', () => {
+  test('narrator headings and the stop counter are not in the faint tier', () => {
+    const css = cssOf(renderNarratorHtml(narratorState(1), FAKE_SKINS));
+    for (const sel of ['h2', '.stop-progress']) {
+      assert.doesNotMatch(declarationsFor(css, sel), /color:var\(--muted\)/, `${sel} should keep the body colour`);
+    }
+    assert.match(declarationsFor(css, '.detour-aside'), /color:var\(--muted\)/, 'the aside stays in the faint tier');
+  });
+
+  test('under System the missing chip takes the neutral chip fill and keeps its ring', () => {
+    const css = cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
+    assert.match(declarationsFor(css, ':root:not([data-theme]) .check-missing .check-status'), /background:var\(--chip\)/);
+    assert.match(declarationsFor(css, '.check-missing .check-status'), /outline:1pxsolidvar\(--status-bad\)/);
+  });
+});
+
+suite('T-16 security review N-1 — keyboard stops on wide code are bounded', () => {
+  class Block extends El { scrollWidth = 800; clientWidth = 300; }
+  test('only the newest 12 overflowing code blocks take a tab stop, however many a reply carries', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
+    const blocks = Array.from({ length: 30 }, () => new Block());
+    runStepScript(html, undefined, blocks);
+    const focusable = blocks.map((b) => b.getAttribute('tabindex'));
+    assert.equal(focusable.filter((t) => t === '0').length, 12);
+    assert.deepEqual(focusable.slice(18), Array(12).fill('0'), 'the newest blocks are the reachable ones');
+  });
+
+  test('a block that fits gets no tab stop', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
+    const fits = Object.assign(new El(), { scrollWidth: 200, clientWidth: 300 });
+    runStepScript(html, undefined, [fits]);
+    assert.equal(fits.getAttribute('tabindex'), null);
   });
 });

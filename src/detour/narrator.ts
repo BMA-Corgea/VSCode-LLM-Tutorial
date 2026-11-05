@@ -243,10 +243,10 @@ function stopWhere(stop: unknown): string {
 const PAGE_CSS = `
 main { max-width:640px; margin:0 auto; padding:20px 24px 40px; }
 h1 { font-size:1.25rem; margin:0 0 4px; }
-h2 { font-size:0.95rem; margin:24px 0 8px; color:var(--muted); }
+h2 { font-size:0.95rem; margin:24px 0 8px; }
 .detour-domain { margin:0 0 4px; }
 .detour-aside { margin:0 0 16px; color:var(--muted); font-size:0.9rem; }
-.stop-progress { margin:0 0 8px; color:var(--muted); font-size:0.9rem; }
+.stop-progress { margin:0 0 8px; font-size:0.9rem; }
 .stop-list { list-style:none; margin:0 0 16px; padding:0; }
 .stop-list .stop { display:flex; gap:8px; padding:4px 8px; border-left:3px solid transparent; color:var(--muted); }
 .stop-list .stop-current { border-left-color:var(--accent, currentColor); color:var(--ink); font-weight:600; }
