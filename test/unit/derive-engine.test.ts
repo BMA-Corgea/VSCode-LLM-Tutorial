@@ -296,6 +296,19 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     assert.equal(second.state.files['cli/main.mjs'], MAIN_OBJECT);
   });
 
+  test('a walked step the decision reaches is still kept VERBATIM, decision and code: walked steps are never re-derived', async () => {
+    const b = await base();
+    const tallyId = idOf(b.first.state, 'core/tally.mjs');
+    const mainId = idOf(b.first.state, 'cli/main.mjs');
+    const walked = [idOf(b.first.state, 'core'), idOf(b.first.state, 'cli'), mainId];
+    const second = await replanPlan(b.first.state, tallyId, 'object', walked, deps(b.model.run, b.gs, b.target));
+    if (!second.ok) assert.fail(second.reason);
+    assert.equal(stepContent(second.plan, 'cli/main.mjs'), stepContent(b.first.plan, 'cli/main.mjs'), 'the walked entry keeps its decision');
+    assert.equal(second.state.files['cli/main.mjs'], MAIN, 'and its code');
+    assert.equal(second.state.files['core/tally.mjs'], OBJECT_TALLY, 'while the decision itself still follows the answer');
+    assert.equal(b.model.asked.filter((a) => a.task === 'replan').length, 0, 'nothing was left to re-plan, so nothing was asked');
+  });
+
   test('the state it was handed is untouched, and so is its tree: the substrate for plan versions', async () => {
     const b = await base();
     const frozen = JSON.stringify(b.first.state);
