@@ -9,6 +9,48 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## Read the screen, not the markup — `webview.html` never changes after a press (T-15, 2026-11-05)
+
+T-15's September fix was reviewed, corrected and merged with its pins green. Re-driven two months
+later **by reading the real webview's DOM**, it still had four holes the screen showed at once: a
+second refused press changed only an invisible `data-press` attribute; a double-click started two
+builds; closing the tab mid-build swallowed the build's ending; and the progress notification
+outlived the build. Separately, deleting the host's `buildFinished()` call left **1256 unit + 75
+vscode-test green**. Its only test handed the page `form:idle` by hand, so nothing checked that the
+host ever sent it.
+
+Every one of those survived because **no test looked at the screen**. A vscode-test can read
+`panel.webview.html`, and that is the markup the host handed over. It is not the page. Everything a
+press changes is changed by the page's own script afterwards, so a test reading `webview.html` sees
+the same thing before and after any press: blind in exactly the way the owner was not.
+
+> **If a property is about what a person sees, the test has to read what a person sees.** Here
+> that is `test/support/screen.ts`: the test host runs with a loopback, OS-assigned DevTools port,
+> and a test finds the webview's frame by its title, reads the DOM, and clicks the real button.
+
+Two things it taught beyond the harness:
+
+- **Name what "observable" means, then check the pin uses it.** The September suite defined
+  `observable()` as "what a person could SEE" and then pinned finding 3 on an attribute outside
+  that definition. Under the suite's own definition the defect was still there.
+- **The corner toasts are not a witness either.** Driven: an error toast sent while a progress
+  toast was up was not drawn in the corner at all. The notification centre (the bell's list)
+  holds every notification until it is closed, so read that.
+
+## A message without buttons waits for the person, not for the message (T-15, 2026-11-05)
+
+`await vscode.window.showErrorMessage('…')` with no buttons settles **when the person closes the
+notification**, not when it appears. Inside `withProgress` that kept "reading the repository…" and a
+live *Cancel* on screen after the build had already ended, and held back everything after it:
+clearing the bookmark and, on success, opening the walk. A finished build looked like a running one
+until somebody dismissed a toast. **Await a message only when you need its answer.**
+
+Same ticket, same shape of mistake one layer up: the build's ending was reported to the panel
+**captured when the build started**. Close that tab mid-build and `panel.webview` throws "Webview is
+disposed" from inside `reportOutcome`, unhandled, and the error, the completion and the walk all
+vanish with it. **Report to what is open now, not to what was open when you started.** Here that is
+`StartPanel.current`, which is cleared on dispose, so it can never be a disposed panel.
+
 ## A test that types the default is not testing the default (T-8)
 
 T-8 changed `buildTutorials.repoTourPath`'s shipped default from `'../repo-tour'` to `''`. That

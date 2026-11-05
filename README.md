@@ -54,8 +54,17 @@ report in plain sentences, never a stack trace.
   any single step.
 
 Every field's problem, if it has one, appears in a line right under that field. **And pressing
-*Build the plan* always changes something**, whether it was accepted or refused — a line beside
-the button says which, and while a build is running the button says so and stops taking presses.
+*Build the plan* always changes something you can read**, in a line below the button:
+
+- **Refused** — the line names what to fix and the cursor moves to the first field with a problem.
+  Press again without changing anything and the line changes too ("Still can't build … Tried 2
+  times."), so a second press never looks like an ignored one.
+- **Accepted** — the button reads *Building…* and stops taking presses, and the line says the build
+  is running and that its progress and *Cancel* are in the notification in the corner. A
+  double-click starts one build, not two; the second click is answered in the line.
+- **Finished** — the button comes back and the line says how the build ended: built, failed (the
+  reason is under *Reference repo*), or cancelled. Closing the tab mid-build loses none of this: a
+  start screen opened while the build runs shows it building, and the ending still arrives.
 
 That second sentence was learned the hard way. The first one used to end "never a disabled button
 with no explanation", and the code satisfied it by shipping an *enabled* button with no response:

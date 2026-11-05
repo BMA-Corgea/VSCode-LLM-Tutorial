@@ -23,9 +23,12 @@
  * used to share that reply and no longer does (T-15).** It was the right message for a keystroke
  * and the wrong one for a press: the page validates on every `change`, so those lines were
  * already on screen, and re-sending them meant a press produced no observable difference at all.
- * A press now gets `form:rejected` or `form:accepted`. `form:accepted` is always new; a
- * `form:rejected` may repeat the same words on a second press with no edit between, so the page
- * carries a press ordinal that differs even when the sentence does not (review finding 3). A folder pick additionally has to tell the webview the path it
+ * A press now gets `form:rejected`, `form:accepted` or `form:busy`, and each one changes what
+ * the page SAYS. A refused press repeated with nothing edited between carries `inARow`, so the
+ * second refusal's words differ from the first's (review finding 3: the September fix moved an
+ * invisible `data-press` attribute instead, and a person pressing twice saw nothing change). A
+ * press that reaches the host while a build is running starts nothing (a double-click used to start
+ * two builds). A folder pick additionally has to tell the webview the path it
  * chose, so it replies `field:set` (value + the same problems, recomputed). `skin:set` gets
  * no reply: the client already applied the skin instantly (see `src/start/panel.ts`'s client
  * script) for zero flash; the host's only job there is to persist the choice.
@@ -49,7 +52,24 @@ export interface PanelState {
    * ever undid that, so a FAILED build left the screen reading "Building…" for ever.
    */
   building: boolean;
+  /**
+   * How many presses in a row were refused with nothing edited between them (T-15, review finding
+   * 3). Every edit and every folder pick resets it, because after an edit the note has already been
+   * cleared and the next refusal is a change on its own. Without it a second identical refusal
+   * replies with identical words — the defect again, one press later.
+   */
+  refusedInARow: number;
+  /**
+   * How the last build ended, until the next edit or press (code review finding 4). Without it a
+   * re-render — every tab switch re-renders, since the page is not kept while hidden — wiped the
+   * note, and a screen whose build had been built or cancelled became byte-identical to one never
+   * pressed.
+   */
+  ended?: BuildEnding;
 }
+
+/** How a build that the start screen started came to an end — what its note says afterwards. */
+export type BuildEnding = 'built' | 'failed' | 'cancelled';
 
 export type PickTarget = 'repo' | 'target';
 
@@ -67,12 +87,18 @@ export type OutboundMessage =
   // screen before the button is touched. Replying `form:problems` to a rejected press therefore
   // re-sent bytes the page was already showing, and the press was indistinguishable from being
   // ignored. What was missing was never information — it was a DIFFERENCE.
-  | { type: 'form:rejected'; payload: { problems: ValidationResult['problems']; count: number } }
+  | { type: 'form:rejected'; payload: { problems: ValidationResult['problems']; count: number; inARow: number } }
   | { type: 'form:accepted' }
+  // A press that reached the host while a build was already running. The button is disabled by
+  // then on the page, but only after a round trip: two clicks in one instant both arrive, and
+  // until this existed the second one started a second build of the same target.
+  | { type: 'form:busy' }
   // The other half of `form:accepted`, and the reason it is a pair rather than a one-way flip:
   // every build ends, including the ones that fail and the ones the learner cancels, and the
-  // button has to come back. Posted by `StartPanel.buildFinished` from `reportOutcome`.
-  | { type: 'form:idle' }
+  // button has to come back — and the note says how it ended, because a button that silently
+  // re-enables after a failure looks exactly like one that was never pressed.
+  // Posted by `StartPanel.buildFinished` from `reportOutcome`.
+  | { type: 'form:idle'; payload: { ended: BuildEnding } }
   | { type: 'field:set'; payload: { field: PickTarget; value: string; problems: ValidationResult['problems'] } };
 
 export interface StartEffects {
@@ -97,7 +123,7 @@ export async function handleStartMessage(
   switch (message.type) {
     case 'form:changed': {
       const { problems } = validateRequest(message.payload.request);
-      const next: PanelState = { ...state, request: message.payload.request, problems };
+      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined };
       return { state: next, post: { type: 'form:problems', payload: { problems } } };
     }
     // T-15: split from `form:changed`, which it used to share a case with. The old shared
@@ -105,8 +131,12 @@ export async function handleStartMessage(
     // keystroke had already sent, so nothing on the page moved. Both arms below now say
     // something the page was NOT already saying.
     case 'form:submit': {
+      // Before anything else, and before validating: a build is running, so this press must not
+      // start another one — whatever the form says now. The page has disabled the button by the
+      // time a person can see it, but a double-click lands both clicks before that reply arrives.
+      if (state.building) return { state, post: { type: 'form:busy' } };
       const { ok, problems } = validateRequest(message.payload.request);
-      const next: PanelState = { ...state, request: message.payload.request, problems };
+      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined };
       if (ok) {
         effects.submit(message.payload.request);
         next.building = true;
@@ -117,11 +147,12 @@ export async function handleStartMessage(
         // misread as a response, and a slow accepted submit looks exactly like a dead button.
         return { state: next, post: { type: 'form:accepted' } };
       }
+      next.refusedInARow = state.refusedInARow + 1;
       return {
         state: next,
         post: {
           type: 'form:rejected',
-          payload: { problems, count: Object.values(problems).filter(Boolean).length },
+          payload: { problems, count: Object.values(problems).filter(Boolean).length, inARow: next.refusedInARow },
         },
       };
     }
@@ -132,7 +163,7 @@ export async function handleStartMessage(
       if (picked === undefined) return { state }; // cancelled — nothing changed
       const request: BuildRequest = { ...state.request, [field]: picked };
       const { problems } = validateRequest(request);
-      return { state: { ...state, request, problems }, post: { type: 'field:set', payload: { field, value: picked, problems } } };
+      return { state: { ...state, request, problems, refusedInARow: 0, ended: undefined }, post: { type: 'field:set', payload: { field, value: picked, problems } } };
     }
     case 'skin:set': {
       effects.persistSkin(message.payload.skin);

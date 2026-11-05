@@ -20,7 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { emptyRequest, IDEA_FIRST_MESSAGE } from '../../src/start/request.js';
 import { handleStartMessage, type PanelState, type StartEffects } from '../../src/start/protocol.js';
-import { renderStartHtml, type SkinsModule } from '../../src/start/view.js';
+import { renderStartHtml, SUBMIT_NOTES, type SkinsModule } from '../../src/start/view.js';
 
 const FAKE_SKINS: SkinsModule = {
   SKINS: [
@@ -32,7 +32,7 @@ const FAKE_SKINS: SkinsModule = {
 };
 
 function state(overrides: Partial<PanelState> = {}): PanelState {
-  return { request: emptyRequest(), problems: {}, skin: 'system', building: false, ...overrides };
+  return { request: emptyRequest(), problems: {}, skin: 'system', building: false, refusedInARow: 0, ...overrides };
 }
 
 suite('renderStartHtml — markup-level DOM assertions (AC1, AC2)', () => {
@@ -358,30 +358,94 @@ suite('a press always changes something on the page (T-15)', () => {
     assert.equal(dom.elements.get('build-btn')?.disabled, true, 'an accepted press must quiet the button');
   });
 
-  test('a build that ENDS gives the button back — however it ended (review finding 2)', () => {
-    const dom = buildFakeDom();
-    runScript(dom);
-    const handlers = dom.windowListeners.get('message') ?? [];
-    handlers[0]!({ data: { type: 'form:accepted' } });
-    assert.equal(dom.elements.get('build-btn')?.disabled, true);
-
-    handlers[0]!({ data: { type: 'form:idle' } });
-    assert.equal(dom.elements.get('build-btn')?.disabled, false, 'a failed or cancelled build must not strand a dead button');
-    assert.equal(dom.elements.get('build-btn')?.textContent, 'Build the plan');
-    assert.equal(dom.elements.get('submit-note')?.textContent, '', 'the note must not keep claiming the build is starting');
+  test('every state of the note says something, and something different (the table the pins below read)', () => {
+    // The ending pins compare the page with SUBMIT_NOTES rather than typing the words — so a table
+    // of empty or repeated strings would let them pass while the note said nothing. This is what
+    // stops that: five states, five non-empty, distinct sentences.
+    const said = Object.values(SUBMIT_NOTES);
+    assert.equal(said.length, 5);
+    for (const line of said) assert.ok(line.trim().length > 0, 'a state whose note is empty is a state nobody can see');
+    assert.equal(new Set(said).size, said.length, 'two states that say the same words look identical');
   });
 
-  test('a SECOND press with no edit still differs — Enter in the focused field fires no change (review finding 3)', async () => {
+  for (const ended of ['built', 'failed', 'cancelled'] as const) {
+    test(`a build that ENDS (${ended}) gives the button back and the note says how it ended (review finding 2, AC4)`, () => {
+      const dom = buildFakeDom();
+      runScript(dom);
+      const handlers = dom.windowListeners.get('message') ?? [];
+      handlers[0]!({ data: { type: 'form:accepted' } });
+      assert.equal(dom.elements.get('build-btn')?.disabled, true);
+      assert.equal(dom.elements.get('submit-note')?.textContent, SUBMIT_NOTES.building);
+      const building = observable(dom);
+
+      handlers[0]!({ data: { type: 'form:idle', payload: { ended } } });
+      assert.equal(dom.elements.get('build-btn')?.disabled, false, 'a failed or cancelled build must not strand a dead button');
+      assert.equal(dom.elements.get('build-btn')?.textContent, 'Build the plan');
+      // Read from the shipped table, never typed: the property is "the note says how it ended".
+      assert.equal(dom.elements.get('submit-note')?.textContent, SUBMIT_NOTES[ended],
+        'a button that silently comes back looks exactly like one that was never pressed');
+      assert.notEqual(observable(dom), building);
+    });
+  }
+
+  test('a SECOND press with no edit changes the WORDS on screen, not an attribute nobody sees (review finding 3, AC2)', async () => {
+    // September's version of this test asserted a data-press attribute, and passed, while a person
+    // pressing twice saw nothing change at all (re-driven 2026-11-05 in a real webview). This one
+    // compares what a person could see — `observable()`, every element's text and disabled state.
     const dom = buildFakeDom();
     runScript(dom);
     const handlers = dom.windowListeners.get('message') ?? [];
     const one = await handleStartMessage(state(), { type: 'form:submit', payload: { request: BAD } }, effects());
     handlers[0]!({ data: one.post });
-    const afterFirst = dom.elements.get('submit-note')?.getAttribute?.('data-press');
+    const afterFirst = observable(dom);
     const two = await handleStartMessage(one.state, { type: 'form:submit', payload: { request: BAD } }, effects());
     handlers[0]!({ data: two.post });
-    assert.notEqual(dom.elements.get('submit-note')?.getAttribute?.('data-press'), afterFirst,
-      'two identical presses produced identical bytes — the defect, one keystroke later');
+    const afterSecond = observable(dom);
+    assert.notEqual(afterSecond, afterFirst, 'two identical presses left the screen identical — the defect, one press later');
+    const three = await handleStartMessage(two.state, { type: 'form:submit', payload: { request: BAD } }, effects());
+    handlers[0]!({ data: three.post });
+    assert.notEqual(observable(dom), afterSecond, 'and the third differs from the second, not just from the first');
+  });
+
+  test('a press that reaches the host DURING a build starts nothing, and the note says so (AC3)', async () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const handlers = dom.windowListeners.get('message') ?? [];
+    let started = 0;
+    const counting: StartEffects = { ...effects(), submit: () => { started += 1; } };
+    const first = await handleStartMessage(state(), { type: 'form:submit', payload: { request: GOOD } }, counting);
+    handlers[0]!({ data: first.post });
+    const afterFirst = observable(dom);
+    // The second click of a double-click: it left the page before the first reply disabled the button.
+    const second = await handleStartMessage(first.state, { type: 'form:submit', payload: { request: GOOD } }, counting);
+    assert.equal(started, 1, 'a double-click started a second build of the same target');
+    handlers[0]!({ data: second.post });
+    assert.equal(dom.elements.get('submit-note')?.textContent, SUBMIT_NOTES.busy);
+    assert.notEqual(observable(dom), afterFirst, 'the refused second press must change the screen too');
+    assert.equal(dom.elements.get('build-btn')?.disabled, true);
+  });
+
+  test('an edit DURING a build leaves the building note alone — it is the only line saying so', () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const handlers = dom.windowListeners.get('message') ?? [];
+    handlers[0]!({ data: { type: 'form:accepted' } });
+    dom.elements.get('start-form')!.dispatch('change');
+    assert.equal(dom.elements.get('submit-note')?.textContent, SUBMIT_NOTES.building);
+  });
+
+  test('a re-render after a build ended still says how it ended (code review finding 4)', () => {
+    for (const ended of ['built', 'failed', 'cancelled'] as const) {
+      const html = renderStartHtml(state({ ended }), FAKE_SKINS);
+      assert.ok(html.includes(`data-kind="${ended}">${SUBMIT_NOTES[ended]}</p>`), `a re-render after "${ended}" forgot how the build ended`);
+    }
+    assert.ok(renderStartHtml(state(), FAKE_SKINS).includes('data-kind=""></p>'), 'and a fresh screen says nothing (discriminates)');
+  });
+
+  test('the note under the button is not drawn as a problem line (N5)', () => {
+    const html = renderStartHtml(state({ building: true }), FAKE_SKINS);
+    assert.match(html, /<p class="submit-note" id="submit-note"[^>]*data-kind="building"/);
+    assert.doesNotMatch(html, /class="problem" id="submit-note"/);
   });
 
   test('a folder pick clears the note, so its count is never stale (review finding 4)', () => {
