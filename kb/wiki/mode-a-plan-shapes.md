@@ -59,6 +59,12 @@ unchanged in a real dev host (`test/derive.test.ts`).
   walk of calls**, byte for byte (AC5's test).
 - `DerivationState` (idea, title, language, entry, chapters, nodes, files, answers) is plain data.
   It is what T-22's plan versions should keep on disk beside each `plan.json`.
+- **A stored state is a second door, and is re-checked.** `replanPlan` runs `unsoundStateReason`
+  on the state it is handed: the whole-plan rules, the file-path rule for every file step, and no
+  code filed under a path the plan does not have. A tampered version on disk is refused in a
+  sentence before anything is asked or written (`derive-engine.test.ts`, the two tampered-state
+  tests). T-22 should still treat a version file it reads as untrusted, and never skip this check
+  by building a state by hand.
 
 ## Driving it in a test without spending a token
 
