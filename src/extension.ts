@@ -181,7 +181,17 @@ export async function runBuild(
   const outcome = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
     async (progress, token) => {
-      const built = await build(request, buildContextFor(context, core, progress, token));
+      let built: BuildOutcome;
+      try {
+        built = await build(request, buildContextFor(context, core, progress, token));
+      } catch (err) {
+        // `buildFromRequest` reports its failures rather than throwing — except where it cannot,
+        // e.g. the write-ahead marker failing to write to the target. A throw here used to skip
+        // `reportOutcome` entirely and leave the start screen at "Building…" for good (and, since
+        // the build became window-wide, every start screen opened after it too). It is a failed
+        // build like any other, and the person is told so.
+        built = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      }
       reportOutcome(built, true);
       return built;
     },

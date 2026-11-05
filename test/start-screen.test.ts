@@ -60,7 +60,8 @@ function validRequest(): BuildRequest {
 /** A build body the test controls. `end` settles it; `isCancelled` sees the real Cancel button. */
 function heldBuild(): { build: (r: BuildRequest, ctx: BuildContext) => Promise<BuildOutcome>; end: (o: BuildOutcome) => void; started: () => number } {
   let release: ((o: BuildOutcome) => void) | undefined;
-  const ended = new Promise<BuildOutcome>((resolve) => { release = resolve; });
+  let done = false;
+  const ended = new Promise<BuildOutcome>((resolve) => { release = resolve; }).finally(() => { done = true; });
   let calls = 0;
   return {
     build: async (_r, ctx) => {
@@ -68,7 +69,8 @@ function heldBuild(): { build: (r: BuildRequest, ctx: BuildContext) => Promise<B
       return Promise.race([
         ended,
         (async (): Promise<BuildOutcome> => {
-          while (!ctx.isCancelled?.()) await sleep(50);
+          // Watches the REAL progress notification's Cancel button, until the test ends the build.
+          while (!done && !ctx.isCancelled?.()) await sleep(50);
           return { ok: false, cancelled: true, reason: 'build cancelled before reading the repository' };
         })(),
       ]);
@@ -232,6 +234,24 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     building.end({ ok: true, plan: { chapters: [], steps: [] }, cost: { metered: false, usd: 0, inputTokens: 0, outputTokens: 0 } });
     const built = await until(third.read, (s) => s.button === 'Build the plan', 'a finished build gives the button back');
     assert.equal(built.note, SUBMIT_NOTES.built);
+    assert.deepEqual(unhandled, []);
+  });
+
+  test('AC4: a build that THROWS is a failed build — the screen is never left at "Building…"', async () => {
+    let run: Promise<void> | undefined;
+    const throwing = (): Promise<BuildOutcome> => Promise.reject(new Error('EACCES: the target folder is read-only'));
+    const { page, read } = await open((r) => { run = runBuild(context, core, r, throwing); });
+    await fill(page, validRequest());
+    await until(read, (s) => s.problems.every((p) => p === ''), 'valid form');
+    await press(page);
+    const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== '', 'a build that threw gives the button back');
+    assert.equal(ended.note, SUBMIT_NOTES.failed);
+    assert.equal(ended.problems[1], 'EACCES: the target folder is read-only');
+    await run;
+    panel!.dispose();
+    panel = StartPanel.show(context, { skins, onSubmit: () => undefined });
+    const again = await screen.webview(TITLE);
+    assert.equal((await screen.evaluate<Snap>(again, SNAPSHOT)).button, 'Build the plan', 'a reopened screen must not be stuck building');
     assert.deepEqual(unhandled, []);
   });
 

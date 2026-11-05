@@ -169,7 +169,7 @@ const CLIENT_SCRIPT = `
   // focus move just landed you in fires no change event) says "Still …" and how many times, so its
   // WORDS differ: September's fix moved an invisible data-press attribute instead, and a person
   // pressing twice saw nothing change at all (review finding 3, re-driven 2026-11-05).
-  var NOTES = ${JSON.stringify(SUBMIT_NOTES)};
+  var NOTES = ${JSON.stringify(SUBMIT_NOTES).replace(/</g, '\\u003c')};
   var FIELD_NAMES = { idea: 'the idea', repo: 'the reference repo', target: 'the folder to build in' };
   var buildBtn = document.getElementById('build-btn');
   var building = !!(buildBtn && buildBtn.disabled);
