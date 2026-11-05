@@ -36,6 +36,51 @@ will be overwritten.
 - Exports: CORE_MODULE_NAMES, DEFAULT_REPO_TOUR_PATH, loadAnyModule, loadCore, resolveCoreRoot
 - Imports: (none)
 
+## src/derive/ask.ts
+
+- Exports: askOnce, newTally
+- Imports: (none)
+
+## src/derive/assemble.ts
+
+- Exports: MAX_LOAD_BEARING, assemblePlan, boilerplateRanges, lineCountOf, loadBearingRanges, stepIdFor
+- Imports: (none)
+
+## src/derive/cache.ts
+
+- Exports: MAX_DERIVE_CACHE_BYTES, MAX_DERIVE_CACHE_ENTRIES, deriveCacheKey, pruneDeriveCache, readCachedReply, writeCachedReply
+- Imports: (none)
+
+## src/derive/engine.ts
+
+- Exports: derivePlan, replanPlan, unsoundFileReason
+- Imports: (none)
+
+## src/derive/graph.ts
+
+- Exports: ancestorsOf, downstreamOf, externalDependencies, insertInOrder, keptBy
+- Imports: (none)
+
+## src/derive/prompt.ts
+
+- Exports: DERIVE_INSTRUCTIONS, MAX_DERIVE_INSTRUCTIONS_CHARS, MAX_DERIVE_PROMPT_CHARS, codePrompt, jsonLine, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, readReplyObject, replanPrompt, unsafeDerivedFileReason, validatePlan, withChapterEdges
+- Imports: (none)
+
+## src/derive/storage.ts
+
+- Exports: DERIVED_TREES_DIR, DERIVE_CACHE_DIR, lstatOrNull, provenStorageDir
+- Imports: (none)
+
+## src/derive/tree.ts
+
+- Exports: treeContentKey, treeSlug, tutorialKey, writeReferenceTree
+- Imports: (none)
+
+## src/derive/types.ts
+
+- Exports: DERIVE_LIMITS, DERIVE_PROMPT_VERSION, LANGUAGE_EXTENSION, isDeriveRefusal
+- Imports: (none)
+
 ## src/detour/narrator.ts
 
 - Exports: BACK_LABEL, BAD_RANGE_LABEL, CONTROL_STAND_IN, DETOUR_ASIDE, FILES_HEADING, FIRST_STOP_HINT, LAST_STOP_HINT, MAX_LABEL_TEXT, MAX_ROWS_RENDERED, MAX_STOP_TEXT, NARRATOR_TITLE, NEXT_LABEL, NOT_TEXT_MESSAGE, NO_FILES_MESSAGE, NO_STOPS_MESSAGE, PREV_LABEL, TRUNCATION_MARKER, domainSentence, linesLabel, narratorScript, parseNarratorMessage, renderNarratorHtml, rowsOmittedMessage, stopProgressMessage
@@ -109,6 +154,11 @@ will be overwritten.
 ## src/publish/plan.ts
 
 - Exports: ARTIFACT_PLACEHOLDER, CONFIRM_ENV_VAR, CONFIRM_FLAG, DRY_RUN_FLAG, PINNED_TOOL_VERSIONS, REGISTRIES, commandLine, decidePublish, describeDecision, expectedArtifactName, expectedConfirmation, quoteForShell
+- Imports: (none)
+
+## src/relative-path.ts
+
+- Exports: unsafeRelativePathReason
 - Imports: (none)
 
 ## src/skins.ts
