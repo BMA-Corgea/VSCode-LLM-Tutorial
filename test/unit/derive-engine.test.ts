@@ -221,6 +221,28 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.deepEqual(cost.failures, []);
   });
 
+  test('a derivation that fails partway keeps what parsed: pressing again pays only for the question that failed', async () => {
+    const gs = tempDir('derive-engine-gs-');
+    const target = tempDir('derive-engine-target-');
+    const good = fakeModel();
+    let calls = 0;
+    const breaksOnTheSecondFile: TutorCore['runLlm'] = async (prompt, choice, cwd, ms) => {
+      calls += 1;
+      const reply = await good.run(prompt, choice, cwd, ms);
+      return calls === 3 ? { ...reply, text: 'not json at all' } : reply;
+    };
+    const first = await derivePlan({ idea: FIXTURE_IDEA }, deps(breaksOnTheSecondFile, gs, target));
+    assert.ok(!first.ok, 'the broken reply fails the derivation');
+    assert.match(first.reason, /not one JSON object/);
+    assert.equal(fs.existsSync(path.join(gs, 'derived')), false, 'no tree for a derivation that did not finish');
+
+    const counting = fakeModel();
+    const again = await derivePlan({ idea: FIXTURE_IDEA }, deps(counting.run, gs, target));
+    if (!again.ok) assert.fail(again.reason);
+    assert.deepEqual(counting.asked.map((a) => a.task), ['code'], 'only the question that failed was asked again');
+    assert.deepEqual({ calls: again.plan.cost.calls, cachedStops: again.plan.cost.cachedStops }, { calls: 1, cachedStops: 2 });
+  });
+
   test('a node: import is one of Node\'s own modules, and is allowed', async () => {
     const tally = "import { strict as assert } from 'node:assert';\nexport function total(xs) {\n  assert.ok(Array.isArray(xs));\n  return xs.reduce((a, b) => a + b, 0);\n}\n";
     const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': tally, 'cli/main.mjs': MAIN }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
