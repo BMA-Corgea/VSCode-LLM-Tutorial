@@ -127,7 +127,13 @@ export function bridgeCss(): string {
   const decls = Object.entries(BRIDGE_TOKEN_MAP)
     .map(([token, value]) => `  ${token}: ${value};`)
     .join('\n');
-  return `/* T-3: bridges repo-tour's base tokens to VS Code's theme so System follows the editor. */\n:root:not([data-theme]) {\n${decls}\n}\n`;
+  // T-16 (F-07): System follows the editor's FONTS as well as its colours: text in the
+  // workbench font, code in the learner's own editor font. Kept out of BRIDGE_TOKEN_MAP on
+  // purpose, since that map is exactly the set of tokens repo-tour's base sheet declares (a
+  // unit test holds it to that). A named skin sets data-theme and keeps its own fonts.
+  const fonts = ':root:not([data-theme]) { --mono: var(--vscode-editor-font-family, ui-monospace, monospace); }\n'
+    + ':root:not([data-theme]) body { font-family: var(--vscode-font-family, system-ui, sans-serif); }\n';
+  return `/* T-3: bridges repo-tour's base tokens to VS Code's theme so System follows the editor. */\n:root:not([data-theme]) {\n${decls}\n}\n${fonts}`;
 }
 
 /**

@@ -325,3 +325,20 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
     assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: 'draft' });
   });
 });
+
+// ── F-07 ─────────────────────────────────────────────────────────────────────────────────────
+
+suite('T-16 F-07 — under System the webviews use the editor\'s own fonts', () => {
+  test('the bridge defines --mono as the editor font and sets the workbench font on body', () => {
+    const css = cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
+    assert.match(declarationsFor(css, ':root:not([data-theme])'), /--mono:var\(--vscode-editor-font-family/);
+    assert.match(declarationsFor(css, ':root:not([data-theme]) body'), /font-family:var\(--vscode-font-family/);
+  });
+
+  test('code on the step page reads --mono first, keeping the old stack for a named skin', () => {
+    const css = cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
+    for (const sel of ['.check-name', '.turn-text pre.tutor-code']) {
+      assert.match(declarationsFor(css, sel), /font-family:var\(--mono,ui-monospace/, `${sel} should take the editor font`);
+    }
+  });
+});

@@ -606,10 +606,9 @@ section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; col
    simply decided how much of a very large plan it is willing to draw at once. */
 .options-omitted { color:var(--muted); font-size:12px; margin:8px 0 0; }
 section h3 { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; margin:12px 0 6px; }
-/* One monospace stack, declared once. repo-tour's base sheet has no code token to borrow and
-   the bridge maps no VS Code font variable, so this is a plain stack rather than an invented
-   \`--mono\` that would look like a token other files could rely on. */
-.check-name, .shape-line { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+/* One monospace stack, declared once. T-16 (F-07): under System the bridge sheet defines --mono
+   as the editor's own font; a named skin has no --mono and keeps this plain stack. */
+.check-name, .shape-line { font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size:12px; }
 .check-list, .shape-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
 .check-row { display:flex; align-items:baseline; gap:8px; }
 /* The verdict colours the SUMMARY and nothing else. A red section would read as "everything
@@ -659,7 +658,7 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 /* A fenced block is the ONE construct this page renders from a reply. It scrolls inside itself
    rather than widening the panel: code has no wrap opportunities, and overflow-wrap:anywhere
    on an example would break identifiers across lines, which is worse than a scrollbar. */
-.turn-text pre.tutor-code { white-space:pre; overflow-x:auto; margin:8px 0; padding:8px 10px; background:var(--chip); border-radius:var(--radius); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+.turn-text pre.tutor-code { white-space:pre; overflow-x:auto; margin:8px 0; padding:8px 10px; background:var(--chip); border-radius:var(--radius); font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size:12px; }
 .tutor-empty { color:var(--muted); font-size:12px; margin:0 0 12px; }
 /* The note takes the same colour as the write note — both are news about something that just
    happened, and both are the panel's answer to a control the learner pressed. The unreachable
@@ -727,14 +726,16 @@ main, section, .option { min-width:0; }
 .check-summary { border-left:3px solid transparent; padding-left:8px; }
 .check-summary.check-pass { border-left-color:var(--status-ok); }
 .check-summary.check-fail { border-left-color:var(--status-bad); }
-.check-missing .check-status { box-shadow:inset 0 0 0 1px var(--status-bad); }
+.check-missing .check-status { outline:1px solid var(--status-bad); outline-offset:-1px; }
 /* :not(:empty) because the open-file hint is always on the page, empty when the file exists,
    and an empty line must not grow a stray mark. */
 .hint:not(:empty), .write-note:not(:empty), .tutor-note:not(:empty), .detour-note:not(:empty),
 .detour-open:not(:empty), .tutor-elsewhere:not(:empty), .tutor-spend:not(:empty) {
   border-left:2px solid var(--status-news); padding-left:8px;
 }
-.notice-only h1 { font-size:13px; font-weight:600; margin:0 0 6px; }
+.notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
+/* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
+.turn-text pre.tutor-code:focus-visible { outline:1px solid var(--focus); outline-offset:2px; }
 `;
 
 /**
@@ -1584,6 +1585,15 @@ const CLIENT_SCRIPT = `
     }
     revealKey = '';
     persist();
+  }
+  // T-16 (F-10): a code block in an answer scrolls sideways rather than wrap, so it must take
+  // keyboard focus to be scrolled without a mouse (WCAG 2.1.1). Only a block that really
+  // overflows gets a tab stop. Set here, not in the markup, which the escaping tests pin.
+  if (typeof document.querySelectorAll === 'function') {
+    var blocks = document.querySelectorAll('pre.tutor-code');
+    for (var b = 0; b < blocks.length; b++) {
+      if (blocks[b].scrollWidth > blocks[b].clientWidth) { blocks[b].setAttribute('tabindex', '0'); }
+    }
   }
   var scrollQueued = false;
   window.addEventListener('scroll', function () {
