@@ -358,6 +358,16 @@ suite('a press always changes something on the page (T-15)', () => {
     assert.equal(dom.elements.get('build-btn')?.disabled, true, 'an accepted press must quiet the button');
   });
 
+  test('every state of the note says something, and something different (the table the pins below read)', () => {
+    // The ending pins compare the page with SUBMIT_NOTES rather than typing the words — so a table
+    // of empty or repeated strings would let them pass while the note said nothing. This is what
+    // stops that: five states, five non-empty, distinct sentences.
+    const said = Object.values(SUBMIT_NOTES);
+    assert.equal(said.length, 5);
+    for (const line of said) assert.ok(line.trim().length > 0, 'a state whose note is empty is a state nobody can see');
+    assert.equal(new Set(said).size, said.length, 'two states that say the same words look identical');
+  });
+
   for (const ended of ['built', 'failed', 'cancelled'] as const) {
     test(`a build that ENDS (${ended}) gives the button back and the note says how it ended (review finding 2, AC4)`, () => {
       const dom = buildFakeDom();
