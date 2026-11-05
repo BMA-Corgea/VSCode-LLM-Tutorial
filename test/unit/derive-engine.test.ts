@@ -345,6 +345,19 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     assert.equal(same.referenceRoot, b.first.referenceRoot);
   });
 
+  test('the honesty rule: a replanned step the model did NOT link to the decision still depends on it, and on what it was shown', async () => {
+    const b = await base();
+    const forgetful = fakeModel({}, (input) => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      return { steps: out.steps.map((st) => ({ ...st, dependsOn: [] })) };
+    });
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(forgetful.run, b.gs, b.target));
+    if (!out.ok) assert.fail(out.reason);
+    const main = out.plan.steps.find((st) => st.target.file === 'cli/main.mjs')!;
+    assert.ok(main.dependsOn.includes(idOf(b.first.state, 'core/tally.mjs')), 'the decision it was derived from');
+    assert.ok(main.dependsOn.includes(idOf(b.first.state, 'cli')), 'the outside step it was shown');
+  });
+
   test('a replan may open a NEW chapter, shape step first, and the plan stays a plan', async () => {
     const b = await base();
     const opts = [{ id: 'a', label: 'A', consequence: 'x' }, { id: 'b', label: 'B', consequence: 'y' }];
