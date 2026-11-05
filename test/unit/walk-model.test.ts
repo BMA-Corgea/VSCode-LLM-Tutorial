@@ -30,7 +30,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveCoreRoot } from '../../src/core.js';
-import { currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCheck, setCurrent, setDial, statusText, stepDial, treeModel, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
+import { currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCheck, setChosen, setCurrent, setDial, statusText, stepDial, treeModel, withChosen, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const IDS = ['st-1-shape-src', 'st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render'];
@@ -149,6 +149,40 @@ suite('setCurrent / markDone / setDial — pure updates, never a mutation', () =
       'st-1-shape-src': { status: 'done' },
       'st-2-file-parse': { status: 'pending', dial: 'scaffolded' },
     });
+  });
+});
+
+suite('setChosen / withChosen — the learner\'s road, recorded beside the plan and shown on it (T-21)', () => {
+  const STEP = 'st-4-symbol-render';
+
+  test('setChosen is pure, keeps what the step already had, and latest wins', () => {
+    const before = setDial(fixtureProgress(fixturePlan()), STEP, 'automated');
+    const once = setChosen(before, STEP, 'stream');
+    assert.equal(before.steps[STEP]?.chosen, undefined, 'the input progress was mutated');
+    assert.equal(once.steps[STEP]?.chosen, 'stream');
+    assert.equal(once.steps[STEP]?.dial, 'automated', 'the dial already recorded for the step was lost');
+    assert.equal(setChosen(once, STEP, 'author').steps[STEP]?.chosen, 'author', 'latest wins');
+  });
+
+  test('withChosen shows the learner\'s choice in decision.chosen — on a NEW plan, never the one read from disk', () => {
+    const plan = fixturePlan();
+    const authors = plan.steps.find((s) => s.id === STEP)!.decision.chosen;
+    const shown = withChosen(plan, setChosen(fixtureProgress(fixturePlan()), STEP, 'template-string'));
+    assert.equal(shown.steps.find((s) => s.id === STEP)!.decision.chosen, 'template-string');
+    assert.equal(plan.steps.find((s) => s.id === STEP)!.decision.chosen, authors, 'the plan read from disk was mutated');
+    assert.equal(shown.steps.find((s) => s.id === STEP)!.decision.authorChoice, 'author', 'the author\'s road must stay the author\'s');
+    assert.deepEqual(shown.steps.find((s) => s.id === STEP)!.decision.options.map((o) => o.taken), [true, false, false], '"taken" is the author\'s, never the learner\'s');
+  });
+
+  test('a recorded choice that names no option of its step is ignored, not shown (a rebuilt plan)', () => {
+    const plan = fixturePlan();
+    const shown = withChosen(plan, setChosen(fixtureProgress(fixturePlan()), STEP, 'an-option-that-is-gone'));
+    assert.equal(shown, plan, 'nothing to overlay: the same plan comes back');
+  });
+
+  test('no choice recorded: the very same plan object comes back (discriminates)', () => {
+    const plan = fixturePlan();
+    assert.equal(withChosen(plan, fixtureProgress(fixturePlan())), plan);
   });
 });
 

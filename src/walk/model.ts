@@ -29,6 +29,16 @@ export interface ProgressStep {
    *  *Check my work* here yet, which is different from a check that ran and failed — the
    *  tree renders those differently, and a learner deserves that distinction. */
   check?: { ok: boolean; at: string };
+  /**
+   * The option the LEARNER chose at this step, when they chose one (T-21, T-10 E1) — an option id
+   * of this step. Absent means the learner has not chosen, and the step stands as the plan has it.
+   *
+   * It lives HERE, in progress, not in `plan.json`: the plan is repo-tour's output and the walk
+   * never writes it (one writer per file — the foreman's ruling at T-21's gate). The session
+   * overlays it onto `decision.chosen` (`withChosen`) in the plan every consumer is handed, which
+   * is where the replan (T-22) reads it. Latest wins until T-22 lands.
+   */
+  chosen?: string;
 }
 
 /** `<target>/.repo-tour/build/progress.json` — schema §5.3 refinement notes, verbatim. */
@@ -138,6 +148,33 @@ export function markDone(progress: Progress, stepId: string): Progress {
 export function setDial(progress: Progress, stepId: string, dial: Dial): Progress {
   const existing = progress.steps[stepId];
   return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, dial } } };
+}
+
+export function setChosen(progress: Progress, stepId: string, optionId: string): Progress {
+  const existing = progress.steps[stepId];
+  return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, chosen: optionId } } };
+}
+
+/**
+ * The plan as the walk shows it: each step's `decision.chosen` is the learner's choice when they
+ * made one (T-21). Pure — a NEW plan; the original (repo-tour's, read from disk) is never mutated.
+ *
+ * A recorded choice that names no option of its step — a rebuilt plan whose options changed — is
+ * IGNORED rather than shown: the page must never mark a road that is not on the table. Steps and
+ * fields this function has no reason to touch are passed through by reference.
+ */
+export function withChosen(plan: PlanLike, progress: Progress): PlanLike {
+  if (!Array.isArray(plan.steps)) return plan;
+  let changed = false;
+  const steps = plan.steps.map((step) => {
+    const chosen = progress.steps[step.id]?.chosen;
+    if (typeof chosen !== 'string' || !step.decision || !Array.isArray(step.decision.options)) return step;
+    if (!step.decision.options.some((option) => option?.id === chosen)) return step;
+    if (step.decision.chosen === chosen) return step;
+    changed = true;
+    return { ...step, decision: { ...step.decision, chosen } };
+  });
+  return changed ? { ...plan, steps } : plan;
 }
 
 export function setCheck(progress: Progress, stepId: string, ok: boolean, at: string): Progress {

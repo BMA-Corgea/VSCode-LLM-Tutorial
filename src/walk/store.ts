@@ -110,7 +110,14 @@ function withCheckedVerdicts(progress: Progress): Progress {
     // Rebuilt without `check` rather than destructured-and-spread: the lint rule against
     // unused bindings is right, and naming a variable only to discard it is a worse way to
     // say "drop this field" than simply not copying it.
-    steps[id] = { status: step.status, ...(step.dial ? { dial: step.dial } : {}), ...(step.transcript ? { transcript: step.transcript } : {}) };
+    steps[id] = {
+      status: step.status,
+      ...(step.dial ? { dial: step.dial } : {}),
+      ...(step.transcript ? { transcript: step.transcript } : {}),
+      // T-21: the learner's choice survives a malformed verdict too — dropping it here would undo a
+      // divergence silently, on the next load, for a reason the learner never sees.
+      ...(typeof step.chosen === 'string' ? { chosen: step.chosen } : {}),
+    };
     changed = true;
   }
   return changed ? { ...progress, steps } : progress;
