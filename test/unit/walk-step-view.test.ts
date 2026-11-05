@@ -494,7 +494,8 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
 
   test('renderNoticeHtml says its sentence — and needs no skins module to do it', () => {
     const html = renderNoticeHtml('No tutorial in this folder yet.');
-    assert.match(html, /<main class="notice-only"><p class="notice">No tutorial in this folder yet\.<\/p><\/main>/);
+    // T-16 (F-06): the page now has a heading over its sentence (axe page-has-heading-one).
+    assert.match(html, /<main class="notice-only"><h1>Nothing to show yet<\/h1><p class="notice">No tutorial in this folder yet\.<\/p><\/main>/);
     // The "core is missing" case is exactly the case with no SkinsModule to pass, so this
     // page is deliberately unskinned: no data-theme, and no repo-tour CSS inlined.
     // (`data-theme` occurs in the bridge sheet's own selectors, so this asserts the <html>
@@ -1115,7 +1116,8 @@ suite('the tutor\'s own client script, executed against the fake DOM (AC2, AC4, 
     // already thrown the text away would be telling somebody their question was refused beside
     // an empty box. It goes when the host says it took it: see the `data-accepted` tests below.
     assert.equal(dom.elements.get('tutor-input')!.value, 'Why not keep it inline?', 'the question stays until the host says it took it');
-    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: 'Why not keep it inline?' },
+    // T-16: a press also records which outcome to bring into view after the repaint it causes.
+    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: 'Why not keep it inline?', reveal: 'tutor' },
       'and it is SAVED, because the acceptance arrives with a repaint that tears this page down');
   });
 
@@ -1312,7 +1314,7 @@ suite('the tutor\'s DRAFT survives the repaint that answering causes (AC5)', () 
     dom.elements.get('tutor-input')!.dispatch('input');
     dom.elements.get('btn-tutor-ask')!.dispatch('click');
 
-    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: 'why?' });
+    assert.deepEqual(dom.states[dom.states.length - 1], { stepId: 'st-2-file-parse', note: '', draft: 'why?', reveal: 'tutor' });
     assert.deepEqual(dom.posted, [{ type: 'tutor:ask', payload: { text: 'why?' } }], 'and the question really was sent');
   });
 });
