@@ -25,10 +25,10 @@ are part-built on local branches with true handoffs. Nothing was published to an
 3. **"vscode-test runs VS Code 1.136.1."** `.vscode-test.mjs` pins no version; it resolves "stable"
    over the network on every run (1.145.0 here, a 361 MB download into each tree's `.vscode-test/`
    unless you symlink one in).
-4. **"The screen tests are solid."** T-15's new screen harness (`test/support/screen.ts`, the
-   `screen` test host) flaked twice under machine load 8+: one T-15 screen timeout during T-16's
-   run, and a failed step-screen test dragging a T-15 screen test down with it (T-21). Green on
-   every re-run; not yet ticketed — see section 2.
+4. **"The screen tests are solid."** T-15's start-screen test *"a folder picker left open across
+   the END of a build…"* times out under machine load (6–8+): it failed during T-16's run and twice
+   in T-21's review, and passed on every quiet run. A failed step-screen test can also drag a T-15
+   screen test down with it. Not yet ticketed — see section 2.
 5. **"T-22 can start once T-17 and T-21 are on main."** The tracker's `--after` clears only when a
    blocker has passed accept, release AND monitor.
 6. **T-14's `risk: low`** is stale and immutable: undo touches plan versions on the learner's disk.
@@ -42,7 +42,7 @@ are part-built on local branches with true handoffs. Nothing was published to an
 | what | state | trigger / owner |
 |---|---|---|
 | **T-17** the derivation engine | `build`; branch `feature/T-17-derivation-engine` @ `8b53e18`, 27 commits, **local only**; 1397 unit + 77 vscode-test; steps 0a–6b(part) done; determinism (AC4) proven | Next session: `replanPlan` + changed answers (plan step 6b-2), AC3 close-out, two blind reviews, merge GO. Handoff `.autodev/handoffs/T-17.md` |
-| **T-21** choosing the road not taken | `auto-review`; branch `feature/T-21-choosing-the-road-not-taken` @ `1206123`, **local only**; 1291 unit + 75 host + 11 screen; built, not merged. Security review done (1 Medium S1, 1 Low, 2 Info); code review **ran into the wind-down**: 8 findings on disk at stand-down (3 Medium — C1 is S1 again, C2, C8 — 4 Low, 1 Info), its final verdict recorded in the handoff if it finished | **Not mergeable until the security review's Medium is fixed:** a page still showing a previous step can record a choice on the current step (repo-tour gives every step the same option ids). Handoff `.autodev/handoffs/T-21.md`; reviews `.autodev/reviews/T-21-*` |
+| **T-21** choosing the road not taken | `auto-review`; branch `feature/T-21-choosing-the-road-not-taken` @ `1206123`, **local only**; 1291 unit + 75 host + 11 screen; built, not merged. Security review done (1 Medium S1, 1 Low, 2 Info). Code review finished at 02:28: **not ready to merge — three Mediums**: (1) a press from a page showing a previous step is written to the CURRENT step, silently (repo-tour gives every step the same option ids — same as S1; the message must carry the step id); (2) AC7's prose retirement not done in its three places; (3) AC5's refusal is drawn ~900 px below the button and a second refusal changes nothing (T-15's shape). Six Lows ride with the fixes | **Not mergeable until the security review's Medium is fixed:** a page still showing a previous step can record a choice on the current step (repo-tour gives every step the same option ids). Handoff `.autodev/handoffs/T-21.md`; reviews `.autodev/reviews/T-21-*` |
 | T-16 deliberate leftovers | F-07 bridges fonts, not text size (by decision); welcome-view flash + stale tab stop | **T-43** |
 | T-16's last fix commit `87be0af` | merged after tests + mutations, **no second blind review** (no new stages after 94%) | Next review that touches `src/walk/step-view.ts` covers it |
 | T-16 line 8: the real editor | everything measured headless; whether VS Code keeps the panel's scroll after a press is **unverified where it matters** | **T-42** |
