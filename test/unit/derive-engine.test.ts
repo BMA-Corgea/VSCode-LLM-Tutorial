@@ -135,8 +135,10 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     const gs = tempDir('derive-engine-gs-');
     const target = tempDir('derive-engine-target-');
     const model = fakeModel();
-    const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(model.run, gs, target));
+    const d = deps(model.run, gs, target);
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, d);
     if (!out.ok) assert.fail(out.reason);
+    assert.equal(d.ledger.spend().replies, out.plan.cost.calls, 'AC6: the ledger counted every call the plan reports — no call went around it');
     assert.deepEqual(validateBuildPlan(BUILD_PLAN_SCHEMA, out.plan), []);
     assert.equal(out.plan.mode, 'idea');
     assert.equal(fs.readFileSync(path.join(out.referenceRoot, 'core/tally.mjs'), 'utf8'), TALLY);
