@@ -7,9 +7,9 @@ here and found via the reference table below.
 
 ## Live edge
 
-> **The overnight foreman run of 2026-11-05 has ended: read [`kb/RESUME.md`](RESUME.md) first.**
-> It is that run's handoff and supersedes "Where that stands" and "Waiting on" below, which still
-> describe September.
+> **The foreman continuation run of 2026-11-08 has ended: read [`kb/RESUME.md`](RESUME.md) first.**
+> It is that run's handoff (eight tickets landed; T-22 is on a local branch) and supersedes "Where
+> that stands" and "Waiting on" below, which still describe September.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live.
@@ -49,19 +49,22 @@ that undo and the deferred replan diff need the same substrate.
 **Test baseline on `main`: 1248 unit + 75 vscode-test.** It was 479 + 50 when T-6 began.
 
 - **T-14** (feature) — Undo a divergence — return to the pre-divergence plan — intake
-- **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — intake
 - **T-23** (feature) — The walked prefix and the learner's disk — a replan never touches either — intake
 - **T-18** (feature) — Asking before showing — the decision comes before its code in a Mode A walk — intake
-- **T-19** (feature) — Determinism and the responsiveness test — AC-A1 made runnable — intake
 - **T-20** (feature) — The idea path — the start screen's idea box builds a Mode A plan — intake
-- **T-17** (feature) — The derivation engine — an idea becomes a plan the walk already renders — build
-- **T-30** (bug) — Building the plan freezes the extension host while the repository is read — eve… — intake
 - **T-40** (feature) — Codicons in the webviews, and waiting states that move — intake
-- **T-41** (feature) — Move the Skin picker out of the title row, on every webview at once — intake
-- **T-42** (feature) — Drive the Current Step view in a real Extension Development Host and read back … — intake
-- **T-43** (feature) — T-16's ride-alongs: the tutor box on input tokens, Forget out of the ask row, S… — intake
-- **T-21** (feature) — Choosing the road not taken — the author's alternatives become choosable — auto-review
-- **T-44** (feature) — The owner's call: mark the author's chosen option with a selection colour inste… — intake
+- **T-60** (bug) — A Claude reply's input token count leaves out cached input — intake
+- **T-70** (bug) — Cancel during 'asking about each decision…' does not stop the model calls — the… — intake
+- **T-50** (bug) — A press from a stale step page acts on the step the learner moved to, on every … — intake
+- **T-80** (bug) — T-15's folder-picker screen test fails on clean main: the press after a failed … — intake
+- **T-81** (bug) — The unit and screen suites leave about 390 temp folders per run in /tmp and nev… — intake
+- **T-61** (feature) — Model-written code runs as the learner: tell them first, and decide which built… — intake
+- **T-71** (bug) — After a failed build the same form is refused as 'not empty', with no word that… — intake
+- **T-72** (bug) — A .gitattributes committed as a symlink to /dev/zero makes repo-tour's read end… — intake
+- **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — build
+- **T-73** (bug) — A second Check my work with nothing changed leaves the panel exactly as it was:… — intake
+- **T-51** (bug) — Previous and Next at the ends of the plan are enabled and answer nothing — intake
+- **T-52** (feature) — The Start form's fields: the theme's placeholder colour and focus outline — intake
 
 ## Waiting on
 
@@ -72,6 +75,7 @@ that undo and the deferred replan diff need the same substrate.
   here were stale against the tracker. T-4 is **building** (resumed 2026-09-05 on go-ahead
   GA-3); T-5…T-8 sit at `plan` — unstarted, not blocked. The next human stop is T-4's
   **accept** gate.
+- **T-22** — waiting at spec_ready on human:owner since 2026-11-08
 
 
 ## Known landmines (not bugs today; they bite on a named trigger)
@@ -98,6 +102,14 @@ that undo and the deferred replan diff need the same substrate.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-11-08 **T-41 COMPLETE** — Move the Skin picker out of the title row, on every webview at once
+- 2026-11-08 **T-19 COMPLETE** — Determinism and the responsiveness test — AC-A1 made runnable
+- 2026-11-08 **T-43 COMPLETE** — T-16's ride-alongs: the tutor box on input tokens, Forget out of the ask row, S…
+- 2026-11-08 **T-42 COMPLETE** — Drive the Current Step view in a real Extension Development Host and read back …
+- 2026-11-08 **T-44 COMPLETE** — The owner's call: mark the author's chosen option with a selection colour inste…
+- 2026-11-08 **T-17 COMPLETE** — The derivation engine — an idea becomes a plan the walk already renders
+- 2026-11-08 **T-30 COMPLETE** — Building the plan freezes the extension host while the repository is read — eve…
+- 2026-11-08 **T-21 COMPLETE** — Choosing the road not taken — the author's alternatives become choosable
 - 2026-11-05 **T-16 COMPLETE** — Native polish — the four webviews and the commands look right in every theme an…
 - 2026-11-05 **T-15 COMPLETE** — Pressing 'Build the plan' with a blocking problem changes nothing on screen — t…
 - 2026-11-05 **T-10 COMPLETE** — Divergence — follow the author or diverge, and replan the remainder
