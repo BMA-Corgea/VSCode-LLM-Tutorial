@@ -771,14 +771,28 @@ export interface ExtensionApi {
   };
 }
 
+/** Exported so a test asserts the sentence the commands really use. */
+export const NO_WALK_OPEN_MESSAGE = 'Build Tutorials: no tutorial is open in this folder — run "Build Tutorials: Start" to build one.';
+
+/** What a palette command that needs a walk says when none is open, instead of doing nothing (T-43, F-09b; T-15's rule). */
+function sayNoWalkOpen(): void {
+  void vscode.window.showInformationMessage(NO_WALK_OPEN_MESSAGE);
+}
+
 export function activate(context: vscode.ExtensionContext): ExtensionApi {
   registerWalk(context);
   context.subscriptions.push(
     vscode.commands.registerCommand('buildTutorials.doctor', () => runDoctorCommand(context)),
     vscode.commands.registerCommand('buildTutorials.start', () => runStartCommand(context)),
     vscode.commands.registerCommand('buildTutorials.openWalk', () => runOpenWalkCommand(context)),
-    vscode.commands.registerCommand('buildTutorials.nextStep', () => { walkSession?.next(); }),
-    vscode.commands.registerCommand('buildTutorials.prevStep', () => { walkSession?.prev(); }),
+    vscode.commands.registerCommand('buildTutorials.nextStep', () => {
+      if (walkSession) walkSession.next();
+      else sayNoWalkOpen();
+    }),
+    vscode.commands.registerCommand('buildTutorials.prevStep', () => {
+      if (walkSession) walkSession.prev();
+      else sayNoWalkOpen();
+    }),
     // The tree hands this the step's own id. `unknown`, and checked: the command is also
     // reachable by hand (it is hidden from the palette, not from `executeCommand`), and
     // `WalkSession.goTo` already ignores an id the plan does not contain.
@@ -790,9 +804,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     // offered and says honestly that there is no walk, which is what `openWalk` already does.
     vscode.commands.registerCommand('buildTutorials.reproduceFiles', () => {
       if (!walkSession) {
-        void vscode.window.showInformationMessage(
-          'Build Tutorials: no tutorial is open in this folder — run "Build Tutorials: Start" to build one.',
-        );
+        sayNoWalkOpen();
         return;
       }
       walkSession.reproduce();

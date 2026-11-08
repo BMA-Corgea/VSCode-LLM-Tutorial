@@ -672,7 +672,8 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .detour-waiting { color:var(--muted); font-size:12px; }
 .tutor-unreachable { color:var(--muted); font-size:12px; margin:0 0 8px; }
 .tutor-ask { display:flex; flex-direction:column; gap:8px; }
-.tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); color:inherit; resize:vertical; }
+.tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--field-edge); border-radius:var(--radius); background:var(--field-bg); color:var(--ink); resize:vertical; }
+.tutor-input:focus { outline:1px solid var(--focus); outline-offset:-1px; }
 .tutor-input:disabled { opacity:0.6; }
 .tutor-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .tutor-thinking { color:var(--muted); font-size:12px; }
@@ -742,6 +743,10 @@ main, section, .option { min-width:0; }
   border-left:2px solid var(--status-news); padding-left:8px;
 }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
+/* T-43 (F-08): the input background is the theme's, so its text is too. A named skin keeps its own ink. */
+:root:not([data-theme]) .tutor-input { color:var(--vscode-input-foreground, var(--ink)); }
+/* T-43 (F-09): the foot of the conversation, away from Ask. */
+.tutor-foot { margin:0 0 12px; }
 /* F-11: where in the plan this step sits. */
 .step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
 /* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
@@ -1230,11 +1235,11 @@ function tutorHtml(state: StepViewState): string {
   const controls = thinking
     ? `<span class="tutor-thinking" id="tutor-thinking">${escapeHtml(waitingMessage(tutor?.stage))}</span>`
       + `<button type="button" class="btn" id="btn-tutor-cancel">${escapeHtml(CANCEL_BUTTON_LABEL)}</button>`
-    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`
-      + clearButtonHtml(state);
+    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
 
   return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
     + transcriptHtml(state.transcript)
+    + (thinking ? '' : clearButtonHtml(state))
     + note
     + unreachable
     + elsewhereHtml(state)
@@ -1338,7 +1343,9 @@ function detourHtml(state: StepViewState): string {
 function clearButtonHtml(state: StepViewState): string {
   const turns = Array.isArray(state.transcript) ? state.transcript.length : 0;
   if (turns === 0) return '';
-  return `<button type="button" class="btn btn-quiet" id="btn-tutor-clear">${escapeHtml(CLEAR_BUTTON_LABEL)}</button>`;
+  // At the foot of the conversation, not in the row with *Ask* (T-43, F-09): a control that deletes
+  // somebody's own words does not belong beside the one they press most.
+  return `<div class="tutor-foot"><button type="button" class="btn btn-quiet" id="btn-tutor-clear">${escapeHtml(CLEAR_BUTTON_LABEL)}</button></div>`;
 }
 
 /**

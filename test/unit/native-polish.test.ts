@@ -106,6 +106,46 @@ suite('T-16 F-03 — the taken option keeps its text readable on its highlight',
   });
 });
 
+// ── T-43 ──────────────────────────────────────────────────────────────────────────────────
+
+suite('T-43 — the tutor box looks like an input, and Forget is away from Ask', () => {
+  const page = (over: Partial<StepViewState> = {}): string => renderStepHtml(stateAt('st-2-file-parse', over), FAKE_SKINS);
+  const turn = { role: 'user', content: 'why is this its own module?' } as const;
+
+  test('F-08: the box is drawn from the input tokens, not the panel\'s', () => {
+    const decls = declarationsFor(cssOf(page()), '.tutor-input');
+    assert.match(decls, /border:1pxsolidvar\(--field-edge\)/, 'the input border, which is what hc shows as its edge');
+    assert.match(decls, /background:var\(--field-bg\)/);
+    assert.ok(!/var\(--line\)|background:var\(--bg\)/.test(decls), 'the panel tokens are gone');
+  });
+
+  test('F-08: a keyboard focus shows an outline in the theme\'s focus colour', () => {
+    assert.match(declarationsFor(cssOf(page()), '.tutor-input:focus'), /outline:1pxsolidvar\(--focus\)/);
+  });
+
+  test('F-08: under System its text is the theme\'s input foreground; a named skin keeps its own ink', () => {
+    const css = cssOf(page());
+    assert.match(declarationsFor(css, ':root:not([data-theme]) .tutor-input'), /color:var\(--vscode-input-foreground,var\(--ink\)\)/);
+    assert.match(declarationsFor(css, '.tutor-input'), /color:var\(--ink\)/, 'the unscoped rule stays on the skin\'s ink');
+  });
+
+  test('F-09: Forget is not in the row with Ask; it is the last thing after the log', () => {
+    const html = page({ transcript: [turn] });
+    const askRow = /<div class="tutor-controls">([\s\S]*?)<\/div>/.exec(html.slice(html.indexOf('id="outcome-tutor"')))?.[1] ?? '';
+    assert.ok(askRow.includes('id="btn-tutor-ask"'), 'discriminates: this is the ask row');
+    assert.ok(!askRow.includes('id="btn-tutor-clear"'), 'a control that deletes the conversation does not sit beside Ask');
+    const log = html.indexOf('</ul>', html.indexOf('class="tutor-log"'));
+    const forget = html.indexOf('id="btn-tutor-clear"');
+    const ask = html.indexOf('id="outcome-tutor"');
+    assert.ok(log >= 0 && log < forget && forget < ask, 'after the conversation, before the box');
+  });
+
+  test('F-09: Forget is still there only when there is a conversation, and never mid-ask', () => {
+    assert.ok(!page().includes('id="btn-tutor-clear"'), 'no conversation, no control');
+    assert.ok(!page({ transcript: [turn], tutor: { thinking: true } }).includes('id="btn-tutor-clear"'), 'never while an answer is landing');
+  });
+});
+
 // ── F-04 ─────────────────────────────────────────────────────────────────────────────────────
 
 suite('T-16 F-04 — the narrator dims text with the theme, never with opacity', () => {

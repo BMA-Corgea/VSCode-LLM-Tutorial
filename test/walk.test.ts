@@ -74,7 +74,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
-import type { ExtensionApi } from '../src/extension.js';
+import { NO_WALK_OPEN_MESSAGE, type ExtensionApi } from '../src/extension.js';
 import { statusText, type PlanLike, type Progress, type StepLike } from '../src/walk/model.js';
 import { NOTHING_TO_ASK_MESSAGE } from '../src/walk/step-protocol.js';
 import { fixturePlan, writeFixtureTarget } from './unit/walk-fixtures.js';
@@ -301,6 +301,27 @@ function iconsIn(tree: NonNullable<ReturnType<ExtensionApi['_walk']['tree']>>): 
 }
 
 // ── AC3: the learner's own editor ─────────────────────────────────────────────────────────
+
+suite('Previous step and Next step from the palette, with no walk open (T-43, F-09b)', () => {
+  test('say so, the same way Copy the files that aren\'t taught does, instead of doing nothing', async () => {
+    const api = await getApi();
+    const empty = newTarget();
+    fs.rmSync(path.join(empty, '.repo-tour'), { recursive: true, force: true });
+    await api._walk.openAt(empty);
+    assert.equal(api._walk.session(), undefined, 'discriminates: no walk is open');
+    const said: string[] = [];
+    const original = vscode.window.showInformationMessage;
+    (vscode.window as { showInformationMessage: unknown }).showInformationMessage = (message: string) => { said.push(message); return Promise.resolve(undefined); };
+    try {
+      await vscode.commands.executeCommand('buildTutorials.nextStep');
+      await vscode.commands.executeCommand('buildTutorials.prevStep');
+    } finally {
+      (vscode.window as { showInformationMessage: unknown }).showInformationMessage = original;
+      await teardownWalk();
+    }
+    assert.deepEqual(said, [NO_WALK_OPEN_MESSAGE, NO_WALK_OPEN_MESSAGE]);
+  });
+});
 
 suite('the walk drives the real editor (AC3)', () => {
   setup(async () => {
