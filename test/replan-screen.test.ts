@@ -332,6 +332,9 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     assert.deepEqual(reloaded.on, [ROAD], 'a reload remembers the road');
     assert.deepEqual(reloaded.notes, [REPLANNED_NOTE]);
     assert.deepEqual(d.treeSteps(), treeAfter, 'and shows the same walk');
+    await d.onStep(fresh[0]!);
+    const again = await until(d.read, (p) => p.step === fresh[0] && p.shape.length > 0, 'manual mode outlines the file after a reload');
+    assert.ok(again.shape.some((l) => l.includes('writtenByTheModel')), `a reload still reads the re-derived code; it shows ${JSON.stringify(again.shape)}`);
   }));
 
   test('refused, refused again, then cancelled: each says why, no byte moves, and the road can still be pressed (AC6, AC11)', () => drive(async (d) => {
