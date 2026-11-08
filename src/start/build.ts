@@ -9,6 +9,9 @@
  * by `src/extension.ts`. That means the write-ahead marker, the language refusal, and the
  * full end-to-end build against a fixture repo (AC3, AC4, AC5) all run under PLAIN MOCHA —
  * no extension host needed to prove any of it, only real `fs`/`child_process`.
+ *
+ * In the extension itself, `digest` and `buildPlan` run on a worker thread (`off-thread.ts`, T-30),
+ * behind the same `BuildCore`. Everything in this file still runs on the host.
  */
 
 import { execFile } from 'node:child_process';
@@ -511,6 +514,17 @@ function deleteMarker(target: string): void {
   } catch {
     /* already gone — fine */
   }
+  // And the folders the marker needed, when nothing else is in them (T-30). `validateTarget` refuses
+  // a folder with anything in it, so an empty `.repo-tour/build/` left by a cancel or a refusal
+  // turned the next press on the very same form into "not empty — pick an empty or new folder".
+  // `rmdir`, not `rm -r`: it can only ever remove a directory that is already empty.
+  for (const dir of [buildDir(target), path.dirname(buildDir(target))]) {
+    try {
+      fs.rmdirSync(dir);
+    } catch {
+      return; // not empty (a finished plan is in there), or already gone
+    }
+  }
 }
 
 // ── the build itself ─────────────────────────────────────────────────────────────────────────
@@ -526,7 +540,9 @@ export interface BuildContext {
   onProgress?: (msg: string) => void;
   /** Fires once per phase transition, right after the marker is durably written — a test hook. */
   onPhase?: (phase: BuildPhase) => void;
-  /** Polled between phases; returning true stops the build (cancelled from the progress notification). */
+  /** Polled between phases, and while `digest` and `buildPlan` run on a worker (T-30); returning
+   *  true stops the build (cancelled from the progress notification). `interpretPlan` is not
+   *  stopped by it, only followed by it: see T-70. */
   isCancelled?: () => boolean;
   /** Swappable filesystem writes — a test makes `renameSync` fail exactly where a crash
    *  would hurt most and asserts what is left on disk. Defaults to `realFsWriteOps`. */
@@ -550,6 +566,14 @@ function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: B
 }
 
 export async function buildFromRequest(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
+  try {
+    return await runThePhases(request, ctx);
+  } finally {
+    ctx.core.release?.(); // a refusal after the digest, a failure, a cancel: nothing may keep a worker alive
+  }
+}
+
+async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
   const target = request.target;
   const git = ctx.git ?? realGit;
   const marker: BuildMarker = { startedAt: new Date().toISOString(), phase: 'digest', request };
@@ -590,8 +614,14 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
   let digestResult: DigestResultLike;
   try {
     ctx.onProgress?.('reading the repository…');
-    digestResult = await ctx.core.digest(repoRoot, { write: true });
+    // `write: false` (T-30). With `true`, repo-tour ends the digest by writing some 20,000 files of
+    // cache into the REFERENCE repository, one `writeFileSync` at a time; a Cancel landing there
+    // leaves a set of files from two runs. Nothing in this extension reads that cache (every path
+    // it reads is under `<target>/.repo-tour/build/`), so the promise "Cancel leaves nothing
+    // half-written" is true here by there being nothing written.
+    digestResult = await ctx.core.digest(repoRoot, { write: false }, { isCancelled: ctx.isCancelled });
   } catch (err) {
+    if (phaseCancelled(err)) return cancel(target, 'while reading the repository');
     return fail(err);
   }
 
@@ -608,8 +638,9 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
   let plan: BuildPlanLike;
   try {
     ctx.onProgress?.('deriving the build order…');
-    plan = await ctx.core.buildPlan(digestResult, { root: repoRoot, witness: true });
+    plan = await ctx.core.buildPlan(digestResult, { root: repoRoot, witness: true }, { isCancelled: ctx.isCancelled });
   } catch (err) {
+    if (phaseCancelled(err)) return cancel(target, 'while deriving the build order');
     return fail(err);
   }
 

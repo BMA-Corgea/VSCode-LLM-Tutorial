@@ -81,6 +81,7 @@
  */
 
 import { EXPECTED_GRAMMARS } from '../doctor.js';
+import { BUILD_WORKER_RELATIVE } from '../start/worker-protocol.js';
 
 /** A thing found in the archive that should not be there. */
 export interface Violation {
@@ -602,6 +603,12 @@ export interface ContentRequirement {
 export const REQUIRED_GRAMMARS = EXPECTED_GRAMMARS;
 
 export const REQUIRED_CONTENT: readonly ContentRequirement[] = [
+  {
+    id: 'build-worker',
+    why: `${BUILD_WORKER_RELATIVE} is the thread the build reads a repository on (T-30); without it every build stops at once and says the build worker is missing`,
+    matches: (rel) => rel === BUILD_WORKER_RELATIVE,
+    atLeast: 1,
+  },
   {
     id: 'core-dist',
     why: 'repo-tour\'s compiled core — without it the extension resolves nothing and the doctor reports "core NOT found"',
