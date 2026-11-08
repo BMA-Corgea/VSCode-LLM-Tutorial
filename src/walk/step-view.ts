@@ -713,7 +713,7 @@ main, section, .option { min-width:0; }
    colour, and muted text on it measured 4.09:1 in Dark Modern. Inside the highlight, the
    consequence takes the full ink colour; the badge, border and background still set the taken
    option apart from the others. Unscoped on purpose: in a named skin, ink on the highlight is
-   only ever more contrast. Coupled to the option markup's class names (T-21 rewrites it). */
+   only ever more contrast. Coupled to the option markup's class names. */
 .option-taken .option-consequence { color:var(--ink); }
 /* F-02: status roles. Under System, --kw and --str resolve to symbolIcon colours that every
    default theme sets to plain foreground, so a pass, a fail and every "news" line rendered as
@@ -1850,6 +1850,10 @@ export function renderNoticeHtml(notice: string): string {
  *                                        `.option-taken` marking, its two badges, and (through
  *                                        the array's LENGTH) the "n not shown" note
  *   - `step.decision.authorChoice`     → the same marking, when no option carries `taken`
+ *   - `step.decision.chosen`           → the learner's road (T-21): the mark, *Your choice* and
+ *                                        the line about what has not changed yet
+ *   - `state.choiceNote`               → the refusal above the options list (T-21), with its
+ *                                        count, so a second refused press still repaints
  *   - `step.decision.why`              → the why paragraph
  *   - `step.decision.whySource`        → its "from the model / the author / not inferable" line
  *   - `step.witness.{sha,subject,date}`→ the witness sentence, or `NO_HISTORY_MESSAGE`
@@ -1857,8 +1861,6 @@ export function renderNoticeHtml(notice: string): string {
  *                                        what removes that block when the dial leaves manual
  *   - `state.fileExists`               → *Open the file*'s `disabled`, and its hint text
  *   - `state.writeNote`                → the write note under the dial
- *   - `state.choiceNote`               → the refusal above the options list (T-21), with its
- *                                        count, so a second refused press still repaints
  *   - `state.check`                    → the whole check report (AC5) — summary, verdict
  *                                        colour, every symbol and import row
  *   - `state.reproduce`                → the offer line and its button, present until done
@@ -1985,6 +1987,7 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
     ]),
     keyOf(decision.authorChoice),
     keyOf(decision.chosen), // T-21: a choice must repaint, or the press is silent
+    keyOf(state.choiceNote ?? null), // T-21: so must a refusal, and a repeat of one (T-15)
     keyOf(decision.why, MAX_PLAN_TEXT),
     decision.whySource,
     [keyOf(witness?.sha), keyOf(witness?.subject), keyOf(witness?.date)],
@@ -1996,7 +1999,6 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
       : null,
     state.fileExists,
     keyOf(state.writeNote ?? null),
-    keyOf(state.choiceNote ?? null),
     state.check
       ? [
           keyOf(state.check.summary, MAX_PLAN_TEXT),
