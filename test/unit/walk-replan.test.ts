@@ -53,7 +53,7 @@ function replanned(plan: PlanLike, tree = TREE, answer = ANSWER): PlanLike {
   return {
     ...plan,
     steps: [...plan.steps.filter((s) => s.id !== LATER), fresh]
-      .map((s, i) => ({ ...s, ordinal: i + 1, ...(s.id === D ? { decision: { ...s.decision, chosen: answer } } : {}) })),
+      .map((s, i) => ({ ...s, ordinal: i + 1, ...(s.id === D ? { derivedFrom: D, decision: { ...s.decision, chosen: answer } } : {}) })),
     divergences: [...prior, { stepId: D, answer, staleDependents: [], at: 't', tree }],
   };
 }
@@ -272,6 +272,11 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     await finish(h, await reachedEngine(h), landed(h.plan, h.tree));
     assert.equal(h.view().choiceNote, replanDoneText(1, true, COST));
     assert.match(h.view().choiceNote ?? '', /\$0\.0123/);
+  });
+
+  test('when nothing later needed re-planning the note does not say nothing depended on it: a walked step may have', () => {
+    assert.match(replanDoneText(0, true, COST), /No later step needed re-planning/);
+    assert.doesNotMatch(replanDoneText(0, true, COST), /depended/);
   });
 
   test('the learner\'s folder is not touched: no file, no dial', async () => {

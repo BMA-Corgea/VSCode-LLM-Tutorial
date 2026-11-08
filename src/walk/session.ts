@@ -283,7 +283,7 @@ function replanCostText(cost: DeriveCost): string {
 export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost): string {
   const what = fresh > 0
     ? `${ownCode ? 'This step\u2019s code and ' : ''}${fresh} later step${fresh === 1 ? '' : 's'} now follow${fresh === 1 && !ownCode ? 's' : ''} your choice.`
-    : 'This step\u2019s code now follows your choice. Nothing later depended on it.';
+    : 'This step\u2019s code now follows your choice. No later step needed re-planning.';
   return `Re-planned. ${what} ${replanCostText(cost)}`;
 }
 
@@ -1019,7 +1019,9 @@ export class WalkSession {
     this.forgetOldCode(job.stepId);
     this.clearStepNotes();
     const decided = outcome.plan.steps.find((s) => s.id === job.stepId);
-    this.sayChoice(job, replanDoneText(outcome.plan.steps.filter((s) => s.derivedFrom === job.stepId).length, decided?.kind !== 'shape', outcome.cost));
+    // D marks its own code as re-derived, so it is not one of the steps that followed it.
+    const followed = outcome.plan.steps.filter((s) => s.derivedFrom === job.stepId && s.id !== job.stepId).length;
+    this.sayChoice(job, replanDoneText(followed, decided?.kind !== 'shape', outcome.cost));
     this.commit(false);
   }
 

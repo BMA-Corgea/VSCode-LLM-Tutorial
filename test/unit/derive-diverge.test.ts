@@ -176,6 +176,16 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.equal(stepNamed(second.plan, 's-render')?.derivedFrom, 'an-earlier-decision', 'it never had an author to go back to');
   });
 
+  test('a new step cannot claim to be what the author did, even when the model copies the words it was shown (AC7)', async () => {
+    const { plan, root, gs, target } = setup();
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const fresh = out.plan.steps.filter((s) => s.derivedFrom === 's-parse' && s.id !== 's-parse');
+    assert.ok(fresh.some((s) => s.decision.options.length === 2), 'discriminates: the scripted reply echoes both options it was shown');
+    for (const s of fresh) for (const o of s.decision.options) assert.doesNotMatch(o.label, /what the author did/i, s.id);
+    assert.equal(stepNamed(out.plan, 's-parse')?.decision.options[0]?.label, 'What the author did', 'the step where the road changed keeps its author\'s row');
+  });
+
   test('a shape decision has no code of its own, so it is not marked as if it did', async () => {
     const { plan, root, gs, target } = setup();
     const out = await divergePlan(input(plan, root, 's-api'), depsFor(model().run, gs, target));

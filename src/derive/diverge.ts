@@ -346,6 +346,14 @@ function scaffoldOf(file: string, derived: ReadonlyMap<string, string>, extracts
   return { loadBearing, boilerplate: boilerplateRanges(loadBearing, total) };
 }
 
+/**
+ * repo-tour labels the author's own row with these words, and the model is shown them on the steps
+ * it is replacing, so a reply can copy them. A step the model wrote has no author to be labelled
+ * after, and this label is what the page and the commit subject print.
+ */
+const AUTHORS_ROW_LABEL = /^\s*what the author did\s*$/i;
+const NEW_STEPS_OWN_LABEL = 'The suggested road';
+
 /** A re-derived step: the walk's shape, Mode A's truths, and a note of which decision it came from. */
 function freshStep(f: FreshNode, decisionId: string, realKey: ReadonlyMap<string, string>, derived: ReadonlyMap<string, string>, extracts: ReadonlyMap<string, ExtractLike>): StepLike {
   const n = f.node;
@@ -357,7 +365,7 @@ function freshStep(f: FreshNode, decisionId: string, realKey: ReadonlyMap<string
     kind: n.kind,
     decision: {
       question: n.question,
-      options: n.options.map((o) => ({ id: o.id, label: o.label, consequence: o.consequence, taken: o.id === n.recommended })),
+      options: n.options.map((o) => ({ id: o.id, label: AUTHORS_ROW_LABEL.test(o.label) ? NEW_STEPS_OWN_LABEL : o.label, consequence: o.consequence, taken: o.id === n.recommended })),
       authorChoice: n.recommended,
       chosen: null,
       why: n.why,

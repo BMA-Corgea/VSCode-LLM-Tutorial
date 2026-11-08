@@ -137,6 +137,12 @@ const builds = [
   },
   {
     ...shared,
+    entryPoints: ['test/replan-screen.test.ts'],
+    outfile: 'dist/test/screen/replan-screen.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
     entryPoints: ['test/step-screen.test.ts'],
     outfile: 'dist/test/screen/step-screen.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
