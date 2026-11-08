@@ -52,7 +52,7 @@ import {
 import { PYTHON_STDLIB_MODULES } from './python-stdlib.js';
 import { codeOnly } from './source-scan.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
-import { DERIVE_LIMITS, isDeriveRefusal, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
+import { DERIVE_LIMITS, isDeriveRefusal, type CodeLanguage, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
 
 export interface DeriveDeps extends DeriveAskDeps {
   /** repo-tour's `extract`, the same slice the dial's check uses */
@@ -145,7 +145,7 @@ function shownStepOf(node: DerivedNode, answers: Readonly<Record<string, string>
  * that belongs to the tickets that show it to them (T-61).
  */
 export function unsoundFileReason(
-  extract: ExtractLike, allowedFiles: ReadonlySet<string>, language: DeriveLanguage, plannedFiles: ReadonlySet<string> = allowedFiles,
+  extract: ExtractLike, allowedFiles: ReadonlySet<string>, language: CodeLanguage, plannedFiles: ReadonlySet<string> = allowedFiles, rules: ImportRules = MODE_A_IMPORTS,
 ): string | null {
   if (extract.parseErrors > 0) return `does not parse (${extract.parseErrors} syntax error${extract.parseErrors === 1 ? '' : 's'})`;
   const importerDir = path.posix.dirname(extract.path);
@@ -153,7 +153,7 @@ export function unsoundFileReason(
     if (language === 'python') {
       // `python3 -m cli.main` makes `cli` the top package: one dot is `cli`, and a second climbs out.
       const dots = leadingDots(imp.raw);
-      if (dots > importerDir.split('/').length) return `imports ${quote(imp.raw)}, which climbs above the top of the app, so Python refuses it at startup`;
+      if (rules.pythonRunsAsModule && dots > importerDir.split('/').length) return `imports ${quote(imp.raw)}, which climbs above the top of the app, so Python refuses it at startup`;
       // `from . import x`: the names after `import` are the real imports (`undeclaredPythonImport`).
       if (dots > 0 && dots === imp.raw.length && imp.resolved === null) continue;
     }
@@ -161,25 +161,56 @@ export function unsoundFileReason(
       if (!allowedFiles.has(imp.resolved)) return `imports ${quote(imp.raw)}, a file it does not depend on`;
       // repo-tour's resolver tries extensions and index files the way a bundler does. Node's ES
       // module loader does not, and this is the file the learner runs under Node.
-      if (language === 'javascript' && path.posix.normalize(path.posix.join(importerDir, imp.raw)) !== imp.resolved) {
+      if (language === 'javascript' && rules.nodeEsmSpecifiers && path.posix.normalize(path.posix.join(importerDir, imp.raw)) !== imp.resolved) {
         return `imports ${quote(imp.raw)}, which Node cannot load: an ES module names a file in full, as ${quote(path.posix.relative(importerDir, imp.resolved))}`;
       }
       continue;
     }
     if (imp.raw.startsWith('.')) return `imports ${quote(imp.raw)}, which is not one of its dependencies' files`;
-    if (language === 'javascript' && !isBuiltin(imp.raw)) return `imports the package ${quote(imp.raw)}, which would need installing`;
-    if (language === 'python') {
-      // A Python name with no dots in front reads like a package. It may be a file beside this one.
-      const sibling = path.posix.join(importerDir, `${imp.raw.replace(/\./g, '/')}.py`);
-      // A standard-library name beside a file of the same name is still the standard library: the
-      // app starts from its top folder, so the file beside it does not shadow it.
-      if (plannedFiles.has(sibling) && !PYTHON_STDLIB_MODULES.has(imp.raw.split('.')[0] ?? '')) {
-        return `imports ${quote(imp.raw)}, a name that only works when this file is run directly; this app is run from its top folder, so it must import ${quote(sibling.slice(0, -3).replace(/\//g, '.'))}`;
-      }
+    if (language !== 'python') {
+      if (!isBuiltin(imp.raw) && !rules.allowsPackage(packageOf(imp.raw))) return `imports the package ${quote(imp.raw)}, which would need installing`;
+      continue;
+    }
+    const top = imp.raw.split('.')[0] ?? '';
+    if (!rules.pythonRunsAsModule) {
+      if (!PYTHON_STDLIB_MODULES.has(top) && !rules.allowsPackage(top)) return `imports the package ${quote(imp.raw)}, which would need installing`;
+      continue;
+    }
+    // A Python name with no dots in front reads like a package. It may be a file beside this one.
+    const sibling = path.posix.join(importerDir, `${imp.raw.replace(/\./g, '/')}.py`);
+    // A standard-library name beside a file of the same name is still the standard library: the
+    // app starts from its top folder, so the file beside it does not shadow it.
+    if (plannedFiles.has(sibling) && !PYTHON_STDLIB_MODULES.has(top)) {
+      return `imports ${quote(imp.raw)}, a name that only works when this file is run directly; this app is run from its top folder, so it must import ${quote(sibling.slice(0, -3).replace(/\//g, '.'))}`;
     }
   }
   return null;
 }
+
+/** The package a bare JavaScript specifier names: `@scope/pkg/deep` is `@scope/pkg`, `lodash/fp` is `lodash`. */
+function packageOf(raw: string): string {
+  const parts = raw.split('/');
+  return raw.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0] ?? raw;
+}
+
+/**
+ * What a file's imports are held to. Mode A's values are the default (`MODE_A_IMPORTS`): the file is
+ * a fresh ES module or Python script, run directly, with nothing installed. A real repository (T-22)
+ * passes `REPO_IMPORTS`: it has its own loader, its own packages and its own way of starting.
+ */
+export interface ImportRules {
+  /** Node's ES module loader runs this file, so a specifier has to name its file exactly. */
+  nodeEsmSpecifiers: boolean;
+  /** The file is an ES module, so `require` does not exist in it. */
+  esModulesOnly: boolean;
+  /** Python starts this app from its top folder as a module, so a bare sibling or a climb cannot work. */
+  pythonRunsAsModule: boolean;
+  /** Whether a package that is not the language's own may be imported. */
+  allowsPackage(name: string): boolean;
+}
+
+export const MODE_A_IMPORTS: ImportRules = { nodeEsmSpecifiers: true, esModulesOnly: true, pythonRunsAsModule: true, allowsPackage: () => false };
+export const REPO_IMPORTS: ImportRules = { nodeEsmSpecifiers: false, esModulesOnly: false, pythonRunsAsModule: false, allowsPackage: () => false };
 
 function leadingDots(raw: string): number {
   return /^\.*/.exec(raw)?.[0].length ?? 0;
@@ -203,9 +234,10 @@ const COMPUTED_IMPORT = 'uses a computed import, which nothing here can follow: 
  * sentence about an import is fine. Lexical on purpose, and part of the correctness check above:
  * not a sandbox.
  */
-function computedImportReason(code: string, language: DeriveLanguage): string | null {
+function computedImportReason(code: string, language: CodeLanguage, rules: ImportRules): string | null {
   if (language === 'python') return /\b__import__\s*\(|\bimportlib\b/.test(code) ? COMPUTED_IMPORT : null;
   if (COMPUTED_JS_IMPORT.test(code) || /\bcreateRequire\b/.test(code)) return COMPUTED_IMPORT;
+  if (!rules.esModulesOnly) return /(?<![.\w$])require\s*\((?!\s*(?:''|"")\s*[,)])/.test(code) ? COMPUTED_IMPORT : null;
   return JS_REQUIRE.test(code) ? 'uses require, which an ES module does not have, so the file would fail as soon as it runs' : null;
 }
 
@@ -291,13 +323,13 @@ export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonl
 }
 
 /** Why `node`'s file may not stand, from repo-tour's reading of it and its own text, or `null`. */
-function refusalForFile(
-  node: DerivedNode, content: string, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, plannedFiles: ReadonlySet<string>, language: DeriveLanguage,
+export function refusalForFile(
+  node: Pick<DerivedNode, 'path'>, content: string, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, plannedFiles: ReadonlySet<string>, language: CodeLanguage, rules: ImportRules = MODE_A_IMPORTS,
 ): DeriveRefusal | null {
   if (extract === undefined) return refuse(`repo-tour returned no reading of ${node.path}`);
   const code = codeOnly(content, language);
-  const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles)
-    ?? computedImportReason(code, language)
+  const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles, rules)
+    ?? computedImportReason(code, language, rules)
     ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null);
   return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
 }

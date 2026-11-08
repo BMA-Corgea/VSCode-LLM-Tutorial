@@ -77,6 +77,9 @@ export const DERIVE_LIMITS = {
 /** The two languages a Mode A app is written in: each runs with no install step. */
 export type DeriveLanguage = 'javascript' | 'python';
 
+/** What a file of a real repository may be written in (T-22): every language `extract` can read. */
+export type CodeLanguage = DeriveLanguage | 'typescript' | 'tsx';
+
 /**
  * The one extension each language's files carry. JavaScript is ES modules as `.mjs`, which Node
  * runs with no `package.json`; Python is plain `.py`. TypeScript needs a compile step, so a
