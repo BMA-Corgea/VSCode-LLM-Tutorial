@@ -27,6 +27,25 @@ succeed.
 - **`async` on a signature says nothing.** `buildPlan` is declared `async` and never awaits. `grep`
   for `await` in the body before believing a phase can yield.
 
+## What VS Code does to a webview's scroll position when its html is replaced (T-42, 2026-11-08, VS Code 1.145.2)
+
+T-16 could only call this unverified. Measured in the real Current Step panel (298 × 322, under
+`xvfb-run`): **VS Code keeps the page's scroll offset across a `webview.html` replacement**, the
+absolute offset and not a proportion. With every line of the page's own restore removed, `scrollY`
+stayed at 4430 while the document grew from 5,119 to 5,317 px. It puts the page back when the page
+comes up at 0: a script that scrolled to 0 was undone, one that scrolled to 1 was not.
+
+So a press does not throw anyone to the top, and whatever a repaint adds below the controls lands
+off-screen. In the step panel the one-shot reveal is what brings the outcome into view for *Check my
+work* (the verdict is drawn below the buttons; without the reveal it sat entirely below the panel)
+and for *Show me an unrelated example*. For *Ask* it changes nothing on the real path, because the
+ask box is where the person just pressed and the answer is drawn in place.
+
+**A reveal that fires once on a page that paints several times spends itself on the first paint.**
+A stand-in that answered at once sometimes merged Ask's waiting paint and its answer paint, and
+sometimes did not: a test that flaked, and a fast stub that had hidden what the real path does. Hold
+the answer back and release it. The pin is `test/step-outcomes-screen.test.ts`.
+
 ## A worker thread contains less than it looks like (T-30, 2026-11-08)
 
 Moving work to a worker felt like moving it out of harm's way, and the first version of T-30's spec
