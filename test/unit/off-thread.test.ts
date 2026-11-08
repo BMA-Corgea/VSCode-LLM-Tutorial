@@ -436,6 +436,23 @@ suite('Cancel while a phase is running (T-30 AC4, AC5, AC6)', function () {
     assert.equal(fs.existsSync(markerPath(target)), false);
   });
 
+  test('the thread is gone before interpretPlan starts: that phase can run for minutes', async () => {
+    const repo = mixedFixture();
+    const target = tmp('t30-target-');
+    const h = harness();
+    let codeSeenDuringInterpret: number | undefined;
+    const inProcess: BuildCore = {
+      ...realCore,
+      interpretPlan: async (plan, digest, opts) => {
+        codeSeenDuringInterpret = await h.exited(5_000);
+        return realCore.interpretPlan(plan, digest, opts);
+      },
+    };
+    const outcome = await buildFromRequest(requestFor(repo, target), contextFor(offThreadCore({ ...h.deps, inProcess })));
+    assert.equal(outcome.ok, true, outcome.reason);
+    assert.equal(codeSeenDuringInterpret, 1, 'the worker was still holding a whole digest while the model calls ran');
+  });
+
   test('a Cancel polled after the phase finished cannot reach a phase that is over', async () => {
     // Nothing is running, so there is nothing to stop: the between-phase check answers instead.
     const repo = mixedFixture();
