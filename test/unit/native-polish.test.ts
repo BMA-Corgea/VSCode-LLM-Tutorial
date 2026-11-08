@@ -206,6 +206,19 @@ suite('T-43 — the tutor box looks like an input, and Forget is away from Ask',
     assert.ok(log >= 0 && log < forget && forget < ask, 'after the conversation, before the box');
   });
 
+  test('F-08: the focus outline is inset, so it does not grow the box', () => {
+    assert.match(declarationsFor(cssOf(page()), '.tutor-input:focus'), /outline-offset:-1px/);
+  });
+
+  test('F-09: Forget stays a quiet button, and its press brings the tutor section back into view', () => {
+    const html = page({ transcript: [turn] });
+    assert.match(html, /<button type="button" class="btn btn-quiet" id="btn-tutor-clear">/);
+    const dom = runStepScript(html);
+    dom.elements.get('btn-tutor-clear')!.dispatch('click');
+    dom.elements.get('btn-tutor-clear')!.dispatch('click');
+    assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, 'tutor');
+  });
+
   test('F-08: the placeholder, the only place the Enter rule is written, is the theme\'s own colour', () => {
     assert.match(declarationsFor(cssOf(page()), ':root:not([data-theme]) .tutor-input::placeholder'), /color:var\(--vscode-input-placeholderForeground,var\(--muted\)\)/);
   });

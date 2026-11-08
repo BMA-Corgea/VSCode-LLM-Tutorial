@@ -61,7 +61,7 @@ import {
   SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
-  CLEAR_BUTTON_LABEL, PREPARING_MESSAGE,
+  CLEAR_BUTTON_LABEL, CLEAR_CONFIRM_LABEL, PREPARING_MESSAGE,
   DETOUR_BACK_LABEL, DETOUR_BUTTON_LABEL, DETOUR_REGENERATE_HINT, DETOUR_REGENERATE_LABEL,
   DETOUR_UNREACHABLE_MESSAGE, DETOUR_WAITING_MESSAGE,
   NOTE_TURN_LABEL, detourElsewhereMessage,
@@ -2762,10 +2762,26 @@ suite('renderStepHtml — the tutor\'s new controls and what they cost (findings
   test('it posts tutor:clear, and the host accepts it', () => {
     const dom = buildFakeDom();
     runScript(dom, stateAt('st-2-file-parse', { transcript: turns(['user', 'why?']) }));
-    dom.elements.get('btn-tutor-clear')!.dispatch('click');
+    const forget = dom.elements.get('btn-tutor-clear')!;
+    forget.textContent = CLEAR_BUTTON_LABEL;
+    forget.dispatch('click');
+    assert.deepEqual(dom.posted, [], 'one press only asks: this button sits on the keyboard route into the box');
+    assert.equal(forget.textContent, CLEAR_CONFIRM_LABEL, 'and the press changes what the button says (T-15)');
 
+    forget.dispatch('click');
     assert.deepEqual(dom.posted, [{ type: 'tutor:clear', payload: {} }]);
     assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'tutor:clear' });
+  });
+
+  test('leaving the button takes the question back: the next press only asks again (T-43, code review F1)', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt('st-2-file-parse', { transcript: turns(['user', 'why?']) }));
+    const forget = dom.elements.get('btn-tutor-clear')!;
+    forget.dispatch('click');
+    forget.dispatch('blur');
+    assert.equal(forget.textContent, CLEAR_BUTTON_LABEL, 'the label is back');
+    forget.dispatch('click');
+    assert.deepEqual(dom.posted, [], 'a new press asks again, it does not delete');
   });
 });
 

@@ -390,6 +390,8 @@ export const CANCEL_BUTTON_LABEL = 'Cancel';
  *  because what it does is delete somebody's own words off their own disk and the verb should
  *  say so. */
 export const CLEAR_BUTTON_LABEL = 'Forget this conversation';
+/** What that button says after one press (T-43, code review F1): it sits on the keyboard route into the box, so one stray key must not delete anybody's words. */
+export const CLEAR_CONFIRM_LABEL = 'Press again to forget it';
 
 /**
  * The two speakers, named on the page rather than distinguished by colour alone.
@@ -1773,7 +1775,26 @@ const CLIENT_SCRIPT = `
   // The same message from the line about an ask on ANOTHER step: the host's cancel goes
   // through the ledger and stops every live request, so one message is the whole control.
   on('btn-tutor-cancel-elsewhere', 'click', function () { reveal('tutor'); post('tutor:cancel', {}); });
-  on('btn-tutor-clear', 'click', function () { reveal('tutor'); post('tutor:clear', {}); });
+  // T-43 (code review F1): this button is now on the keyboard route into the box, and it deletes
+  // somebody's own words with no way back. So the first press asks, by changing what the button
+  // says, and the second does it; leaving the button takes the question back.
+  var forgetArmed = false;
+  on('btn-tutor-clear', 'click', function () {
+    var button = document.getElementById('btn-tutor-clear');
+    if (!forgetArmed) {
+      forgetArmed = true;
+      if (button) { button.textContent = ${JSON.stringify(CLEAR_CONFIRM_LABEL)}; }
+      return;
+    }
+    forgetArmed = false;
+    reveal('tutor');
+    post('tutor:clear', {});
+  });
+  on('btn-tutor-clear', 'blur', function () {
+    forgetArmed = false;
+    var button = document.getElementById('btn-tutor-clear');
+    if (button) { button.textContent = ${JSON.stringify(CLEAR_BUTTON_LABEL)}; }
+  });
 
   // ── T-7: the detour ───────────────────────────────────────────────────────────────────
 

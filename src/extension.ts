@@ -774,7 +774,11 @@ export interface ExtensionApi {
 /** Exported so a test asserts the sentence the commands really use. */
 export const NO_WALK_OPEN_MESSAGE = 'Build Tutorials: no tutorial is open in this folder — run "Build Tutorials: Start" to build one.';
 
-/** What a palette command that needs a walk says when none is open, instead of doing nothing (T-43, F-09b; T-15's rule). */
+/**
+ * What a palette command that needs a walk says when none is open, instead of doing nothing (T-43,
+ * F-09b; T-15's rule). "Open" is a session with a view: a plan with no steps leaves a session and
+ * nothing to walk, and the panel already says there is no tutorial.
+ */
 function sayNoWalkOpen(): void {
   void vscode.window.showInformationMessage(NO_WALK_OPEN_MESSAGE);
 }
@@ -786,11 +790,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     vscode.commands.registerCommand('buildTutorials.start', () => runStartCommand(context)),
     vscode.commands.registerCommand('buildTutorials.openWalk', () => runOpenWalkCommand(context)),
     vscode.commands.registerCommand('buildTutorials.nextStep', () => {
-      if (walkSession) walkSession.next();
+      if (walkSession?.getView()) walkSession.next();
       else sayNoWalkOpen();
     }),
     vscode.commands.registerCommand('buildTutorials.prevStep', () => {
-      if (walkSession) walkSession.prev();
+      if (walkSession?.getView()) walkSession.prev();
       else sayNoWalkOpen();
     }),
     // The tree hands this the step's own id. `unknown`, and checked: the command is also
@@ -803,7 +807,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     // exist, and a `when` on an undefined key hides a command forever — so it is always
     // offered and says honestly that there is no walk, which is what `openWalk` already does.
     vscode.commands.registerCommand('buildTutorials.reproduceFiles', () => {
-      if (!walkSession) {
+      if (!walkSession?.getView()) {
         sayNoWalkOpen();
         return;
       }
