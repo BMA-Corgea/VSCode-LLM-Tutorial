@@ -6,10 +6,12 @@
  * the steps independent of D do not. Determinism first, or neither clause can be evaluated.
  *
  * The real `derivePlan`, the real `AskLedger`, repo-tour's real `extract`. The model is a fake
- * whose answers are a pure function of the prompt's `INPUT (JSON):` line, so a changed answer
- * really changes what comes back; `core.runLlm` is poisoned, so a test that forgot the fake fails
- * instead of dialling out. No test spends a token. Every derivation starts from an empty cache,
- * or the engine's cache would answer the second run and hide a derivation that is not deterministic.
+ * whose answers are a pure function of the WHOLE of the prompt's `INPUT (JSON):` line: every file
+ * it writes carries a hash of that line, so a step shown anything different comes back different,
+ * and "the independent steps do not differ" also means nothing they were shown differed.
+ * `core.runLlm` is poisoned, so a test that forgot the fake fails instead of dialling out (pinned
+ * below). No test spends a token. Every derivation starts from an empty cache, or the engine's cache
+ * would answer the second run and hide a derivation that is not deterministic.
  *
  * AC-A1 tests whether the derivation LISTENS. It says nothing about whether the plan is any good.
  */
@@ -104,7 +106,8 @@ const promptReadingModel: TutorCore['runLlm'] = (prompt) => {
     });
   } else if (input['task'] === 'code') {
     const node = input['node'] as { path: string; question: string; chosen: { label: string } };
-    const tag = `// ${node.chosen.label}: ${node.question}\n`;
+    // The whole input, hashed: a step that was shown something else writes something else.
+    const tag = `// ${node.chosen.label}: ${node.question} [${createHash('sha256').update(line).digest('hex').slice(0, 12)}]\n`;
     const code: Record<string, string> = {
       'core/tally.mjs': `${tag}export function total(xs) {\n  return xs.reduce((a, b) => a + b, 0);\n}\n`,
       'cli/format.mjs': `${tag}import { total } from '../core/tally.mjs';\n\nexport function show(xs) {\n  return String(total(xs));\n}\n`,
@@ -118,8 +121,8 @@ const promptReadingModel: TutorCore['runLlm'] = (prompt) => {
   return Promise.resolve({ text, inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
 };
 
-/** The real engine, from an empty cache every time it is called. */
-const realDerivation: Derivation = async (request) => {
+/** The real engine, from an empty cache every time it is called, answered by `run`. */
+const derivationWith = (run: TutorCore['runLlm'] | undefined): Derivation => async (request) => {
   const ledger = new AskLedger();
   ledgers.push(ledger);
   const core: TutorCore = {
@@ -129,11 +132,13 @@ const realDerivation: Derivation = async (request) => {
   };
   const outcome = await derivePlan(request, {
     ledger, globalStorageRoot: tempDir('t19-storage-'), target: path.join(os.tmpdir(), 't19-no-such-target'), dialCore,
-    settings: { core, provider: 'claude', model: 'claude-sonnet-5', timeoutMs: 5_000, run: promptReadingModel },
+    settings: { core, provider: 'claude', model: 'claude-sonnet-5', timeoutMs: 5_000, run },
     now: () => new Date('2026-11-08T08:00:00.000Z'),
   });
   return outcome as unknown as Derived;
 };
+
+const realDerivation: Derivation = derivationWith(promptReadingModel);
 
 const ON_THE_TALLY: Scenario = {
   idea: FIXTURE_IDEA, decision: 'core/tally.mjs', answers: ['pure', 'object'], alsoAnswered: { 'notes/about.mjs': 'long' },
@@ -160,6 +165,12 @@ suite('AC-A1 on the real engine (T-19)', function () {
     assert.equal(verdict.precondition.status, 'pass', verdict.precondition.why);
     assert.equal(verdict.downstream.status, 'pass', verdict.downstream.why);
     assert.equal(verdict.independent.status, 'pass', verdict.independent.why);
+  });
+
+  test('nothing here can reach a model: with no fake, the poisoned runner is what answers, and it refuses', async () => {
+    const out = await derivationWith(undefined)({ idea: FIXTURE_IDEA });
+    assert.equal(out.ok, false, 'a derivation with no fake and no poison would have gone to a real model');
+    assert.match((out as { reason: string }).reason, new RegExp(SPEND_GUARD));
   });
 
   test('AC7: the same for a decision that is a shape step, whose whole directory is downstream', async () => {
@@ -329,8 +340,8 @@ suite('the walk over dependsOn stands on its own (T-19 AC4)', () => {
     assert.deepEqual([...stepsReaching(plan, 'd')], ['b']);
   });
 
-  test('the harness computes it itself: it does not import the engine\'s graph', () => {
+  test('the harness computes it itself: it imports nothing at all, so a wrong engine cannot agree with a wrong test', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'test', 'support', 'responsiveness.ts'), 'utf8');
-    assert.doesNotMatch(source, /derive\/graph|from '.*src\/derive/, 'a wrong engine could then agree with a wrong test');
+    assert.doesNotMatch(source, /^\s*import\s|\brequire\(/m);
   });
 });
