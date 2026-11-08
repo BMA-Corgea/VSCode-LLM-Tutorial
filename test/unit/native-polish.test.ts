@@ -270,14 +270,18 @@ suite('T-41 — the skin picker is at the foot of the panel, not on the title ro
 
     test(`${surface}: the title row holds only the heading`, () => {
       const row = new RegExp(`<div class="${head}">([\\s\\S]*?)</div>`).exec(page())?.[1] ?? '';
-      assert.match(row, /<h1>/, 'discriminates: this is the title row');
-      assert.ok(!row.includes('skinpick'), 'the picker is off the title row');
+      assert.match(row.trim(), /^<h1>[^<]*<\/h1>$/, `the row is the heading and nothing else, found ${row}`);
     });
 
     test(`${surface}: the picker still has its label for assistive technology`, () => {
       assert.match(page(), /<select class="skinpick" id="skinpick" name="skin" aria-label="Skin">/);
     });
   }
+
+  test('the Start form\'s picker is outside the form: inside it, a change would count as editing the request', () => {
+    const html = startPage();
+    assert.ok(html.indexOf('id="skinpick"') > html.indexOf('</form>'), 'a change inside the form posts form:changed and wipes the note under the button');
+  });
 
   test('the heading takes the full width: no layout left over from sharing the row', () => {
     const css = cssOf(stepPage());
