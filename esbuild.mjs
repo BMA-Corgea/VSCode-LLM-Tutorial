@@ -4,7 +4,7 @@
  * `src/core.ts` — because it must stay loadable via dynamic `import()` for its
  * `import.meta.url` asset lookups (skins, grammar paths) to keep resolving correctly.
  *
- * Thirteen fixed entry points, plus one per `test/unit/*.test.ts` file, all CJS /
+ * Fifteen fixed entry points, plus one per `test/unit/*.test.ts` file, all CJS /
  * platform:node, so a plain `require()` or dynamic `import()` of the output works the same
  * inside the extension host and outside it:
  *   - src/extension.ts        -> dist/extension.js            (external: vscode, repo-tour) — the extension
@@ -17,14 +17,16 @@
  *   - test/dial.test.ts       -> dist/test/dial.test.js        (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/tutor.test.ts      -> dist/test/tutor.test.js       (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/detour.test.ts     -> dist/test/detour.test.js      (external: vscode, repo-tour, mocha) — vscode-test
+ *   - test/derive.test.ts     -> dist/test/derive.test.js      (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/build-off-thread.test.ts -> dist/test/build-off-thread.test.js (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/start-screen.test.ts -> dist/test/screen/start-screen.test.js (external: vscode, repo-tour, mocha) — vscode-test's
  *     "screen" host, the only one launched with a DevTools port (T-15; see .vscode-test.mjs)
+ *   - test/derive-screen.test.ts -> dist/test/screen/derive-screen.test.js (external: vscode, repo-tour, mocha) — the same "screen" host (T-17)
  *   - test/step-screen.test.ts -> dist/test/screen/step-screen.test.js (external: vscode, repo-tour, mocha) — the same "screen" host (T-21)
  *   - test/unit/*.test.ts     -> dist/test/unit/*.js           (external: repo-tour, mocha)  — plain mocha, no vscode
  *
  * The unit/vscode-test split is a directory split on purpose: `.vscode-test.mjs`'s own
- * `files` glob is non-recursive (`dist/test/*.test.js`) so it picks up the seven vscode-test
+ * `files` glob is non-recursive (`dist/test/*.test.js`) so it picks up the vscode-test
  * files here but never wanders into `dist/test/unit/`, and `npm run test:unit` points
  * `mocha` at exactly that subdirectory. A file that imports `vscode` belongs at the top
  * level of `test/`; a file that must never need an extension host belongs in `test/unit/`.
@@ -111,6 +113,12 @@ const builds = [
   },
   {
     ...shared,
+    entryPoints: ['test/derive.test.ts'],
+    outfile: 'dist/test/derive.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
     entryPoints: ['test/build-off-thread.test.ts'],
     outfile: 'dist/test/build-off-thread.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
@@ -119,6 +127,12 @@ const builds = [
     ...shared,
     entryPoints: ['test/start-screen.test.ts'],
     outfile: 'dist/test/screen/start-screen.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
+    entryPoints: ['test/derive-screen.test.ts'],
+    outfile: 'dist/test/screen/derive-screen.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
   },
   {

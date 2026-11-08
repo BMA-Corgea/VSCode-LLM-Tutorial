@@ -99,6 +99,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { unsafeRelativePathReason } from '../relative-path.js';
 import { MAX_OPTION_TEXT, MAX_PAGE_TEXT, MAX_PROMPT_TEXT, Outbound } from '../tutor/context.js';
 import type { PlanLike, StepKind, StepLike } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
@@ -322,17 +323,6 @@ function unsafePath(value: unknown, detail: string): DetourRefusal {
 
 // ── the path check ──────────────────────────────────────────────────────────────────────────
 
-/** Windows opens these as devices whatever the extension, so `CON` and `nul.txt` are a write
- *  to the console rather than to a file. Cheap to refuse and never a legitimate example. */
-const RESERVED_DEVICE_NAMES = new Set([
-  'con', 'prn', 'aux', 'nul',
-  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
-  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
-]);
-
-/** The allowlist — see the header. Underscore leads legitimately (`__init__.py`); a dash does
- *  not, because a leading dash is how a filename becomes a command-line flag. */
-const SEGMENT_ALLOWED = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 
 /**
  * Why `value` may not become a file under the detour directory, or `null` if it may — the
@@ -351,38 +341,15 @@ const SEGMENT_ALLOWED = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
  * is exactly the drift the review found and this export is what makes it unnecessary.
  */
 export function unsafeDetourPathReason(value: unknown): string | null {
-  if (typeof value !== 'string') return `is ${describe(value)}, not a string`;
-  if (value.length === 0) return 'is empty';
-  if (value.trim().length === 0) return 'is only whitespace';
-  if (value.length > MAX_DETOUR_PATH_CHARS) return `is longer than ${MAX_DETOUR_PATH_CHARS} characters`;
-  if (value.includes('\u0000')) return 'contains a NUL byte';
-  for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code < 0x20 || code === 0x7f) return 'contains a control character';
-  }
-  if (/^[A-Za-z]:/.test(value)) return 'names a Windows drive letter';
-  if (/^(?:\/\/|\\\\)/.test(value)) return 'is a UNC path';
-  if (value.startsWith('/') || path.isAbsolute(value)) return 'is an absolute path';
-  if (value.includes('\\')) return 'contains a backslash, which is a path separator on Windows';
-  if (value.endsWith('/')) return 'ends with a path separator, so it names a directory rather than a file';
-
-  const segments = value.split('/');
-  if (segments.length > MAX_DETOUR_PATH_SEGMENTS) return `is nested more than ${MAX_DETOUR_PATH_SEGMENTS} directories deep`;
-  for (const segment of segments) {
-    if (segment.length === 0) return 'has an empty path segment';
-    if (segment === '..') return 'contains a ".." segment, which climbs out of the detour folder';
-    if (segment === '.') return 'contains a "." segment';
-    if (segment.startsWith('.')) return 'has a segment beginning with a dot';
-    if (segment.endsWith('.') || segment.endsWith(' ')) return 'has a segment ending in a dot or a space, which Windows silently strips';
-    if (RESERVED_DEVICE_NAMES.has((segment.split('.')[0] ?? '').toLowerCase())) return 'names a reserved Windows device';
-    if (!SEGMENT_ALLOWED.test(segment)) return 'has a segment with characters outside letters, digits, dot, dash and underscore';
-  }
-
-  // Belt and braces. Nothing that survived the allowlist can escape a root arithmetically —
-  // but this is the repository's own containment check, it is free, and the day a rule above
-  // is loosened it is the one that still says no.
-  if (resolveInsideTarget(path.resolve('/detour'), value) === null) return 'does not resolve inside the detour folder';
-  return null;
+  // The rule itself lives in `src/relative-path.ts` now (T-17): the derivation engine is a
+  // second writer of model-chosen paths, and two writers must not hold two attack lists.
+  // Only the detour's own word for its folder and its own two bounds are passed in, so every
+  // sentence below is the one this function has always returned.
+  return unsafeRelativePathReason(value, {
+    folder: 'detour folder',
+    maxChars: MAX_DETOUR_PATH_CHARS,
+    maxSegments: MAX_DETOUR_PATH_SEGMENTS,
+  });
 }
 
 // ── containment, the half that needs a filesystem ───────────────────────────────────────────

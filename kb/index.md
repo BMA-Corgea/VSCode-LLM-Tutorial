@@ -13,6 +13,7 @@ never-deleted) is plugin doctrine — see `skills/autodev/instructions/README.md
 | What is being worked RIGHT NOW | [CURRENT-WORK.md](CURRENT-WORK.md) | The live edge + recent past; updated at every handoff |
 | What happened, day by day | [days/](days/) | Movements generated from the event log + session summaries |
 | How to read repo-tour's `plan.json` without getting bitten | [wiki/repo-tour-plan-shapes.md](wiki/repo-tour-plan-shapes.md) | Line base, which fields are actually present per step kind, and what a real plan contains |
+| What a derived (Mode A) plan holds, where its code lives, and how to drive the engine in a test | [wiki/mode-a-plan-shapes.md](wiki/mode-a-plan-shapes.md) | The idea-first plan T-17's engine produces: Mode A's own truths, the reference tree and cache, `derivePlan`/`replanPlan`, the fake-model INPUT line |
 
 ## Layout
 
