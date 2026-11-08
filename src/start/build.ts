@@ -46,11 +46,42 @@ export interface InterpretPlanResultLike {
   cost: InterpretCostLike;
 }
 
+/**
+ * What a phase that runs somewhere else needs in order to be stopped while it runs (T-30). A core
+ * that runs its phases on the calling thread ignores it: nothing can run there until the phase
+ * returns, so there is nothing to poll with.
+ */
+export interface PhaseControl {
+  isCancelled?: () => boolean;
+}
+
 export interface BuildCore {
-  digest(root: string, opts?: { write?: boolean }): Promise<DigestResultLike>;
-  buildPlan(digestResult: DigestResultLike, opts: { root: string; witness?: boolean }): Promise<BuildPlanLike>;
+  digest(root: string, opts?: { write?: boolean }, control?: PhaseControl): Promise<DigestResultLike>;
+  buildPlan(digestResult: DigestResultLike, opts: { root: string; witness?: boolean }, control?: PhaseControl): Promise<BuildPlanLike>;
   interpretPlan(plan: BuildPlanLike, digestResult: DigestResultLike, opts: Record<string, unknown>): Promise<InterpretPlanResultLike>;
   defaultCacheDir(): string;
+  /** Lets go of anything this core holds for the build that just ended. Absent on a core that
+   *  holds nothing. Called on every path out of `buildFromRequest`; must not throw. */
+  release?(): void;
+}
+
+/**
+ * What a phase rejects with when Cancel stopped it while it was running (T-30). Recognised by an own
+ * property and never by its words, for the reasons `gitTimedOut` gives: class identity does not
+ * survive esbuild's separate bundles, and a sentence can carry text from a repository.
+ */
+export class BuildPhaseCancelled extends Error {
+  readonly buildPhaseCancelled = true;
+  constructor() {
+    super('the build was cancelled while this phase was running');
+    this.name = 'BuildPhaseCancelled';
+  }
+}
+
+/** Whether a phase's rejection is Cancel having stopped it, rather than the phase failing. */
+export function phaseCancelled(err: unknown): boolean {
+  return typeof err === 'object' && err !== null
+    && (err as { buildPhaseCancelled?: unknown }).buildPhaseCancelled === true;
 }
 
 /** Builds a `BuildCore` from `CoreLoadResult.loaded` (src/core.ts) — the one cast site. */

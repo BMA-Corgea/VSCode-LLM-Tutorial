@@ -26,6 +26,7 @@ import {
   certifyNameScan, checkArchive, checkContent, checkPaths, checkRequiredContent,
   isWordScannable, looksTextual, ownerNeedlesFrom, relativeToExtension,
 } from '../../src/publish/disclosure.js';
+import { BUILD_WORKER_RELATIVE } from '../../src/start/worker-protocol.js';
 import { EXPECTED_GRAMMARS } from '../../src/doctor.js';
 
 const NEEDLES = { ownerNeedles: [] as string[] };
@@ -415,6 +416,7 @@ suite('disclosure: what the archive MUST contain', () => {
   const goodArchive = [
     'extension/package.json',
     'extension/dist/extension.js',
+    'extension/dist/build-worker.js',
     'extension/node_modules/repo-tour/package.json',
     'extension/node_modules/repo-tour/schema/build-plan.schema.json',
     ...['extract', 'digest', 'skins', 'llm', 'ask', 'types'].map((m) => `extension/node_modules/repo-tour/dist/${m}.js`),
@@ -457,6 +459,15 @@ suite('disclosure: what the archive MUST contain', () => {
   test('a repo-tour whose dist was never built fails, even with the package.json present', () => {
     const results = checkRequiredContent(goodArchive.filter((e) => !e.includes('/repo-tour/dist/')));
     assert.deepEqual(results.filter((r) => !r.ok).map((f) => f.id), ['core-dist']);
+  });
+
+  test('an archive without the build worker fails, and says which file (T-30)', () => {
+    // The read-back is what stands between a packaging change and a build that starts and then
+    // says "the build worker is missing" on somebody else's machine.
+    const results = checkRequiredContent(goodArchive.filter((e) => !e.endsWith('/build-worker.js')));
+    const failed = results.filter((r) => !r.ok);
+    assert.deepEqual(failed.map((f) => f.id), ['build-worker']);
+    assert.ok(failed[0]?.why.includes(BUILD_WORKER_RELATIVE), 'the requirement names the file');
   });
 
   test('web-tree-sitter without its own .wasm runtime fails', () => {
