@@ -28,11 +28,12 @@ import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
 import { readSkin } from './skins.js';
 import { StepDecorator } from './walk/editor.js';
 import { resolveInsideTarget } from './walk/paths.js';
-import { WalkSession, type WalkAdapters } from './walk/session.js';
+import { WalkSession, type Replanner, type WalkAdapters } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
+import { divergePlan } from './derive/diverge.js';
 import { DERIVED_TREES_DIR } from './derive/storage.js';
-import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
+import { hasPlan, loadPlan, loadProgress, loadRequest, saveDivergedPlan, saveProgress } from './walk/store.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
 import { tutorCoreFor, type TutorCore } from './tutor/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
@@ -406,8 +407,8 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     fileExists: (absPath) => isOpenableFile(target, absPath),
     loadPlan,
     loadProgress,
-    // The store a `derivedRoot` has to prove itself inside: the folder is the extension's to know.
-    loadRequest: (t) => loadRequest(t, path.join(context.globalStorageUri.fsPath, DERIVED_TREES_DIR)),
+    // A plan's re-derived code has to be proved to be in this store: the folder is the extension's to know.
+    loadRequest: (t, plan) => loadRequest(t, { plan, store: path.join(context.globalStorageUri.fsPath, DERIVED_TREES_DIR) }),
     saveProgress,
 
     // ── T-5: what the dial needs from the outside world ──────────────────────────────────
@@ -443,6 +444,8 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     // ── T-6: the tutor ───────────────────────────────────────────────────────────────────
     tutorCore: () => tutorCoreNow(context),
     tutorSettings: tutorSettingsNow,
+    // ── T-22: the re-plan ─────────────────────────────────
+    replanner: () => replannerFor(context, target),
 
     // ── T-7: the detour ──────────────────────────────────────────────────────────────────
     //
@@ -648,6 +651,38 @@ function tutorSettingsNow(): { provider: string; model: string; timeoutMs: numbe
     provider: config.get<string>('llmProvider', 'claude'),
     model: config.get<string>('tutorModel', ''),
     timeoutMs: Math.max(5, config.get<number>('tutorTimeoutSeconds', 120)) * 1000,
+  };
+}
+
+/**
+ * T-22: the one question of a re-plan may take this long. A whole file can be a long answer, and
+ * this is the figure T-17's live derivation was proved with. `boundedTimeoutMs` still caps it.
+ */
+const REPLAN_QUESTION_TIMEOUT_MS = 300_000;
+
+/**
+ * What a press of *Choose this instead* needs, or `undefined` when repo-tour cannot be loaded.
+ *
+ * The model is the build's (`resolveLlmSettings`), never the tutor's: a re-plan writes code the
+ * learner will be taught from, and `divergePlan` is handed a resolved name because an empty one
+ * would silently become the provider's strongest. The core is `tutorCoreNow`, so the suites'
+ * stand-in reaches it and no test can spend a token.
+ */
+async function replannerFor(context: vscode.ExtensionContext, target: string): Promise<Replanner | undefined> {
+  const [core, tutor, dialCore] = await Promise.all([loadCore(configuredRepoTourRoot(context)), tutorCoreNow(context), ensureDialCore(context)]);
+  if (!core.found || tutor === undefined || dialCore === undefined) return undefined;
+  const { provider, model } = resolveLlmSettings(core);
+  return {
+    diverge: (input, hooks) => divergePlan(input, {
+      ledger: hooks.ledger,
+      settings: { core: tutor, provider, model, timeoutMs: REPLAN_QUESTION_TIMEOUT_MS },
+      globalStorageRoot: context.globalStorageUri.fsPath,
+      isCancelled: hooks.isCancelled,
+      onProgress: hooks.onProgress,
+      dialCore,
+      target,
+    }),
+    savePlan: (t, plan) => { saveDivergedPlan(t, plan); },
   };
 }
 

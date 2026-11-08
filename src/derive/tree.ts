@@ -54,6 +54,8 @@ export interface ReferenceTree {
   /** the tree's folder, resolved — what `request.json`'s `referenceRoot` should name */
   root: string;
   contentKey: string;
+  /** where it is inside the `derived/` store: what a plan records to name its tree (T-22) */
+  storeKey: string;
 }
 
 /** Which tutorial a tree belongs to — the target folder, resolved, hashed. */
@@ -173,10 +175,12 @@ export function writeReferenceTree(
   if (typeof tutorialDir !== 'string') return tutorialDir;
 
   const contentKey = treeContentKey(files);
-  const finalDir = path.join(tutorialDir, `${treeSlug(title)}-${contentKey}`);
+  const folder = `${treeSlug(title)}-${contentKey}`;
+  const storeKey = `${tutorialKey(target)}/${folder}`;
+  const finalDir = path.join(tutorialDir, folder);
   const existing = lstatOrNull(finalDir);
   if (existing !== null) {
-    if (existing.isDirectory() && holdsExactly(finalDir, files)) return { root: finalDir, contentKey };
+    if (existing.isDirectory() && holdsExactly(finalDir, files)) return { root: finalDir, contentKey, storeKey };
     if (!existing.isDirectory() && !existing.isSymbolicLink() && !existing.isFile()) {
       return refuse('something that is neither a file nor a folder stands where the tree belongs');
     }
@@ -207,8 +211,8 @@ export function writeReferenceTree(
     }
     // Another derivation may have written the same key a moment ago — that tree is correct by
     // definition if its bytes match, and using it is the right answer.
-    if (lstatOrNull(finalDir)?.isDirectory() === true && holdsExactly(finalDir, files)) return { root: finalDir, contentKey };
+    if (lstatOrNull(finalDir)?.isDirectory() === true && holdsExactly(finalDir, files)) return { root: finalDir, contentKey, storeKey };
     return refuse(`the reference tree could not be written: ${err instanceof Error ? err.message.slice(0, 200) : 'unknown error'}`);
   }
-  return { root: finalDir, contentKey };
+  return { root: finalDir, contentKey, storeKey };
 }

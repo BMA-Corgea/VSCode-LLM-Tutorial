@@ -28,7 +28,7 @@
 
 import * as assert from 'node:assert/strict';
 import { BUILD_PLAN_SCHEMA, validateBuildPlan, type JsonSchema } from './plan-schema.js';
-import { MAX_OPTION_ID, MAX_OPTIONS_RENDERED, currentStep, emptyProgress, isOptionKey, markDone, nextStepId, optionsTable, prevStepId, setCheck, setChosen, setCurrent, setDial, statusText, stepDial, treeModel, withChosen, type OptionLike, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
+import { MAX_OPTION_ID, MAX_OPTIONS_RENDERED, currentStep, emptyProgress, isOptionKey, markDone, nextStepId, walkedSteps, optionsTable, prevStepId, setCheck, setChosen, setCurrent, setDial, statusText, stepDial, treeModel, withChosen, type OptionLike, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const IDS = ['st-1-shape-src', 'st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render'];
@@ -147,6 +147,33 @@ suite('setCurrent / markDone / setDial — pure updates, never a mutation', () =
       'st-1-shape-src': { status: 'done' },
       'st-2-file-parse': { status: 'pending', dial: 'scaffolded' },
     });
+  });
+});
+
+suite('walkedSteps — what the learner has already walked (T-22)', () => {
+  test('a step is walked when it is done, or before where the learner stands', () => {
+    const plan = fixturePlan();
+    const progress = markDone(setCurrent(emptyProgress(plan), 'st-3-symbol-handle'), 'st-4-symbol-render');
+    assert.deepEqual([...walkedSteps(plan, progress)].sort(), ['st-1-shape-src', 'st-2-file-parse', 'st-4-symbol-render']);
+  });
+
+  test('the step they stand on is not walked unless it is done', () => {
+    const plan = fixturePlan();
+    const here = 'st-2-file-parse';
+    assert.equal(walkedSteps(plan, setCurrent(emptyProgress(plan), here)).has(here), false);
+    assert.equal(walkedSteps(plan, markDone(setCurrent(emptyProgress(plan), here), here)).has(here), true);
+  });
+
+  test('plan order is the ordinal, not the order of the array', () => {
+    const plan = fixturePlan();
+    const shuffled = { ...plan, steps: [...plan.steps].reverse() };
+    assert.deepEqual([...walkedSteps(shuffled, setCurrent(emptyProgress(plan), 'st-3-symbol-handle'))].sort(), ['st-1-shape-src', 'st-2-file-parse']);
+  });
+
+  test('with nothing current, only done steps count', () => {
+    const plan = fixturePlan();
+    const progress = { ...markDone(emptyProgress(plan), 'st-3-symbol-handle'), current: null };
+    assert.deepEqual([...walkedSteps(plan, progress)], ['st-3-symbol-handle']);
   });
 });
 

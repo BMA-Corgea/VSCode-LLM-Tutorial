@@ -180,6 +180,8 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
     assert.equal(fs.readFileSync(path.join(out.derivedRoot, 'src/parse.ts'), 'utf8'), 'export const from = "src/parse.ts";\n');
     assert.ok(fs.existsSync(path.join(out.derivedRoot, 'src/api/routes.ts')));
+    const newest = (out.plan as { divergences?: Array<{ tree: string }> }).divergences?.at(-1);
+    assert.equal(fs.realpathSync(path.join(gs, 'derived', newest?.tree ?? 'nothing')), fs.realpathSync(out.derivedRoot), 'the plan names the tree its code is in');
     assert.ok(!fs.existsSync(path.join(out.derivedRoot, 'src/store.ts')), 'a kept file is read from the repository');
     const record = (out.plan as unknown as { divergences: Array<{ stepId: string; answer: string }> }).divergences;
     assert.deepEqual(record.map((r) => [r.stepId, r.answer]), [['s-parse', 'alt-1']]);

@@ -173,6 +173,8 @@
 import type { GitRunner } from '../start/build.js';
 import type { Dial } from '../start/request.js';
 import { referenceRootFor, repositoryRootOf } from './reference.js';
+import type { DeriveCost } from '../derive/assemble.js';
+import type { DivergeInput, DivergeOutcome } from '../derive/diverge.js';
 import type { ResolvedRequest } from './store.js';
 import { commitStep, ensureTranscriptIgnored, type CommitResult } from '../dial/commit.js';
 import type { DialCore } from '../dial/core.js';
@@ -222,6 +224,7 @@ import {
   setDial as setDialIn,
   setChosen as setChosenIn,
   optionsTable,
+  walkedSteps,
   withChosen,
   type PlanLike,
   type Progress,
@@ -249,6 +252,43 @@ export const CHOICE_NOT_AN_OPTION = 'That is not one of this step\u2019s options
 export const CHOICE_ALREADY_TAKEN = 'That is already the road this step is on.';
 /** What the panel says when the press came from a page for a step the learner has left (T-21, AC2). */
 export const CHOICE_STALE_PAGE = 'That press was for a step you have since left, so nothing was recorded.';
+/** T-22: what the panel says from the press until the re-plan reports its first step. */
+export const REPLAN_STARTING = 'Re-planning the rest of the walk from that road\u2026';
+/** T-22: a press while a re-plan is already running. */
+export const CHOICE_ALREADY_REPLANNING = 'The walk is already being re-planned. Cancel that first if you want a different road.';
+/** T-22: the model or the code reader could not be loaded. */
+export const REPLAN_UNAVAILABLE = 'The walk could not be re-planned here: the code reader or the model is not loaded. Nothing was changed, and the road is still there to press.';
+/** T-22: the same refusal `applyCheck` and the tutor give a folder with no `request.json`. */
+export const REPLAN_NO_REFERENCE = 'This tutorial has no reference repository recorded, so there is nothing to re-plan from. Nothing was changed.';
+/** T-22: a cancel before anything further was billed. */
+export const REPLAN_CANCELLED_UNSENT = 'Re-planning was cancelled. Nothing was changed, and nothing more will be asked.';
+/** T-22: a cancel while a question was with the model, which cannot be unsent (T-6's rule). */
+export const REPLAN_CANCELLED_BILLED = 'Re-planning was cancelled and nothing was changed. The model is still finishing the question it was asked, and that will still be billed.';
+/** T-22: a choice that changes nothing later (a `shape` step with nothing after it). */
+export const REPLAN_NOTHING_FOLLOWS = 'Your choice is recorded. Nothing later in the walk depends on this step, so the rest of the walk stands.';
+
+/** T-22: why a re-plan did not land. It always says the state is as it was, and that the press still works. */
+export function replanRefusedText(reason: string): string {
+  return `Nothing was changed, and the road is still there to press. Why: ${reason}.`;
+}
+
+function replanCostText(cost: DeriveCost): string {
+  if (cost.calls === 0) return 'Every answer came from earlier work, so it cost nothing.';
+  const questions = `${cost.calls} question${cost.calls === 1 ? '' : 's'}`;
+  if (cost.usd <= 0) return `It took ${questions}. The provider did not say what they cost.`;
+  return `It took ${questions} and cost ${cost.metered === true ? 'about' : 'at least'} $${cost.usd < 1 ? cost.usd.toFixed(4) : cost.usd.toFixed(2)}.`;
+}
+
+/** T-22: what a re-plan that landed changed, and what it cost. */
+export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost): string {
+  const what = fresh > 0
+    ? `${ownCode ? 'This step\u2019s code and ' : ''}${fresh} later step${fresh === 1 ? '' : 's'} now follow${fresh === 1 && !ownCode ? 's' : ''} your choice.`
+    : 'This step\u2019s code now follows your choice. Nothing later depended on it.';
+  return `Re-planned. ${what} ${replanCostText(cost)}`;
+}
+
+/** Every ticket a derivation opens starts with this; see `AskLedger.abandonPrefixed`. */
+const REPLAN_TICKET_PREFIX = 'derive:';
 
 /**
  * A refusal, in words, and how many times in a row it has been given (T-21, AC5). A refused press
@@ -258,6 +298,14 @@ export const CHOICE_STALE_PAGE = 'That press was for a step you have since left,
  */
 export function choiceRefusalText(reason: string, inARow: number): string {
   return inARow > 1 ? `${reason} Tried ${inARow} times.` : reason;
+}
+
+/** T-22: a re-plan under way. It is the whole walk's state, so it is shown on whichever step is on screen. */
+export interface ReplanView {
+  /** the step the press was made on */
+  stepId: string;
+  /** what it is doing, in words */
+  message: string;
 }
 
 export interface WalkView {
@@ -297,12 +345,14 @@ export interface WalkView {
    */
   writeNote?: string;
   /**
-   * T-21 (AC5): why the last press of *Choose this instead* was refused, with the count once it
-   * has been refused more than once in a row. Drawn beside the options list, where the press was
-   * — not with `writeNote` under the dial, a screen away. Cleared by a recorded choice and by
-   * moving; held in memory only, because it describes a press and not the walk.
+   * What became of the last press of *Choose this instead* (T-21, AC5; T-22): refused, cancelled
+   * or landed, with a count once it has been refused more than once in a row. Drawn beside the
+   * options list, where the press was — not with `writeNote` under the dial, a screen away.
+   * Cleared by moving; held in memory only, because it describes a press and not the walk.
    */
   choiceNote?: string;
+  /** T-22: present while a press of *Choose this instead* is being re-planned. */
+  replanning?: ReplanView;
   /**
    * T-5 (AC6): `plan.reproduce`'s never-taught files — generated, vendored, lockfiles, data,
    * binaries. Absent when the plan lists none, so the panel has nothing to offer rather than
@@ -421,6 +471,33 @@ export interface TutorView {
  * "there is nothing to show" is a state the walk can legitimately be in (a plan with no steps
  * at all; a disposed session), and giving it its own message would let a surface miss it.
  */
+/** What the walk hands a running re-plan. */
+export interface ReplanHooks {
+  /** the session's own ledger, so the cost is counted with the walk's and *Cancel* can reach it */
+  ledger: AskLedger;
+  isCancelled: () => boolean;
+  onProgress: (message: string) => void;
+}
+
+/** T-22: the engine and the file writer a press needs, wired in `src/extension.ts`. */
+export interface Replanner {
+  diverge(input: DivergeInput, hooks: ReplanHooks): Promise<DivergeOutcome>;
+  /** `store.ts`'s `saveDivergedPlan`: may throw, and the session says so */
+  savePlan(target: string, plan: PlanLike): void;
+}
+
+/** A press being re-planned. Identity is the point: anything finishing late checks it is still THE job. */
+interface ReplanJob {
+  stepId: string;
+  optionId: string;
+  message: string;
+  cancelled: boolean;
+  /** the refusal on screen when this press was made, so a repeat of it is counted */
+  previous: { stepId: string; reason: string; inARow: number } | undefined;
+  /** settles when the job is over, for `settled()` */
+  done: Promise<void>;
+}
+
 export interface WalkAdapters {
   /** Re-render the decision tree from this view — `undefined` means "show nothing". */
   setTree(view: WalkView | undefined): void;
@@ -458,7 +535,7 @@ export interface WalkAdapters {
    * copy from, so every position behaves like `manual` and nothing is claimed on the learner's
    * behalf.
    */
-  loadRequest(target: string): ResolvedRequest | null;
+  loadRequest(target: string, plan: PlanLike): ResolvedRequest | null;
   /**
    * repo-tour's core, lazily. A PROMISE rather than the getter `StepPanelDeps.skins` uses,
    * and the difference is load-bearing: `activate()` is synchronous and opens the walk before
@@ -510,6 +587,12 @@ export interface WalkAdapters {
   commitPerStep(): boolean;
 
   // ── T-6: the tutor ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * T-22: what re-planning needs from outside, or `undefined` when the core or the model cannot
+   * be loaded. Optional like `tutorCore`: a walk without it says so when pressed.
+   */
+  replanner?(): Promise<Replanner | undefined>;
 
   /**
    * The tutor's slice of repo-tour, lazily — a promise for the same reason `core()` is one,
@@ -640,6 +723,8 @@ export class WalkSession {
    * an entry pass, and for the same reason: the learner asked for it.
    */
   private asking: { stepId: string; ticket: AskTicket } | undefined;
+  /** T-22: the press being re-planned; `undefined` when none is. See `startReplan`. */
+  private replan: ReplanJob | undefined;
   /**
    * T-6: the one thing that owns a live paid request — every ask this session starts, the
    * bound on its deadline, the neutral directory it runs in, and what it all cost.
@@ -680,11 +765,11 @@ export class WalkSession {
   private constructor(
     public readonly target: string,
     private readonly adapters: WalkAdapters,
-    private readonly plan: PlanLike,
+    private plan: PlanLike,
     private progress: Progress,
     /** `request.json`, read ONCE at `open` — the reference root and the global dial (AC1).
      *  `null` is ordinary; see `WalkAdapters.loadRequest`. */
-    private readonly request: ResolvedRequest | null,
+    private request: ResolvedRequest | null,
   ) {}
 
   /**
@@ -719,7 +804,7 @@ export class WalkSession {
       adapters,
       plan,
       adapters.loadProgress(target, plan),
-      adapters.loadRequest(target),
+      adapters.loadRequest(target, plan),
     );
     session.resolveCurrent();
     session.refresh(true);
@@ -805,9 +890,8 @@ export class WalkSession {
 
   /**
    * The learner takes a road at a step — the Current Step panel's *Choose this instead* (T-21,
-   * T-10 E1). Recorded in progress, shown on the plan (`withChosen`), and NOTHING ELSE changes:
-   * re-deriving the rest of the walk from it is T-22's. Latest wins until then; choosing the
-   * author's option returns to the author's road.
+   * T-10 E1). A press that can be taken starts a re-plan (T-22, `startReplan`) and records nothing
+   * until it lands; everything else about the press is decided here, synchronously.
    *
    * `optionId` came from a webview and is only a KEY: it is matched against the rows the page can
    * show (`optionsTable`, the same answer the page drew from), and one that names none of them
@@ -829,9 +913,126 @@ export class WalkSession {
       this.refuseChoice(stepId, CHOICE_NOT_AN_OPTION);
       return;
     }
+    if (this.replan !== undefined) {
+      this.refuseChoice(stepId, CHOICE_ALREADY_REPLANNING);
+      return;
+    }
+    this.startReplan(stepId, optionId);
+  }
+
+  /**
+   * T-22: the re-plan a press starts. The model's part runs off the chain, for the reason `ask`
+   * does, and only the landing goes on it: a question can take minutes, and the walk must stay
+   * usable. A press that ends any way but landing leaves the plan, the versions and the progress
+   * exactly as they were.
+   */
+  private startReplan(stepId: string, optionId: string): void {
+    const job: ReplanJob = { stepId, optionId, message: REPLAN_STARTING, cancelled: false, previous: this.choiceRefusal, done: Promise.resolve() };
+    this.replan = job;
     this.choiceRefusal = undefined;
-    this.progress = setChosenIn(this.progress, stepId, optionId);
+    this.pushReplanFrame();
+    job.done = this.runReplan(job)
+      .catch((err: unknown) => { this.replanRefused(job, replanRefusedText(messageOf(err))); })
+      // A surface that threw while saying so must not become a rejection nobody is listening for.
+      .catch((err: unknown) => { this.adapters.reportError(messageOf(err)); })
+      .catch(() => { /* nothing left that could be told */ });
+  }
+
+  /** A push from inside a re-plan must not end it (the rule the tutor's spinner follows). */
+  private pushReplanFrame(): void {
+    try {
+      this.refresh(false);
+    } catch (err) {
+      this.adapters.reportError(messageOf(err));
+    }
+  }
+
+  private async runReplan(job: ReplanJob): Promise<void> {
+    const { request, plan } = this;
+    if (request === null) {
+      this.replanRefused(job, REPLAN_NO_REFERENCE);
+      return;
+    }
+    // At the press: what is walked is what the learner had walked when they chose.
+    const walked = walkedSteps(plan, this.progress);
+    const replanner = await this.adapters.replanner?.();
+    if (this.replan !== job) return;
+    if (replanner === undefined) {
+      this.replanRefused(job, REPLAN_UNAVAILABLE);
+      return;
+    }
+    const outcome = await replanner.diverge(
+      { plan, referenceRoot: repositoryRootOf(request), derivedRoot: request.derivedRoot ?? null, stepId: job.stepId, answer: job.optionId, walked },
+      {
+        ledger: this.ledger,
+        isCancelled: () => job.cancelled,
+        onProgress: (message) => {
+          if (this.replan !== job) return;
+          job.message = message;
+          this.pushReplanFrame();
+        },
+      },
+    );
+    if (this.replan !== job) return;
+    // On the chain: nothing else may be reading the plan while it is swapped.
+    this.enqueue(() => { this.landReplan(job, outcome, replanner, request); });
+    await this.work;
+  }
+
+  /** The job is over and it did not land: say why on the page the learner is on, and count a repeat. */
+  private replanRefused(job: ReplanJob, text: string): void {
+    if (this.replan !== job) return;
+    this.replan = undefined;
+    this.choiceRefusal = job.previous;
+    this.refuseChoice(this.progress.current ?? job.stepId, text);
+  }
+
+  /**
+   * The re-plan's result, on the chain. The learner stays where they are if that step is still
+   * there, and D otherwise. No dial is applied (T-23): a landing is not an arrival, and the
+   * learner's own files are not touched by it.
+   */
+  private landReplan(job: ReplanJob, outcome: DivergeOutcome, replanner: Replanner, request: ResolvedRequest): void {
+    if (this.replan !== job) return;
+    if (!outcome.ok) {
+      this.replanRefused(job, replanRefusedText(outcome.reason));
+      return;
+    }
+    if (!outcome.changed) {
+      this.replan = undefined;
+      this.progress = setChosenIn(this.progress, job.stepId, job.optionId);
+      this.sayChoice(job, REPLAN_NOTHING_FOLLOWS);
+      this.commit(false);
+      return;
+    }
+    try {
+      replanner.savePlan(this.target, outcome.plan);
+    } catch (err) {
+      this.replanRefused(job, replanRefusedText(`the new plan could not be saved: ${messageOf(err)}`));
+      return;
+    }
+    this.replan = undefined;
+    this.plan = outcome.plan;
+    this.request = { ...request, derivedRoot: outcome.derivedRoot };
+    this.progress = setChosenIn(this.progress, job.stepId, job.optionId);
+    if (this.progress.current === null || !this.hasStep(this.progress.current)) this.progress = setCurrent(this.progress, job.stepId);
+    this.forgetOldCode(job.stepId);
+    this.clearStepNotes();
+    const decided = outcome.plan.steps.find((s) => s.id === job.stepId);
+    this.sayChoice(job, replanDoneText(outcome.plan.steps.filter((s) => s.derivedFrom === job.stepId).length, decided?.kind !== 'shape', outcome.cost));
     this.commit(false);
+  }
+
+  /** What became of the press, on the page the learner is on now (`WalkView.choiceNote`). */
+  private sayChoice(job: ReplanJob, text: string): void {
+    this.choiceRefusal = { stepId: this.progress.current ?? job.stepId, reason: text, inARow: 1 };
+  }
+
+  /** What this session remembers about code a re-plan has replaced: a check of the old file, an Overwrite answer about it. */
+  private forgetOldCode(stepId: string): void {
+    const stale = (id: string): boolean => id === stepId || !this.hasStep(id);
+    for (const id of [...this.checks.keys()]) if (stale(id)) this.checks.delete(id);
+    for (const id of [...this.prompted.keys()]) if (stale(id)) this.prompted.delete(id);
   }
 
   /**
@@ -843,6 +1044,22 @@ export class WalkSession {
   refuseStaleChoice(stepId: string): void {
     if (this.disposed || !this.hasStep(stepId)) return;
     this.refuseChoice(stepId, CHOICE_STALE_PAGE);
+  }
+
+  /**
+   * T-22: stops the re-plan in flight, from whichever step it is pressed on. Nothing in flight is
+   * a no-op, for the reason `cancelAsk` gives: it landed while the press was in the air.
+   */
+  cancelReplan(): void {
+    const job = this.replan;
+    if (this.disposed || job === undefined) return;
+    // Read before anything is abandoned: a question with the model cannot be unsent (T-6's rule).
+    const billing = this.ledger.live().some((e) => e.stepId.startsWith(REPLAN_TICKET_PREFIX) && e.phase === 'sending' && !e.abandoned);
+    job.cancelled = true;
+    this.replan = undefined;
+    this.ledger.abandonPrefixed(REPLAN_TICKET_PREFIX);
+    this.choiceRefusal = job.previous;
+    this.refuseChoice(this.progress.current ?? job.stepId, billing ? REPLAN_CANCELLED_BILLED : REPLAN_CANCELLED_UNSENT);
   }
 
   /** Where this step's file is read from (`./reference.ts`), or `undefined` with no reference at all. */
@@ -1626,6 +1843,7 @@ export class WalkSession {
       const waits: Array<Promise<unknown>> = [];
       const asking = this.asking;
       if (asking) waits.push(asking.ticket.delivered);
+      if (this.replan) waits.push(this.replan.done);
       const detouring = this.detourSession?.pending();
       if (detouring) waits.push(detouring);
       if (waits.length === 0) return;
@@ -1682,6 +1900,9 @@ export class WalkSession {
     this.asking = undefined;
     this.tutorNote = undefined;
     this.lastAsked = undefined;
+    // T-22: a re-plan still running has nothing to land on.
+    if (this.replan) this.replan.cancelled = true;
+    this.replan = undefined;
     // Through the LEDGER, which abandons every live ask, refuses to open another and removes
     // the scratch directory the provider was launched in. The totals are not reset — `close`
     // is the end of the ledger, not a way to forget what a walk spent.
@@ -2466,6 +2687,7 @@ export class WalkSession {
       ...(this.choiceRefusal?.stepId === step.id
         ? { choiceNote: choiceRefusalText(this.choiceRefusal.reason, this.choiceRefusal.inARow) }
         : {}),
+      ...(this.replan ? { replanning: { stepId: this.replan.stepId, message: this.replan.message } } : {}),
       ...(reproducible > 0
         ? { reproduce: { count: reproducible, done: this.progress.reproduced !== undefined } }
         : {}),
@@ -2514,7 +2736,8 @@ export class WalkSession {
     // `spend.unwatched` is where that is said — but this line comes with a CONTROL, and a
     // control that cannot act on what it names is the exact thing this repo's conventions rule
     // out. There is nothing left to cancel about an ask the learner already cancelled.
-    const away = this.ledger.live().find((entry) => entry.stepId !== stepId && !entry.abandoned);
+    // A re-plan's questions are shown as the re-plan (`WalkView.replanning`), not as a tutor question elsewhere.
+    const away = this.ledger.live().find((entry) => entry.stepId !== stepId && !entry.abandoned && !entry.stepId.startsWith(REPLAN_TICKET_PREFIX));
     const spend = this.ledger.spend();
     return {
       thinking: here !== undefined,

@@ -847,7 +847,7 @@ suite('a learner\'s own edit is not overwritten silently', () => {
       loadPlan,
       loadProgress,
       saveProgress,
-      loadRequest,
+      loadRequest: (t) => loadRequest(t),
       reportError: (message) => { assert.fail(`nothing here should have failed: ${message}`); },
       core: () => Promise.resolve(core),
       readText: (absPath) => {

@@ -33,10 +33,10 @@ export interface ProgressStep {
    * The option the LEARNER chose at this step, when they chose one (T-21, T-10 E1) — an option id
    * of this step. Absent means the learner has not chosen, and the step stands as the plan has it.
    *
-   * It lives HERE, in progress, not in `plan.json`: the plan is repo-tour's output and the walk
-   * never writes it (one writer per file — the foreman's ruling at T-21's gate). The session
-   * overlays it onto `decision.chosen` (`withChosen`) in the plan every consumer is handed, which
-   * is where the replan (T-22) reads it. Latest wins until T-22 lands.
+   * It lives HERE so it can be overlaid (`withChosen`) on any plan the walk is handed. A replan
+   * that lands (T-22) also writes it into the new plan's `decision.chosen`, because a plan version
+   * has to say by itself what it was derived with; this field is written then too, and only then,
+   * so the two agree. A press that did not land leaves no trace here.
    */
   chosen?: string;
 }
@@ -83,6 +83,8 @@ export interface StepLike {
   scaffold: { loadBearing: RangeLike[]; boilerplate: RangeLike[] };
   dependsOn: string[];
   witness: { sha: string | null; date: string | null; subject: string | null };
+  /** T-22: the step whose decision produced this one. Set only on a step a re-plan wrote, which has no author. */
+  derivedFrom?: string;
 }
 
 export interface ChapterLike {
@@ -96,6 +98,38 @@ export interface PlanLike {
   chapters: ChapterLike[];
   steps: StepLike[];
   [key: string]: unknown;
+}
+
+/** One re-plan on the record, in the plan it produced (T-22), oldest first. */
+export interface PlanDivergence {
+  stepId: string;
+  /** the option id taken */
+  answer: string;
+  /** walked steps that stood on the old road, by id, in plan order (the M1 warning) */
+  staleDependents: string[];
+  at: string;
+  /** which tree in the `derived/` store holds this plan's re-derived files */
+  tree: string;
+}
+
+/**
+ * The store path of the tree this plan's re-derived files live in, or `undefined` for a plan that
+ * has not diverged. The plan names its own tree so one atomic write of `plan.json` is the whole
+ * switch: a plan can never be paired with another plan's code, whatever a crash interrupted.
+ * `plan.json` can be edited by hand, so this reads it as `unknown`, and the caller proves the path.
+ */
+export function treeNamedBy(plan: PlanLike): string | undefined {
+  const all: unknown = plan['divergences'];
+  if (!Array.isArray(all)) return undefined;
+  const last: unknown = all[all.length - 1];
+  const tree = typeof last === 'object' && last !== null ? (last as { tree?: unknown }).tree : undefined;
+  return typeof tree === 'string' && tree.length > 0 ? tree : undefined;
+}
+
+/** The steps this learner has walked: done, or before where they stand now (T-22's definition). */
+export function walkedSteps(plan: PlanLike, progress: Progress): Set<string> {
+  const here = currentStep(plan, progress)?.ordinal ?? -Infinity;
+  return new Set(plan.steps.filter((s) => s.ordinal < here || progress.steps[s.id]?.status === 'done').map((s) => s.id));
 }
 
 /** A brand-new build's progress: nothing done yet, parked on the plan's first step (by

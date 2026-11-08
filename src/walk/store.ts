@@ -10,9 +10,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildDir, writeJsonAtomic } from '../start/build.js';
+import { buildDir, realFsWriteOps, writeBytesAtomic, writeJsonAtomic, type FsWriteOps } from '../start/build.js';
 import { DEFAULT_DIAL, DIALS, type BuildRequest, type Dial } from '../start/request.js';
-import { emptyProgress, type PlanLike, type Progress } from './model.js';
+import { emptyProgress, treeNamedBy, type PlanLike, type Progress } from './model.js';
 
 export { buildDir };
 
@@ -160,17 +160,21 @@ function requestPath(target: string): string {
  * real state — it can be walked, it just cannot be written into — so `null` is an answer
  * callers must handle, not an error.
  */
-export type ResolvedRequest = BuildRequest & { referenceRoot: string };
+export type ResolvedRequest = BuildRequest & {
+  referenceRoot: string;
+  /** the tree this plan's re-derived files are in (`treeNamedBy`), proven; absent until a divergence */
+  derivedRoot?: string;
+};
 
 /**
  * `derivedRoot`, proved: a real folder strictly inside the extension's own store of derived trees,
  * after following every link, or `undefined`. `request.json` is in the learner's folder, and a
  * tampered one must not be able to point the walk at something it would then read and show.
  */
-function provenDerivedRoot(raw: unknown, store: string | undefined): string | undefined {
-  if (typeof raw !== 'string' || store === undefined) return undefined;
+function provenDerivedRoot(tree: string | undefined, store: string): string | undefined {
+  if (tree === undefined) return undefined;
   try {
-    const real = fs.realpathSync(raw);
+    const real = fs.realpathSync(path.join(store, tree));
     if (!real.startsWith(fs.realpathSync(store) + path.sep)) return undefined;
     return fs.statSync(real).isDirectory() ? real : undefined;
   } catch {
@@ -182,7 +186,14 @@ function derived(root: string | undefined): { derivedRoot?: string } {
   return root === undefined ? {} : { derivedRoot: root };
 }
 
-export function loadRequest(target: string, derivedStore?: string): ResolvedRequest | null {
+/** What `loadRequest` needs to say where a plan's re-derived files are; see `treeNamedBy`. */
+export interface DerivedLookup {
+  plan: PlanLike;
+  /** the extension's `derived/` store: the only place a tree can be */
+  store: string;
+}
+
+export function loadRequest(target: string, derivedLookup?: DerivedLookup): ResolvedRequest | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(requestPath(target), 'utf8'));
@@ -219,12 +230,42 @@ export function loadRequest(target: string, derivedStore?: string): ResolvedRequ
     repo,
     referenceRoot,
     target: typeof parsed['target'] === 'string' ? parsed['target'] : target,
-    ...derived(provenDerivedRoot(parsed['derivedRoot'], derivedStore)),
+    ...derived(derivedLookup === undefined ? undefined : provenDerivedRoot(treeNamedBy(derivedLookup.plan), derivedLookup.store)),
     // An unrecognised dial is the global default, never a guess: a value outside `DIALS`
     // means the file was hand-edited or written by a future version, and "manual" is the
     // only fallback that cannot overstate what has happened to the learner's files.
     dial: typeof dial === 'string' && (DIALS as readonly string[]).includes(dial) ? (dial as Dial) : DEFAULT_DIAL,
   };
+}
+
+/**
+ * Puts a re-planned walk in place (T-22, AC4): the plan as it stands is copied, byte for byte, to
+ * `versions/<n>.json`, and only then is `plan.json` replaced. Each write is atomic, and the plan
+ * names its own tree, so a crash at any point leaves one whole plan paired with its own code. The
+ * worst a crash can leave is a version identical to the current plan, which undo reads as a no-op.
+ * Returns the version number written.
+ */
+export function saveDivergedPlan(target: string, plan: PlanLike, ops: FsWriteOps = realFsWriteOps): number {
+  const before = fs.readFileSync(planPath(target));
+  const dir = path.join(buildDir(target), 'versions');
+  const version = nextVersion(dir);
+  writeBytesAtomic(path.join(dir, `${version}.json`), before, ops);
+  writeJsonAtomic(planPath(target), plan, ops);
+  return version;
+}
+
+/** One past the highest numbered version in `dir`, so a version is never overwritten. */
+function nextVersion(dir: string): number {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 1;
+  }
+  return names.reduce((top, name) => {
+    const match = /^(\d+)\.json$/.exec(name);
+    return match === null ? top : Math.max(top, Number(match[1]) + 1);
+  }, 1);
 }
 
 export function saveProgress(target: string, progress: Progress): void {

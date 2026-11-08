@@ -8,6 +8,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { PlanLike } from '../../src/walk/model.js';
 import { referenceRootFor } from '../../src/walk/reference.js';
 import { loadRequest } from '../../src/walk/store.js';
 
@@ -60,48 +61,74 @@ suite('referenceRootFor — the one answer to which root a step reads from (AC5)
   });
 });
 
-suite('loadRequest and derivedRoot: only a tree in the extension\'s own store is believed (AC5)', () => {
-  function request(target: string, repo: string, derivedRoot?: string): void {
+suite('loadRequest and a plan\'s tree: only a tree in the extension\'s own store is believed (AC5)', () => {
+  function request(target: string, repo: string, extra: Record<string, unknown> = {}): void {
     fs.mkdirSync(path.join(target, '.repo-tour', 'build'), { recursive: true });
-    fs.writeFileSync(path.join(target, '.repo-tour', 'build', 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial: 'manual', referenceRoot: repo, ...(derivedRoot === undefined ? {} : { derivedRoot }) }));
+    fs.writeFileSync(path.join(target, '.repo-tour', 'build', 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial: 'manual', referenceRoot: repo, ...extra }));
   }
 
-  test('a tree inside the store is believed', () => {
+  /** A plan whose divergences are exactly these, as `plan.json` could say. */
+  function planWith(divergences: unknown): PlanLike {
+    return { chapters: [], steps: [], divergences };
+  }
+
+  function naming(tree: unknown): PlanLike {
+    return planWith([{ stepId: 'd', answer: 'a', staleDependents: [], at: 't', tree }]);
+  }
+
+  function setup(): { target: string; repo: string; store: string; outside: string } {
     const target = tempDir('ref-target-');
     const repo = tempDir('ref-repo-');
     const store = tempDir('ref-store-');
-    const tree = path.join(store, 'k', 'app-1');
-    fs.mkdirSync(tree, { recursive: true });
-    request(target, repo, tree);
-    assert.equal(loadRequest(target, store)?.derivedRoot, fs.realpathSync(tree));
+    const outside = tempDir('ref-outside-');
+    request(target, repo);
+    return { target, repo, store, outside };
+  }
+
+  test('the tree the plan names, inside the store, is believed', () => {
+    const { target, store } = setup();
+    fs.mkdirSync(path.join(store, 'k', 'app-1'), { recursive: true });
+    assert.equal(loadRequest(target, { plan: naming('k/app-1'), store })?.derivedRoot, fs.realpathSync(path.join(store, 'k', 'app-1')));
+  });
+
+  test('it is the tree of the LAST divergence that counts', () => {
+    const { target, store } = setup();
+    fs.mkdirSync(path.join(store, 'k', 'old'), { recursive: true });
+    fs.mkdirSync(path.join(store, 'k', 'new'), { recursive: true });
+    const plan = planWith([{ tree: 'k/old' }, { tree: 'k/new' }]);
+    assert.equal(loadRequest(target, { plan, store })?.derivedRoot, fs.realpathSync(path.join(store, 'k', 'new')));
   });
 
   for (const [name, plant] of [
-    ['outside the store', (store: string, outside: string): string => { void store; return outside; }],
-    ['the store itself', (store: string): string => store],
-    ['a link inside the store that leads out', (store: string, outside: string): string => { const link = path.join(store, 'k', 'link'); fs.mkdirSync(path.dirname(link), { recursive: true }); fs.symlinkSync(outside, link); return link; }],
-    ['a folder that is not there', (store: string): string => path.join(store, 'k', 'gone')],
-  ] as Array<[string, (store: string, outside: string) => string]>) {
-    test(`a derivedRoot that is ${name} is ignored`, () => {
-      const target = tempDir('ref-target-');
-      const repo = tempDir('ref-repo-');
-      const store = tempDir('ref-store-');
-      const outside = tempDir('ref-outside-');
-      request(target, repo, plant(store, outside));
-      const loaded = loadRequest(target, store);
+    ['a path that climbs out of the store', (store: string, outside: string): unknown => path.relative(store, outside)],
+    ['an absolute path outside', (_store: string, outside: string): unknown => outside],
+    ['the store itself', (): unknown => '.'],
+    ['a link inside the store that leads out', (store: string, outside: string): unknown => { fs.mkdirSync(path.join(store, 'k'), { recursive: true }); fs.symlinkSync(outside, path.join(store, 'k', 'link')); return 'k/link'; }],
+    ['a folder that is not there', (): unknown => 'k/gone'],
+    ['not a string', (): unknown => 7],
+  ] as Array<[string, (store: string, outside: string) => unknown]>) {
+    test(`a tree that is ${name} is ignored`, () => {
+      const { target, repo, store, outside } = setup();
+      const loaded = loadRequest(target, { plan: naming(plant(store, outside)), store });
       assert.ok(loaded !== null, 'the request itself is still good');
       assert.equal(loaded.derivedRoot, undefined);
       assert.equal(loaded.referenceRoot, repo);
     });
   }
 
-  test('with no store to prove it against, a derivedRoot is ignored', () => {
-    const target = tempDir('ref-target-');
-    const repo = tempDir('ref-repo-');
-    const store = tempDir('ref-store-');
+  test('a plan that has not diverged has no derived tree', () => {
+    const { target, store } = setup();
+    for (const plan of [planWith(undefined), planWith([]), planWith('nonsense'), planWith([null])]) {
+      assert.equal(loadRequest(target, { plan, store })?.derivedRoot, undefined);
+    }
+  });
+
+  test('a derivedRoot planted in request.json is not believed, even a real tree inside the store', () => {
+    const { target, repo, store } = setup();
     const tree = path.join(store, 'k', 'app-1');
     fs.mkdirSync(tree, { recursive: true });
-    request(target, repo, tree);
+    request(target, repo, { derivedRoot: tree });
+    assert.equal(loadRequest(target, { plan: planWith([]), store })?.derivedRoot, undefined);
     assert.equal(loadRequest(target)?.derivedRoot, undefined);
   });
 

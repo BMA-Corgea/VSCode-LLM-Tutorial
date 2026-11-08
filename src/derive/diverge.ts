@@ -27,7 +27,7 @@ import path from 'node:path';
 import type { DialCore } from '../dial/core.js';
 import { languageOf } from '../dial/core.js';
 import { readReference } from '../dial/writer.js';
-import type { ChapterLike, PlanLike, StepLike } from '../walk/model.js';
+import type { ChapterLike, PlanDivergence, PlanLike, StepLike } from '../walk/model.js';
 import { askOnce, newTally, type DeriveAskDeps } from './ask.js';
 import { boilerplateRanges, lineCountOf, loadBearingRanges, stepIdFor, type DeriveCost, type ExtractLike } from './assemble.js';
 import { costOf, extractAll, REPO_IMPORTS, refusalForFile, thrownSentence, type ImportRules } from './engine.js';
@@ -59,15 +59,6 @@ export interface DivergeDeps extends DeriveAskDeps {
   target: string;
   onProgress?: (message: string) => void;
   now?: () => Date;
-}
-
-/** One divergence, on the record, in the plan it produced. */
-export interface Divergence {
-  stepId: string;
-  answer: string;
-  /** walked steps that stood on the old road, by id, in plan order */
-  staleDependents: string[];
-  at: string;
 }
 
 export type DivergeOutcome =
@@ -152,12 +143,12 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
 
     const reachedUnits = steps.filter((s) => replaced.has(s.id) && s.kind !== 'symbol');
     if (reachedUnits.length > DERIVE_LIMITS.maxSteps) {
-      return fail(`this decision reaches ${reachedUnits.length} later steps, more than the ${DERIVE_LIMITS.maxSteps} one press can re-plan, so nothing was changed`);
+      return fail(`this decision reaches ${reachedUnits.length} later steps, more than the ${DERIVE_LIMITS.maxSteps} one press can re-plan`);
     }
 
     const languageFile = ownFile ?? steps.find((s) => s.kind === 'file' && s.chapter === d.chapter)?.target.file ?? steps.find((s) => s.kind === 'file')?.target.file;
     const language = languageFile === undefined ? null : asCodeLanguage(languageOf(languageFile));
-    if (language === null) return fail('this repository is written in a language the engine cannot re-derive, so nothing was changed');
+    if (language === null) return fail('this repository is written in a language the engine cannot re-derive');
 
     // ── the model names a chapter by a short alias; the alias stands for a real directory ──
     const aliases = new Map<string, string>(plan.chapters.map((c, i) => [c.key, `c${i + 1}`]));
@@ -325,10 +316,10 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const used = new Set(nextSteps.map((s) => s.chapter));
     const newChapters: ChapterLike[] = merged.chapters.map((c) => ({ key: c.key, title: c.title, subtitle: c.subtitle, tierPath: c.key }));
     const chapters = [...plan.chapters, ...newChapters].filter((c) => used.has(c.key));
-    const prior = (plan as { divergences?: Divergence[] }).divergences ?? [];
-    const next: PlanLike & { divergences: Divergence[] } = {
+    const prior = (plan as { divergences?: PlanDivergence[] }).divergences ?? [];
+    const next: PlanLike & { divergences: PlanDivergence[] } = {
       ...plan, chapters, steps: nextSteps, generatedAt: at, cost: costOf(tally, deps),
-      divergences: [...prior, { stepId: d.id, answer, staleDependents, at }],
+      divergences: [...prior, { stepId: d.id, answer, staleDependents, at, tree: tree.storeKey }],
     };
     return { ok: true, changed: true, plan: next, derivedRoot: tree.root, staleDependents, cost: costOf(tally, deps) };
   } catch (err) {
