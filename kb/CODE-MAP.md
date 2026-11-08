@@ -66,6 +66,16 @@ will be overwritten.
 - Exports: DERIVE_INSTRUCTIONS, MAX_DERIVE_INSTRUCTIONS_CHARS, MAX_DERIVE_PROMPT_CHARS, codePrompt, jsonLine, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, quote, readReplyObject, replanPrompt, unsafeDerivedFileReason, unsoundCodeText, validatePlan, withChapterEdges
 - Imports: (none)
 
+## src/derive/python-stdlib.ts
+
+- Exports: PYTHON_STDLIB_MODULES
+- Imports: (none)
+
+## src/derive/source-scan.ts
+
+- Exports: codeOnly
+- Imports: (none)
+
 ## src/derive/storage.ts
 
 - Exports: DERIVED_TREES_DIR, DERIVE_CACHE_DIR, lstatOrNull, provenStorageDir
