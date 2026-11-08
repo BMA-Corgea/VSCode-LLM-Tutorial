@@ -18,6 +18,7 @@ import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
 import { derivePlan, replanPlan, type DerivationState, type DeriveDeps } from '../../src/derive/engine.js';
 import type { DerivedPlan } from '../../src/derive/assemble.js';
 import { stepIdFor } from '../../src/derive/assemble.js';
+import { DERIVE_LIMITS } from '../../src/derive/types.js';
 import { AskLedger } from '../../src/tutor/ask.js';
 import { tutorCoreFor, type TutorCore } from '../../src/tutor/core.js';
 import { FIXTURE_IDEA, fixtureOutlineText } from './derive-fixtures.js';
@@ -281,6 +282,47 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     if (!out.ok) assert.fail(out.reason);
   });
 
+  test('an answered derivation asks for the code LAST and once: it never pays for code it would throw away', async () => {
+    const seed = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel().run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    if (!seed.ok) assert.fail(seed.reason);
+    const model = fakeModel();
+    const out = await derivePlan({ idea: FIXTURE_IDEA, answers: { [idOf(seed.state, 'core/tally.mjs')]: 'object' } }, deps(model.run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    if (!out.ok) assert.fail(out.reason);
+    assert.deepEqual(model.asked.map((a) => a.task), ['outline', 'replan', 'code', 'code']);
+    assert.equal(out.state.files['core/tally.mjs'], OBJECT_TALLY, 'the code follows the answer');
+  });
+
+  test('an answer for a step this plan does not have is refused, never silently dropped', async () => {
+    const model = fakeModel();
+    const out = await derivePlan({ idea: FIXTURE_IDEA, answers: { deadbeefdeadbeef: 'x' } }, deps(model.run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    assert.ok(!out.ok, 'an answer that matches nothing must be said out loud');
+    assert.match(out.reason, /matches no step/);
+    assert.ok(!model.asked.some((a) => a.task === 'code'), 'no code was paid for around an answer that matched nothing');
+  });
+
+  for (const [name, idea, pattern] of [
+    ['an empty idea', '   \n', /no idea/],
+    ['an idea past its bound', 'x'.repeat(DERIVE_LIMITS.maxIdeaChars + 1), /more than the 4000/],
+  ] as Array<[string, string, RegExp]>) {
+    test(`${name} is refused before anything is asked`, async () => {
+      const model = fakeModel();
+      const out = await derivePlan({ idea }, deps(model.run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+      assert.ok(!out.ok);
+      assert.match(out.reason, pattern);
+      assert.equal(model.asked.length, 0, 'nothing was paid for');
+    });
+  }
+
+  test('a model setting left empty is refused before anything is asked, rather than silently buying the strongest model', async () => {
+    const model = fakeModel();
+    const d = deps(model.run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-'));
+    d.settings = { ...d.settings, model: '' };
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, d);
+    assert.ok(!out.ok);
+    assert.match(out.reason, /names no model/);
+    assert.equal(model.asked.length, 0);
+  });
+
   test('an answer that is not one of the step\'s options is refused, never guessed at', async () => {
     const gs = tempDir('derive-engine-gs-');
     const target = tempDir('derive-engine-target-');
@@ -468,6 +510,54 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     const out = await replanPlan(tampered, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(POISONED, b.gs, b.target));
     assert.ok(!out.ok);
     assert.match(out.reason, /cannot be replanned: .*climbs out of the reference tree/);
+  });
+
+  const bigText = 'x'.repeat(5_000_000);
+  const tampers: Array<[string, (s: Record<string, unknown>, nodes: Array<Record<string, unknown>>) => void, RegExp?]> = [
+    ['nodes holding a null', (s) => { s['nodes'] = [null]; }],
+    ['nodes that are not a list', (s) => { s['nodes'] = 'nope'; }],
+    ['chapters that are null', (s) => { s['chapters'] = null; }],
+    ['files that are null', (s) => { s['files'] = null; }],
+    ['answers that are null', (s) => { s['answers'] = null; }],
+    ['an idea that is not text', (s) => { s['idea'] = { toString: 'x' }; }],
+    ['a step path that is a number', (_s, n) => { n[1]!['path'] = 7; }],
+    ['a dependsOn that is a number', (_s, n) => { n[1]!['dependsOn'] = 7; }],
+    ['a dependsOn that is missing', (_s, n) => { delete n[1]!['dependsOn']; }],
+    ['no options', (_s, n) => { n[2]!['options'] = []; }],
+    ['options that are not a list', (_s, n) => { n[2]!['options'] = 'nope'; }],
+    ['one option where the parser wants two', (_s, n) => { (n[2]!['options'] as unknown[]).splice(1); n[2]!['recommended'] = (n[2]!['options'] as Array<{ id: string }>)[0]!.id; }],
+    ['31 options', (_s, n) => { n[2]!['options'] = Array.from({ length: 31 }, (_, i) => ({ id: `o${i}`, label: 'l', consequence: 'c' })); n[2]!['recommended'] = 'o0'; }],
+    ['a recommendation that is not an option', (_s, n) => { n[2]!['recommended'] = 'zzz'; }],
+    ['a step kind the plan does not have, at a hostile path', (_s, n) => { n[1]!['kind'] = 'symbol'; n[1]!['path'] = '../../../../etc/passwd'; }],
+    ['a shape step at a hostile path', (_s, n) => { n[0]!['path'] = '../../outside'; }],
+    ['a chapter key that climbs out', (s) => { (s['chapters'] as Array<Record<string, unknown>>)[0]!['key'] = '../../x'; }],
+    ['a 5 MB option label', (_s, n) => { (n[2]!['options'] as Array<Record<string, unknown>>)[0]!['label'] = bigText; }],
+    ['a 5 MB why', (_s, n) => { n[2]!['why'] = bigText; }],
+    ['a question holding a line break', (_s, n) => { n[1]!['question'] = 'How is it kept?\nglobalThis.INJECTED = true;'; }],
+    ['a file step with its chapter edge removed', (_s, n) => { n[1]!['dependsOn'] = []; }],
+    ['the same dependency listed 20,000 times', (_s, n) => { n[3]!['dependsOn'] = Array.from({ length: 20_000 }, () => 'core/tally.mjs'); }],
+    ['a 1 MB file', (s) => { (s['files'] as Record<string, unknown>)['core/tally.mjs'] = bigText.slice(0, 1_000_000); }],
+    ['a file that is not text', (s) => { (s['files'] as Record<string, unknown>)['core/tally.mjs'] = 7; }],
+    ['a file step with no code', (s) => { delete (s['files'] as Record<string, unknown>)['core/tally.mjs']; }],
+  ];
+  for (const [name, tamper] of tampers) {
+    test(`a stored state with ${name} is refused in a sentence, before anything is asked or written`, async () => {
+      const b = await base();
+      const copy = JSON.parse(JSON.stringify(b.first.state)) as Record<string, unknown>;
+      tamper(copy, copy['nodes'] as Array<Record<string, unknown>>);
+      const out = await replanPlan(copy as unknown as DerivationState, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(POISONED, b.gs, b.target));
+      assert.ok(!out.ok, 'a tampered state must not be replanned');
+      assert.match(out.reason, /cannot be replanned/, `it should be the state door that says no, not: ${out.reason}`);
+    });
+  }
+
+  test('replanPlan never rejects: anything unexpected comes back as a sentence', async () => {
+    const b = await base();
+    const copy = JSON.parse(JSON.stringify(b.first.state)) as DerivationState;
+    Object.defineProperty(copy.nodes[0]!, 'path', { get() { throw new Error('a hostile getter'); }, enumerable: true });
+    const out = await replanPlan(copy, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(POISONED, b.gs, b.target));
+    assert.ok(!out.ok);
+    assert.match(out.reason, /a hostile getter/);
   });
 
   test('a state that holds code for a path the plan does not have is refused', async () => {

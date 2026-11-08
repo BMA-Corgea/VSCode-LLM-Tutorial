@@ -192,6 +192,32 @@ suite('parseOutlineReply — a plan is accepted whole, or refused with a sentenc
     test(`refuses ${name}`, () => { mustRefuse(reply(), pattern); });
   }
 
+  test('a line break in a title, question, label or consequence is folded to one space, so it can never become code in a stub', () => {
+    const outline = mustParse(outlineWith((o) => {
+      o['title'] = 'My\napp';
+      (o['chapters'] as Array<Record<string, unknown>>)[0]!['title'] = `Core${LS}logic`;
+      const step = stepsOf(o)[1]!;
+      step['question'] = `How is it kept?\nglobalThis.INJECTED = true;${PS}more\r\n`;
+      const option = (step['options'] as Array<Record<string, unknown>>)[0]!;
+      option['label'] = 'A\tB';
+      option['consequence'] = 'C\u0007D';
+    }));
+    assert.equal(outline.title, 'My app');
+    assert.equal(outline.chapters[0]?.title, 'Core logic');
+    assert.equal(outline.nodes[1]?.question, 'How is it kept? globalThis.INJECTED = true; more');
+    assert.equal(outline.nodes[1]?.options[0]?.label, 'A B');
+    assert.equal(outline.nodes[1]?.options[0]?.consequence, 'C D');
+  });
+
+  test('a why may keep its paragraphs: it is prose for a person, and never reaches a comment', () => {
+    const outline = mustParse(outlineWith((o) => { stepsOf(o)[1]!['why'] = 'First.\n\nSecond.'; }));
+    assert.equal(outline.nodes[1]?.why, 'First.\n\nSecond.');
+  });
+
+  test('a question of nothing but control characters is refused as empty, not folded to nothing', () => {
+    mustRefuse(outlineWith((o) => { stepsOf(o)[1]!['question'] = '\u0007\u0008'; }), /empty "question"/);
+  });
+
   test('the fixture itself is untouched by the refusal matrix (it builds fresh copies)', () => {
     assert.deepEqual(JSON.parse(fixtureOutlineText()), fixtureOutlineReply());
   });

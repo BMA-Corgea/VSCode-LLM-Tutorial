@@ -362,6 +362,30 @@ function text(obj: Record<string, unknown>, field: string, max: number, where: s
   return trimmed;
 }
 
+/** Every run of whitespace or control characters becomes one space. By char code, as `quote` does. */
+function oneLine(value: string): string {
+  let spaced = '';
+  for (const ch of value) {
+    const code = ch.charCodeAt(0);
+    spaced += code < 0x20 || code === 0x7f ? ' ' : ch;
+  }
+  return spaced.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * A field that is one line of text: `text`, with its line breaks folded away. A question is written
+ * into a scaffold as a `// TODO` comment, so a line break in it would put the rest of the sentence
+ * on a line of its own, as code. A model that wraps a long question over two lines is not an
+ * attack, and refusing it would throw away a whole plan, so the break is folded rather than
+ * refused. `why` keeps `text`: it is prose for a person and never reaches a comment.
+ */
+function line(obj: Record<string, unknown>, field: string, max: number, where: string): string | DeriveRefusal {
+  const value = text(obj, field, max, where);
+  if (isRefusal(value)) return value;
+  const folded = oneLine(value);
+  return folded.length > 0 ? folded : refuse(`${where} has an empty "${field}"`);
+}
+
 const CHAPTER_KEY = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const OPTION_ID = /^[a-z0-9][a-z0-9_-]{0,23}$/;
 
@@ -376,9 +400,9 @@ export function parseChapter(raw: unknown, index: number): DerivedChapter | Deri
   if (typeof key !== 'string' || !CHAPTER_KEY.test(key)) {
     return refuse(`${where}'s key ${quote(key)} is not a short lowercase name of letters, digits and dashes`);
   }
-  const title = text(raw, 'title', DERIVE_LIMITS.maxTitleChars, where);
+  const title = line(raw, 'title', DERIVE_LIMITS.maxTitleChars, where);
   if (isRefusal(title)) return title;
-  const subtitle = text(raw, 'subtitle', MAX_PAGE_TEXT, where);
+  const subtitle = line(raw, 'subtitle', MAX_PAGE_TEXT, where);
   if (isRefusal(subtitle)) return subtitle;
   return { key, title, subtitle };
 }
@@ -400,9 +424,9 @@ function parseOptions(raw: unknown, where: string): DerivedOption[] | DeriveRefu
     if (typeof id !== 'string' || !OPTION_ID.test(id)) return refuse(`${at} has an id ${quote(id)} that is not a short lowercase handle`);
     if (seen.has(id)) return refuse(`${where} has two options with the id ${quote(id)}`);
     seen.add(id);
-    const label = text(o, 'label', DERIVE_LIMITS.maxLabelChars, at);
+    const label = line(o, 'label', DERIVE_LIMITS.maxLabelChars, at);
     if (isRefusal(label)) return label;
-    const consequence = text(o, 'consequence', DERIVE_LIMITS.maxConsequenceChars, at);
+    const consequence = line(o, 'consequence', DERIVE_LIMITS.maxConsequenceChars, at);
     if (isRefusal(consequence)) return consequence;
     out.push({ id, label, consequence });
   }
@@ -453,7 +477,7 @@ export function parseNode(raw: unknown, index: number, language: DeriveLanguage)
     const unsafe = unsafeDerivedFileReason(p, chapter, language);
     if (unsafe !== null) return refuse(`${where}'s path ${quote(p)} ${unsafe}`);
   }
-  const question = text(raw, 'question', DERIVE_LIMITS.maxQuestionChars, where);
+  const question = line(raw, 'question', DERIVE_LIMITS.maxQuestionChars, where);
   if (isRefusal(question)) return question;
   const options = parseOptions(raw['options'], where);
   if (isRefusal(options)) return options;
@@ -541,7 +565,7 @@ export function withChapterEdges(nodes: readonly DerivedNode[]): DerivedNode[] {
 export function parseOutlineReply(textIn: unknown): Outline | DeriveRefusal {
   const obj = readReplyObject(textIn, 'outline');
   if (isRefusal(obj)) return obj;
-  const title = text(obj, 'title', DERIVE_LIMITS.maxTitleChars, 'the outline');
+  const title = line(obj, 'title', DERIVE_LIMITS.maxTitleChars, 'the outline');
   if (isRefusal(title)) return title;
   const language = obj['language'];
   if (language !== 'javascript' && language !== 'python') {
@@ -608,6 +632,25 @@ export function parseReplanReply(textIn: unknown, language: DeriveLanguage): Rep
 }
 
 /**
+ * Why `content` may not be a derived file, or `null`: the file bounds and the text rules, applied
+ * to the file as it will be written. The state door runs this over a stored file too, so a file
+ * from disk is held to what a reply is held to.
+ */
+export function unsoundCodeText(content: unknown, filePath: string): string | null {
+  if (typeof content !== 'string') return `the code for ${quote(filePath)} is ${describe(content)}, not text`;
+  if (content.trim().length === 0) return `the code for ${quote(filePath)} is empty`;
+  if (content.length > DERIVE_LIMITS.maxFileChars) {
+    return `the code for ${quote(filePath)} is ${content.length} characters, more than ${DERIVE_LIMITS.maxFileChars}`;
+  }
+  if (content.includes('\u0000')) return `the code for ${quote(filePath)} contains a NUL byte`;
+  const lines = content.split('\n').length - (content.endsWith('\n') ? 1 : 0);
+  if (lines > DERIVE_LIMITS.maxFileLines) {
+    return `the code for ${quote(filePath)} is ${lines} lines, more than ${DERIVE_LIMITS.maxFileLines}`;
+  }
+  return null;
+}
+
+/**
  * The code reply: the file's whole text, within the file bounds. Whether it PARSES, and whether
  * every import is one it may make, needs the real grammar and is `engine.ts`'s check over
  * repo-tour's `extract` — a string cannot be judged by a regex the way a tree can.
@@ -615,18 +658,12 @@ export function parseReplanReply(textIn: unknown, language: DeriveLanguage): Rep
 export function parseCodeReply(textIn: unknown, filePath: string): { content: string } | DeriveRefusal {
   const obj = readReplyObject(textIn, `code for ${quote(filePath)}`);
   if (isRefusal(obj)) return obj;
-  const content = obj['content'];
-  if (typeof content !== 'string') return refuse(`the code for ${quote(filePath)} has no "content" (it is ${describe(content)})`);
-  if (content.trim().length === 0) return refuse(`the code for ${quote(filePath)} is empty`);
-  if (content.length > DERIVE_LIMITS.maxFileChars) {
-    return refuse(`the code for ${quote(filePath)} is ${content.length} characters, more than ${DERIVE_LIMITS.maxFileChars}`);
-  }
-  if (content.includes('\u0000')) return refuse(`the code for ${quote(filePath)} contains a NUL byte`);
-  const lines = content.split('\n').length;
-  if (lines > DERIVE_LIMITS.maxFileLines + 1) {
-    return refuse(`the code for ${quote(filePath)} is ${lines} lines, more than ${DERIVE_LIMITS.maxFileLines}`);
-  }
+  const raw = obj['content'];
+  if (typeof raw !== 'string') return refuse(`the code for ${quote(filePath)} has no "content" (it is ${describe(raw)})`);
   // One trailing newline, always: two derivations of the same file must be the same bytes, and a
-  // model that sometimes ends with "\n" and sometimes does not would otherwise differ by one.
-  return { content: `${content.replace(/\s+$/, '')}\n` };
+  // model that sometimes ends with "\n" and sometimes does not would otherwise differ by one. The
+  // bounds are measured after this, on the file that will really be written.
+  const content = raw.trim().length === 0 ? raw : `${raw.replace(/\s+$/, '')}\n`;
+  const unsound = unsoundCodeText(content, filePath);
+  return unsound === null ? { content } : refuse(unsound);
 }

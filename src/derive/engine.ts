@@ -43,11 +43,11 @@ import { askOnce, newTally, type AskTally, type DeriveAskDeps } from './ask.js';
 import { assemblePlan, lineCountOf, stepIdFor, type DeriveCost, type DerivedPlan, type ExtractLike } from './assemble.js';
 import { ancestorsOf, externalDependencies, insertInOrder, keptBy } from './graph.js';
 import {
-  codePrompt, outlinePrompt, parseCodeReply, parseOutlineReply, parseReplanReply, replanPrompt, unsafeDerivedFileReason, validatePlan,
+  codePrompt, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, replanPrompt, unsoundCodeText, validatePlan, withChapterEdges,
   type DecisionForPrompt, type DependencyForPrompt, type ReplanReply, type ShownStep,
 } from './prompt.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
-import { isDeriveRefusal, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
+import { DERIVE_LIMITS, isDeriveRefusal, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
 
 export interface DeriveDeps extends DeriveAskDeps {
   /** repo-tour's `extract`, the same slice the dial's check uses */
@@ -317,11 +317,15 @@ function mergeReplan(
 
 /**
  * The step both entry points share: record `answer` at `decisionPath`; if it changes what that
- * decision shapes, re-plan its downstream (minus the kept set) and rewrite the code it reaches.
- * Works on a COPY of `prev`, which is never modified.
+ * decision shapes, re-plan its downstream (minus the kept set) and, when `writeCodeNow`, rewrite
+ * the code it reaches. Works on a COPY of `prev`, which is never modified.
+ *
+ * `derivePlan` passes `writeCodeNow: false` and writes every file once at the end, as the spec
+ * orders it: nothing about a replan needs code, so writing it per answer only pays for files a
+ * later answer throws away. A walk has no "end" to wait for, so `replanPlan` writes as it goes.
  */
 async function replanCore(
-  prev: DerivationState, decisionPath: string, answer: string, prefix: ReadonlySet<string>, deps: DeriveDeps, tally: AskTally,
+  prev: DerivationState, decisionPath: string, answer: string, prefix: ReadonlySet<string>, deps: DeriveDeps, tally: AskTally, writeCodeNow: boolean,
 ): Promise<DerivationState | DeriveRefusal> {
   const node = prev.nodes.find((n) => n.path === decisionPath);
   if (node === undefined) return refuse(`there is no step at ${JSON.stringify(decisionPath)} in this plan`);
@@ -358,31 +362,96 @@ async function replanCore(
     for (const p of replaced) delete state.files[p];
     for (const n of merged.fresh) if (n.kind === 'file') rewrite.add(n.path);
   }
+  if (!writeCodeNow) return state;
   const wrote = await writeCode(state, rewrite, deps, tally);
   if (wrote !== null) return wrote;
   return state;
 }
 
+/** Why a derivation may not start, or `null`. Checked before anything can be spent. */
+function startRefusal(deps: DeriveDeps): string | null {
+  // An empty model does not mean "the default" further down: `resolveTutorChoice` turns it into
+  // the provider's STRONGEST model, so a caller that passed the raw setting would quietly buy
+  // the expensive one. The caller resolves it, as `src/extension.ts`'s `resolveLlmSettings` does.
+  const model = deps.settings.model as unknown;
+  if (typeof model !== 'string' || model.trim().length === 0) return 'the derivation names no model, so nothing was asked';
+  return null;
+}
+
+function ideaRefusal(idea: unknown): string | null {
+  if (typeof idea !== 'string' || idea.trim().length === 0) return 'there is no idea to plan, so nothing was asked';
+  if (idea.length > DERIVE_LIMITS.maxIdeaChars) {
+    return `the idea is ${idea.length} characters, more than the ${DERIVE_LIMITS.maxIdeaChars} this engine plans from, so nothing was asked`;
+  }
+  return null;
+}
+
+function thrownSentence(err: unknown): string {
+  return err instanceof Error ? err.message.slice(0, 200) : 'unknown error';
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
  * Why a state handed in from OUTSIDE may not be replanned, or `null`. T-22 will keep each version
  * of a `DerivationState` on disk, so a state reaching `replanPlan` is model output re-entering from
- * a file. That makes it a second door exactly as the cache is (T-7), and it gets the same rules
- * the parser applied the first time: the whole-plan rules, the file-path rule for every file
- * step, and no code filed under a path the plan does not have.
+ * a file. That makes it a second door exactly as the cache is (T-7), so it is judged by the FIRST
+ * door's own functions rather than a shorter list of its own: every chapter and step goes back
+ * through the parser, and must come out exactly as it went in, because a stored state can only
+ * hold what the parser produced. Then the whole-plan rules, then the code.
+ *
+ * Total on purpose: anything the parser cannot read is a sentence here, never a throw further on.
  */
 export function unsoundStateReason(state: DerivationState): string | null {
-  if (state.language !== 'javascript' && state.language !== 'python') return 'it names a language this engine does not write';
-  const problem = validatePlan(state.chapters, state.nodes, state.entry);
-  if (problem !== null) return problem.refused;
-  const filePaths = new Set<string>();
-  for (const n of state.nodes) {
-    if (n.kind !== 'file') continue;
-    const unsafe = unsafeDerivedFileReason(n.path, n.chapter, state.language);
-    if (unsafe !== null) return `its step ${JSON.stringify(n.path.slice(0, 60))} ${unsafe}`;
-    filePaths.add(n.path);
+  const s = state as unknown;
+  if (!isPlainRecord(s)) return 'it is not a plan state';
+  const language = s['language'];
+  if (language !== 'javascript' && language !== 'python') return 'it names a language this engine does not write';
+  const idea = ideaRefusal(s['idea']);
+  if (idea !== null) return idea;
+  const title = s['title'];
+  if (typeof title !== 'string' || title.trim().length === 0 || title.length > DERIVE_LIMITS.maxTitleChars) return 'its title is not a title this engine could have written';
+  const { chapters, nodes, files, answers, entry } = s;
+  if (!Array.isArray(chapters) || !Array.isArray(nodes) || !isPlainRecord(files) || !isPlainRecord(answers) || typeof entry !== 'string') {
+    return 'it is missing one of its chapters, steps, files, answers or entry';
   }
-  for (const p of Object.keys(state.files)) {
+  if (chapters.length > DERIVE_LIMITS.maxChapters) return `it has ${chapters.length} chapters, more than ${DERIVE_LIMITS.maxChapters}`;
+  if (nodes.length > DERIVE_LIMITS.maxSteps) return `it has ${nodes.length} steps, more than ${DERIVE_LIMITS.maxSteps}`;
+
+  const parsedChapters: DerivedChapter[] = [];
+  for (const [i, raw] of chapters.entries()) {
+    const parsed = parseChapter(raw, i);
+    if (isDeriveRefusal(parsed)) return parsed.refused;
+    if (JSON.stringify(parsed) !== JSON.stringify(raw)) return `its chapter ${i + 1} is not what the parser would have kept`;
+    parsedChapters.push(parsed);
+  }
+  const parsedNodes: DerivedNode[] = [];
+  for (const [i, raw] of nodes.entries()) {
+    const parsed = parseNode(raw, i, language);
+    if (isDeriveRefusal(parsed)) return parsed.refused;
+    parsedNodes.push(parsed);
+  }
+  // The chapter edge is one the engine owes every file step, so a stored step must already carry it.
+  const edged = withChapterEdges(parsedNodes);
+  for (const [i, n] of edged.entries()) {
+    if (JSON.stringify(n) !== JSON.stringify(nodes[i])) return `its step ${i + 1} is not what the parser would have kept`;
+  }
+  const problem = validatePlan(parsedChapters, edged, entry);
+  if (problem !== null) return problem.refused;
+
+  const filePaths = new Set(edged.filter((n) => n.kind === 'file').map((n) => n.path));
+  for (const [p, content] of Object.entries(files)) {
     if (!filePaths.has(p)) return `it holds code for ${JSON.stringify(p.slice(0, 60))}, which is not one of its file steps`;
+    const unsound = unsoundCodeText(content, p);
+    if (unsound !== null) return unsound;
+  }
+  for (const p of filePaths) {
+    if (typeof files[p] !== 'string') return `it holds no code for ${JSON.stringify(p.slice(0, 60))}, one of its file steps`;
+  }
+  for (const value of Object.values(answers)) {
+    if (typeof value !== 'string') return 'one of its answers is not text';
   }
   return null;
 }
@@ -397,21 +466,27 @@ export async function replanPlan(
 ): Promise<DeriveOutcome> {
   const tally = newTally();
   const fail = (reason: string): DeriveOutcome => ({ ok: false, reason, cost: costOf(tally, deps) });
-  const unsound = unsoundStateReason(prev);
-  if (unsound !== null) return fail(`the plan handed in cannot be replanned: ${unsound}`);
-  const byId = new Map(prev.nodes.map((n) => [stepIdFor(n), n] as const));
-  const node = byId.get(stepId);
-  if (node === undefined) return fail(`there is no step ${JSON.stringify(stepId)} in this plan`);
-  const prefix = new Set<string>();
-  for (const pid of prefixStepIds) {
-    const p = byId.get(pid);
-    if (p !== undefined) prefix.add(p.path);
+  try {
+    const refused = startRefusal(deps);
+    if (refused !== null) return fail(refused);
+    const unsound = unsoundStateReason(prev);
+    if (unsound !== null) return fail(`the plan handed in cannot be replanned: ${unsound}`);
+    const byId = new Map(prev.nodes.map((n) => [stepIdFor(n), n] as const));
+    const node = byId.get(stepId);
+    if (node === undefined) return fail(`there is no step ${JSON.stringify(stepId)} in this plan`);
+    const prefix = new Set<string>();
+    for (const pid of prefixStepIds) {
+      const p = byId.get(pid);
+      if (p !== undefined) prefix.add(p.path);
+    }
+    const next = await replanCore(prev, node.path, answer, prefix, deps, tally, true);
+    if (isDeriveRefusal(next)) return fail(next.refused);
+    const checked = await checkAndWrite(next, deps);
+    if (isDeriveRefusal(checked)) return fail(checked.refused);
+    return finish(next, checked, tally, deps);
+  } catch (err) {
+    return fail(`the replan stopped unexpectedly: ${thrownSentence(err)}`);
   }
-  const next = await replanCore(prev, node.path, answer, prefix, deps, tally);
-  if (isDeriveRefusal(next)) return fail(next.refused);
-  const checked = await checkAndWrite(next, deps);
-  if (isDeriveRefusal(checked)) return fail(checked.refused);
-  return finish(next, checked, tally, deps);
 }
 
 /**
@@ -422,30 +497,45 @@ export async function replanPlan(
 export async function derivePlan(request: DeriveRequest, deps: DeriveDeps): Promise<DeriveOutcome> {
   const tally = newTally();
   const fail = (reason: string): DeriveOutcome => ({ ok: false, reason, cost: costOf(tally, deps) });
+  try {
+    const refused = startRefusal(deps) ?? ideaRefusal(request.idea);
+    if (refused !== null) return fail(refused);
 
-  deps.onProgress?.('laying out the decisions…');
-  const outline = await askOnce(deps, 'derive:outline', outlinePrompt(request.idea), parseOutlineReply, tally);
-  if (isDeriveRefusal(outline)) return fail(outline.refused);
+    deps.onProgress?.('laying out the decisions…');
+    const outline = await askOnce(deps, 'derive:outline', outlinePrompt(request.idea), parseOutlineReply, tally);
+    if (isDeriveRefusal(outline)) return fail(outline.refused);
 
-  let state: DerivationState = {
-    idea: request.idea, title: outline.title, language: outline.language, entry: outline.entry,
-    chapters: outline.chapters, nodes: outline.nodes, files: {}, answers: {},
-  };
-  const wrote = await writeCode(state, new Set(state.nodes.map((n) => n.path)), deps, tally);
-  if (wrote !== null) return fail(wrote.refused);
+    let state: DerivationState = {
+      idea: request.idea, title: outline.title, language: outline.language, entry: outline.entry,
+      chapters: outline.chapters, nodes: outline.nodes, files: {}, answers: {},
+    };
 
-  const answers = request.answers ?? {};
-  for (let i = 0; i < state.nodes.length; i += 1) {
-    const node = state.nodes[i]!;
-    const answer = answers[stepIdFor(node)];
-    if (answer === undefined) continue;
-    const prefix = new Set(state.nodes.slice(0, i).map((n) => n.path));
-    const next = await replanCore(state, node.path, answer, prefix, deps, tally);
-    if (isDeriveRefusal(next)) return fail(next.refused);
-    state = next;
+    const answers = request.answers ?? {};
+    const applied = new Set<string>();
+    for (let i = 0; i < state.nodes.length; i += 1) {
+      const node = state.nodes[i]!;
+      const id = stepIdFor(node);
+      const answer = answers[id];
+      if (answer === undefined) continue;
+      applied.add(id);
+      const prefix = new Set(state.nodes.slice(0, i).map((n) => n.path));
+      const next = await replanCore(state, node.path, answer, prefix, deps, tally, false);
+      if (isDeriveRefusal(next)) return fail(next.refused);
+      state = next;
+    }
+    const stray = Object.keys(answers).filter((id) => !applied.has(id));
+    if (stray.length > 0) {
+      return fail(`${stray.length === 1 ? 'an answer matches' : `${stray.length} answers match`} no step in this plan (${JSON.stringify(stray[0]!.slice(0, 40))}), so nothing was written`);
+    }
+
+    // The code comes last and once, for the decisions that stand (the spec's order).
+    const wrote = await writeCode(state, new Set(state.nodes.map((n) => n.path)), deps, tally);
+    if (wrote !== null) return fail(wrote.refused);
+
+    const checked = await checkAndWrite(state, deps);
+    if (isDeriveRefusal(checked)) return fail(checked.refused);
+    return finish(state, checked, tally, deps);
+  } catch (err) {
+    return fail(`the derivation stopped unexpectedly: ${thrownSentence(err)}`);
   }
-
-  const checked = await checkAndWrite(state, deps);
-  if (isDeriveRefusal(checked)) return fail(checked.refused);
-  return finish(state, checked, tally, deps);
 }

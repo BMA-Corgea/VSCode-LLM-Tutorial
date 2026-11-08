@@ -22,7 +22,7 @@ import { fileShape, isRefusal, planWrite, writeTextAtomic } from '../../src/dial
 import { derivePlan } from '../../src/derive/engine.js';
 import { AskLedger } from '../../src/tutor/ask.js';
 import { tutorCoreFor, type TutorCore } from '../../src/tutor/core.js';
-import { FIXTURE_IDEA, fixtureOutlineText } from './derive-fixtures.js';
+import { FIXTURE_IDEA, fixtureOutlineText, outlineWith, stepsOf } from './derive-fixtures.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
 
@@ -55,12 +55,12 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-async function derived(entryCode = MAIN) {
+async function derived(entryCode = MAIN, outline = fixtureOutlineText()) {
   const run: TutorCore['runLlm'] = (prompt) => {
     const line = prompt.split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
     const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
     const text = input['task'] === 'outline'
-      ? fixtureOutlineText()
+      ? outline
       : JSON.stringify({ content: (input['node'] as Record<string, unknown>)['path'] === 'core/tally.mjs' ? TALLY : entryCode });
     return Promise.resolve({ text, inputTokens: 0, outputTokens: 0, usd: 0, metered: true });
   };
@@ -118,6 +118,20 @@ suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
     assert.ok(!write.content.includes('total([1, 2, 3])'), 'the body — the answer — is hidden');
     assert.match(write.content, /TODO/);
     const stub = path.join(tempDir('derive-smoke-stub-'), 'main.mjs');
+    fs.writeFileSync(stub, write.content);
+    await new Promise<void>((resolve, reject) => {
+      execFile(process.execPath, ['--check', stub], { timeout: 10_000 }, (err, _out, stderr) => (err ? reject(new Error(`the stub does not parse: ${stderr}`)) : resolve()));
+    });
+  });
+
+  test('scaffolded: a line break in a model\'s question cannot become code, and the stub still parses', async () => {
+    const outline = outlineWith((o) => { stepsOf(o)[1]!['question'] = 'How is it kept?\nglobalThis.INJECTED = true;'; });
+    const { plan, referenceRoot, target } = await derived(MAIN, outline);
+    const tally = plan.steps.find((s) => s.target.file === 'core/tally.mjs')!;
+    const write = planWrite(tally, 'scaffolded', referenceRoot, target, plan, dialCore);
+    assert.ok(write !== null && !isRefusal(write), write !== null && isRefusal(write) ? write.refused : 'expected a write');
+    assert.ok(!/^\s*globalThis\.INJECTED/m.test(write.content), `the second line must stay inside the comment:\n${write.content}`);
+    const stub = path.join(tempDir('derive-smoke-stub-'), 'tally.mjs');
     fs.writeFileSync(stub, write.content);
     await new Promise<void>((resolve, reject) => {
       execFile(process.execPath, ['--check', stub], { timeout: 10_000 }, (err, _out, stderr) => (err ? reject(new Error(`the stub does not parse: ${stderr}`)) : resolve()));
