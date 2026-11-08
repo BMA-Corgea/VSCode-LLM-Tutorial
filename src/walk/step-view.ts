@@ -390,6 +390,8 @@ export const CANCEL_BUTTON_LABEL = 'Cancel';
  *  because what it does is delete somebody's own words off their own disk and the verb should
  *  say so. */
 export const CLEAR_BUTTON_LABEL = 'Forget this conversation';
+/** What that button says after one press (T-43, code review F1): it sits on the keyboard route into the box, so one stray key must not delete anybody's words. */
+export const CLEAR_CONFIRM_LABEL = 'Press again to forget it';
 
 /**
  * The two speakers, named on the page rather than distinguished by colour alone.
@@ -672,7 +674,8 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .detour-waiting { color:var(--muted); font-size:12px; }
 .tutor-unreachable { color:var(--muted); font-size:12px; margin:0 0 8px; }
 .tutor-ask { display:flex; flex-direction:column; gap:8px; }
-.tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); color:inherit; resize:vertical; }
+.tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--field-edge); border-radius:var(--radius); background:var(--field-bg); color:var(--ink); resize:vertical; }
+.tutor-input:focus { outline:1px solid var(--focus); outline-offset:-1px; }
 .tutor-input:disabled { opacity:0.6; }
 .tutor-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .tutor-thinking { color:var(--muted); font-size:12px; }
@@ -759,6 +762,15 @@ main, section, .option { min-width:0; }
   border-left:2px solid var(--status-news); padding-left:8px;
 }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
+/* T-43 (F-08): the input background is the theme's, so its text is too. A named skin keeps its own ink. */
+:root:not([data-theme]) .tutor-input { color:var(--vscode-input-foreground, var(--ink)); }
+/* The placeholder is the only place the Enter / Shift+Enter rule is written, and the browser's own
+   grey measured 2.82:1 on Dark Modern's input background (T-43's visual review). */
+:root:not([data-theme]) .tutor-input::placeholder { color:var(--vscode-input-placeholderForeground, var(--muted)); }
+/* T-43 (F-09): the foot of the conversation, away from Ask. */
+.tutor-foot { margin:0 0 12px; }
+/* With Forget gone from the row, the detour button sat flush against Ask. */
+.detour { margin-top:8px; }
 /* F-11: where in the plan this step sits. */
 .step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
 /* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
@@ -1247,14 +1259,15 @@ function tutorHtml(state: StepViewState): string {
   const controls = thinking
     ? `<span class="tutor-thinking" id="tutor-thinking">${escapeHtml(waitingMessage(tutor?.stage))}</span>`
       + `<button type="button" class="btn" id="btn-tutor-cancel">${escapeHtml(CANCEL_BUTTON_LABEL)}</button>`
-    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`
-      + clearButtonHtml(state);
+    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
 
   return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
     + transcriptHtml(state.transcript)
     + note
     + unreachable
     + elsewhereHtml(state)
+    // After the lines about the conversation, so a failed question's reason stays next to it.
+    + (thinking ? '' : clearButtonHtml(state))
     + `<div class="tutor-ask" id="outcome-tutor">${input}<div class="tutor-controls">${controls}</div></div>`
     + spendHtml(tutor?.spend)
     + detourHtml(state)
@@ -1355,7 +1368,9 @@ function detourHtml(state: StepViewState): string {
 function clearButtonHtml(state: StepViewState): string {
   const turns = Array.isArray(state.transcript) ? state.transcript.length : 0;
   if (turns === 0) return '';
-  return `<button type="button" class="btn btn-quiet" id="btn-tutor-clear">${escapeHtml(CLEAR_BUTTON_LABEL)}</button>`;
+  // At the foot of the conversation, not in the row with *Ask* (T-43, F-09): a control that deletes
+  // somebody's own words does not belong beside the one they press most.
+  return `<div class="tutor-foot"><button type="button" class="btn btn-quiet" id="btn-tutor-clear">${escapeHtml(CLEAR_BUTTON_LABEL)}</button></div>`;
 }
 
 /**
@@ -1760,7 +1775,26 @@ const CLIENT_SCRIPT = `
   // The same message from the line about an ask on ANOTHER step: the host's cancel goes
   // through the ledger and stops every live request, so one message is the whole control.
   on('btn-tutor-cancel-elsewhere', 'click', function () { reveal('tutor'); post('tutor:cancel', {}); });
-  on('btn-tutor-clear', 'click', function () { reveal('tutor'); post('tutor:clear', {}); });
+  // T-43 (code review F1): this button is now on the keyboard route into the box, and it deletes
+  // somebody's own words with no way back. So the first press asks, by changing what the button
+  // says, and the second does it; leaving the button takes the question back.
+  var forgetArmed = false;
+  on('btn-tutor-clear', 'click', function () {
+    var button = document.getElementById('btn-tutor-clear');
+    if (!forgetArmed) {
+      forgetArmed = true;
+      if (button) { button.textContent = ${JSON.stringify(CLEAR_CONFIRM_LABEL)}; }
+      return;
+    }
+    forgetArmed = false;
+    reveal('tutor');
+    post('tutor:clear', {});
+  });
+  on('btn-tutor-clear', 'blur', function () {
+    forgetArmed = false;
+    var button = document.getElementById('btn-tutor-clear');
+    if (button) { button.textContent = ${JSON.stringify(CLEAR_BUTTON_LABEL)}; }
+  });
 
   // ── T-7: the detour ───────────────────────────────────────────────────────────────────
 
