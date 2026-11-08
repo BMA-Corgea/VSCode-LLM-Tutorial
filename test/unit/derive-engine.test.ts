@@ -371,6 +371,30 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.equal(out.state.files['core/tally.mjs'], OBJECT_TALLY, 'the code follows the answer');
   });
 
+  test('the worst press, thirty steps each answered against the recommendation, stays inside the budget', async function () {
+    this.timeout(60_000);
+    const files = Array.from({ length: DERIVE_LIMITS.maxSteps - 1 }, (_, i) => `core/f${i}.mjs`);
+    const options = [{ id: 'a', label: 'A', consequence: 'x' }, { id: 'b', label: 'B', consequence: 'y' }];
+    const steps = [
+      { kind: 'shape' as const, chapter: 'core', path: 'core', question: 'shape?', options, recommended: 'a', why: 'w', dependsOn: [] as string[] },
+      ...files.map((p, i) => ({ kind: 'file' as const, chapter: 'core', path: p, question: `${p}?`, options, recommended: 'a', why: 'w', dependsOn: ['core', ...files.slice(0, i)] })),
+    ];
+    const outline = JSON.stringify({ title: 'Big', language: 'javascript', entry: files[files.length - 1], chapters: [{ key: 'core', title: 'Core', subtitle: 'all of it' }], steps });
+    // A model that re-emits the same decisions, so every step keeps its id and every answer still applies.
+    const reEmit = (input: Record<string, unknown>): unknown => ({
+      steps: (input['replacing'] as Array<{ kind: string; chapter: string; path: string; question: string; options: unknown[]; why: string; dependsOn: string[] }>)
+        .map((r) => ({ kind: r.kind, chapter: r.chapter, path: r.path, question: r.question, options: r.options, recommended: 'a', why: r.why, dependsOn: r.dependsOn })),
+    });
+    const answers = Object.fromEntries(steps.map((st) => [stepIdFor(st), 'b']));
+    const model = fakeModel({}, reEmit, outline);
+    const d = deps(model.run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-'));
+    const out = await derivePlan({ idea: FIXTURE_IDEA, answers }, d);
+    if (!out.ok) assert.fail(out.reason);
+    assert.ok(model.asked.filter((a) => a.task === 'replan').length >= steps.length - 2, 'every answer really did re-plan what it reaches');
+    assert.ok(out.plan.cost.calls <= DERIVE_LIMITS.maxCallsPerPress, `${out.plan.cost.calls} questions, more than the ${DERIVE_LIMITS.maxCallsPerPress} one press may ask`);
+    assert.equal(out.plan.cost.calls, d.ledger.spend().replies, 'the ledger counted the same calls the plan reports');
+  });
+
   test('an answer for a step this plan does not have is refused, never silently dropped', async () => {
     const model = fakeModel();
     const out = await derivePlan({ idea: FIXTURE_IDEA, answers: { deadbeefdeadbeef: 'x' } }, deps(model.run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
