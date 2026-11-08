@@ -120,6 +120,16 @@ function withoutPosition(step: StepLike): Record<string, unknown> {
   return Object.fromEntries(Object.entries(step).filter(([key]) => key !== 'ordinal'));
 }
 
+/**
+ * What a step itself decides and builds, for "did this step respond?". Not its position, not its
+ * `id` (a hash of the decision), and not `dependsOn`, whose ids change as a side effect the moment
+ * something it depends on is re-derived: a step nobody re-derived must not pass for one that was
+ * (a one-hop re-derivation did, until this: the step after the direct dependent inherited a new id).
+ */
+function whatItDecides(step: StepLike): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(step).filter(([key]) => key !== 'ordinal' && key !== 'id' && key !== 'dependsOn'));
+}
+
 function checkPrecondition(first: Finished, second: Finished): Clause {
   for (const step of first.plan.steps) {
     const other = stepFor(second.plan, step.target.file);
@@ -142,7 +152,7 @@ function checkDownstream(a: Finished, b: Finished, decision: StepLike, downstrea
   for (const step of downstream) {
     const counterpart = stepFor(b.plan, step.target.file);
     if (counterpart === undefined) continue; // gone is a difference
-    if (same(withoutPosition(step), withoutPosition(counterpart)) && bytesOf(a, step.target.file) === bytesOf(b, step.target.file)) {
+    if (same(whatItDecides(step), whatItDecides(counterpart)) && bytesOf(a, step.target.file) === bytesOf(b, step.target.file)) {
       return fail(`${step.target.file} is downstream of ${decision.target.file} and did not change`);
     }
   }

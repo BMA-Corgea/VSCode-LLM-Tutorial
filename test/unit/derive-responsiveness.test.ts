@@ -246,6 +246,29 @@ suite('the harness can fail: three mutant derivations (T-19 AC6)', function () {
   });
 });
 
+suite('what counts as a step having responded (T-19)', () => {
+  test('a step whose only change is the id of something it depends on was not re-derived', async () => {
+    // What a one-hop re-derivation leaves behind: `direct` was re-derived and got a new id, and
+    // `after` depends on it, so `after`'s record differs without `after` having been touched.
+    const derive: Derivation = (request) => {
+      const answer = request.answers?.['d'] ?? null;
+      const direct = `direct-${String(answer)}`;
+      const plan = planOf(
+        { ...step('d'), decision: { chosen: answer } },
+        { ...step(direct, ['d']), target: { file: 'direct' }, decision: { chosen: answer } },
+        { ...step('after', [direct]) },
+        step('elsewhere'),
+      );
+      return Promise.resolve({ ok: true, plan, files: [] });
+    };
+    const verdict = judged(await judgeResponsiveness(derive, { idea: 'x', decision: 'd', answers: ['a', 'b'] }));
+    assert.equal(verdict.precondition.status, 'pass', verdict.precondition.why);
+    assert.equal(verdict.independent.status, 'pass', verdict.independent.why);
+    assert.equal(verdict.downstream.status, 'fail', 'a step nobody re-derived passed for one that was');
+    assert.match(verdict.downstream.why, /^after is downstream of d and did not change/);
+  });
+});
+
 suite('"cannot judge" is its own outcome, and is never a pass (T-19 AC5)', function () {
   this.timeout(60_000);
 
