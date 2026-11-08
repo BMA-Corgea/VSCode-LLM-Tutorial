@@ -50,6 +50,12 @@ export interface BuildRequest {
    * lack it could only have been a local path.
    */
   referenceRoot?: string;
+  /**
+   * The tree of files a divergence re-derived (T-22), under the extension's own storage. Absent
+   * until the learner first takes a different road. `loadRequest` believes it only when it proves
+   * to be inside that store: this file sits in the learner's folder and can say anything.
+   */
+  derivedRoot?: string;
 }
 
 export function emptyRequest(): BuildRequest {

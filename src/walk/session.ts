@@ -172,6 +172,7 @@
 
 import type { GitRunner } from '../start/build.js';
 import type { Dial } from '../start/request.js';
+import { referenceRootFor, repositoryRootOf } from './reference.js';
 import type { ResolvedRequest } from './store.js';
 import { commitStep, ensureTranscriptIgnored, type CommitResult } from '../dial/commit.js';
 import type { DialCore } from '../dial/core.js';
@@ -844,6 +845,11 @@ export class WalkSession {
     this.refuseChoice(stepId, CHOICE_STALE_PAGE);
   }
 
+  /** Where this step's file is read from (`./reference.ts`), or `undefined` with no reference at all. */
+  private referenceRootOf(step: StepLike): string | undefined {
+    return this.request === null ? undefined : referenceRootFor(this.request, step.target.file);
+  }
+
   /** Records and pushes a refusal, counting it when it repeats the last one (see `choiceRefusalText`). Writes nothing to disk. */
   private refuseChoice(stepId: string, reason: string): void {
     const last = this.choiceRefusal;
@@ -1117,7 +1123,7 @@ export class WalkSession {
       // it the way `tutorContext` does for `AskContext.repo`, so the tutor and the detour name
       // the learner's project identically — and the raw `repo` field, which can be a URL with
       // a token in it, never leaves this machine.
-      await detour.start(step, this.plan, this.request?.referenceRoot);
+      await detour.start(step, this.plan, this.referenceRootOf(step));
       if (this.disposed) return;
       this.refresh(false);
     });
@@ -1149,7 +1155,7 @@ export class WalkSession {
         this.refresh(false);
         return;
       }
-      await detour.start(step, this.plan, this.request?.referenceRoot, { fresh: true });
+      await detour.start(step, this.plan, this.referenceRootOf(step), { fresh: true });
       if (this.disposed) return;
       this.refresh(false);
     });
@@ -1389,7 +1395,7 @@ export class WalkSession {
     // reference — the author's file, and the diff of the learner's against it. Asking without
     // it would spend the learner's money on a question with half its context missing. The same
     // answer `applyCheck` gives for the same folder, in the same words.
-    const refRoot = this.request?.referenceRoot;
+    const refRoot = this.referenceRootOf(step);
     if (refRoot === undefined) {
       refuse('This tutorial has no reference repository recorded, so there is nothing for the tutor to read. Nothing was asked, and your question is still in the box.');
       return;
@@ -1792,7 +1798,7 @@ export class WalkSession {
     if (request === null) return;
     // `referenceRoot`, never `repo`: for a GitHub-URL build those differ, and `repo` is only
     // what the learner typed. `loadRequest` has already resolved and stat'd this one.
-    const refRoot = request.referenceRoot;
+    const refRoot = referenceRootFor(request, step.target.file);
 
     const dial = stepDial(this.progress, stepId, request.dial);
 
@@ -1991,7 +1997,7 @@ export class WalkSession {
     const step = this.plan.steps.find((s) => s.id === stepId);
     if (!step) return;
 
-    const refRoot = this.request?.referenceRoot;
+    const refRoot = this.referenceRootOf(step);
     if (refRoot === undefined) {
       this.noteFor(stepId, 'This tutorial has no reference repository recorded, so there is nothing to check against.');
       return;
@@ -2161,7 +2167,7 @@ export class WalkSession {
    */
   private reproduceInto(mayReplace: boolean): { copied: boolean; note?: string } {
     if (this.progress.reproduced !== undefined) return { copied: false };
-    const refRoot = this.request?.referenceRoot;
+    const refRoot = this.request === null ? undefined : repositoryRootOf(this.request);
     // `deliverableEntries`, not `reproduceEntries` (T-12 review finding 1). The question here is
     // "what will land", and a withheld entry never lands — so counting it made the overwrite
     // prompt fire for a file that would never be written (blocking the whole copy on the first

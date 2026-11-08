@@ -31,6 +31,7 @@ import { resolveInsideTarget } from './walk/paths.js';
 import { WalkSession, type WalkAdapters } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
+import { DERIVED_TREES_DIR } from './derive/storage.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
 import { tutorCoreFor, type TutorCore } from './tutor/core.js';
@@ -405,7 +406,8 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     fileExists: (absPath) => isOpenableFile(target, absPath),
     loadPlan,
     loadProgress,
-    loadRequest,
+    // The store a `derivedRoot` has to prove itself inside: the folder is the extension's to know.
+    loadRequest: (t) => loadRequest(t, path.join(context.globalStorageUri.fsPath, DERIVED_TREES_DIR)),
     saveProgress,
 
     // ── T-5: what the dial needs from the outside world ──────────────────────────────────

@@ -162,7 +162,27 @@ function requestPath(target: string): string {
  */
 export type ResolvedRequest = BuildRequest & { referenceRoot: string };
 
-export function loadRequest(target: string): ResolvedRequest | null {
+/**
+ * `derivedRoot`, proved: a real folder strictly inside the extension's own store of derived trees,
+ * after following every link, or `undefined`. `request.json` is in the learner's folder, and a
+ * tampered one must not be able to point the walk at something it would then read and show.
+ */
+function provenDerivedRoot(raw: unknown, store: string | undefined): string | undefined {
+  if (typeof raw !== 'string' || store === undefined) return undefined;
+  try {
+    const real = fs.realpathSync(raw);
+    if (!real.startsWith(fs.realpathSync(store) + path.sep)) return undefined;
+    return fs.statSync(real).isDirectory() ? real : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function derived(root: string | undefined): { derivedRoot?: string } {
+  return root === undefined ? {} : { derivedRoot: root };
+}
+
+export function loadRequest(target: string, derivedStore?: string): ResolvedRequest | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(requestPath(target), 'utf8'));
@@ -199,6 +219,7 @@ export function loadRequest(target: string): ResolvedRequest | null {
     repo,
     referenceRoot,
     target: typeof parsed['target'] === 'string' ? parsed['target'] : target,
+    ...derived(provenDerivedRoot(parsed['derivedRoot'], derivedStore)),
     // An unrecognised dial is the global default, never a guess: a value outside `DIALS`
     // means the file was hand-edited or written by a future version, and "manual" is the
     // only fallback that cannot overstate what has happened to the learner's files.
