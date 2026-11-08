@@ -96,7 +96,7 @@ export type DeriveOutcome =
 /** What the plan's `cost.model` says when no model ran: the cache holds answers, not who gave them. */
 const ALL_FROM_CACHE = 'none: every answer came from the cache';
 
-function costOf(tally: AskTally, deps: DeriveDeps): DeriveCost {
+export function costOf(tally: AskTally, deps: Pick<DeriveDeps, 'settings'>): DeriveCost {
   const fromCacheOnly = tally.calls === 0 && tally.cachedStops > 0;
   return {
     provider: fromCacheOnly ? 'none' : deps.settings.provider,
@@ -553,7 +553,7 @@ function ideaRefusal(idea: unknown): string | null {
   return null;
 }
 
-function thrownSentence(err: unknown): string {
+export function thrownSentence(err: unknown): string {
   return err instanceof Error ? err.message.slice(0, 200) : 'unknown error';
 }
 

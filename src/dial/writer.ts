@@ -390,7 +390,7 @@ type ReferenceRead = { text: string } | WriteRefusal;
  * as untrusted as the destination end) and proven to survive the UTF-8 round trip, so every
  * caller below can treat `text` as "exactly these bytes, decoded".
  */
-function readReference(refRoot: string, file: string): ReferenceRead {
+export function readReference(refRoot: string, file: string): ReferenceRead {
   const abs = resolveInsideTarget(refRoot, file);
   if (abs === null) {
     return { refused: `${label(file)} points outside the reference repository, so there is nothing to copy from` };

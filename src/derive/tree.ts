@@ -148,9 +148,10 @@ export function writeReferenceTree(
   target: string,
   title: string,
   files: readonly DerivedFile[],
+  maxFiles: number = DERIVE_LIMITS.maxSteps,
 ): ReferenceTree | DeriveRefusal {
   if (files.length === 0) return refuse('there are no files to write');
-  if (files.length > DERIVE_LIMITS.maxSteps) return refuse(`there are ${files.length} files, more than ${DERIVE_LIMITS.maxSteps}`);
+  if (files.length > maxFiles) return refuse(`there are ${files.length} files, more than ${maxFiles}`);
   const folded = new Set<string>();
   for (const f of files) {
     const unsafe = unsafeRelativePathReason(f.path, {
