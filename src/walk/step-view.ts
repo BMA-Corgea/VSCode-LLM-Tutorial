@@ -8,26 +8,25 @@
  * `handleStepMessage`, so the message SHAPES this script posts and the shapes the host parses
  * live in one place and cannot drift apart.
  *
- * **Recreate mode only, and this page is where that shows up.** The ticket's own spec is
- * explicit: the panel shows alternatives but does not let the learner pick one (T-10). That
- * is stronger than "the control is disabled" — for every option that is not what the author
- * actually did, there is NO `<button>` and NO `<input>` in the markup at all, only `<ul>`/
- * `<li>`/`<span>`/`<p>`. A disabled control can always be a bug away from becoming enabled by
- * accident; a control that was never rendered cannot. The author's own choice gets a "What
- * the author did" badge instead of a "coming with T-10" one, and nets no interactive markup
- * either, since nothing on this page is selectable yet.
+ * **The options list is where the learner takes a road (T-21).** The road this step is on is
+ * the highlighted row; every other option that a press could name has a real *Choose this
+ * instead* button, and the road the step is already on has none. A press records the learner's
+ * choice beside the plan, and until the replan (T-22) exists the list says in one line that the
+ * rest of the walk has not changed. A step with one option offers nothing — nothing to choose is
+ * not drawn as a dead control. What is drawn, and what a press may name, is `optionsTable`'s
+ * answer (`./model.ts`), the same one the session accepts by, so a control can never promise what
+ * the host would refuse.
  *
  * **Which option IS the author's** is read from `option.taken` FIRST and from `option.id ===
  * decision.authorChoice` as a fallback (T-4 code review, finding 6). repo-tour's own builder
  * keeps the two in agreement — the real 61-step sql-gauntlet plan carries exactly one `taken`
  * on every step — which is why reading only `taken` looked sufficient, and is exactly the trap:
  * a plan from an older builder, a hand-edited one, or one half-migrated by a future schema can
- * carry `authorChoice: 'author'` with no `taken` anywhere. Nothing would then be marked, EVERY
- * option would wear a "coming with T-10" badge, and AC2 ("the author's choice marked among the
- * options") would be silently unmet on a page that still looked perfectly fine. Do not
- * "simplify" the fallback away. It is resolved ONCE, to a single index, rather than tested per
- * option: two options can only both light up if the question is asked twice, and "the author
- * did two of these" is never a true sentence.
+ * carry `authorChoice: 'author'` with no `taken` anywhere. Nothing would then be marked, and AC2
+ * ("the author's choice marked among the options") would be silently unmet on a page that still
+ * looked perfectly fine. Do not "simplify" the fallback away. It is resolved ONCE, to a single
+ * index, rather than tested per option: two options can only both light up if the question is
+ * asked twice, and "the author did two of these" is never a true sentence.
  *
  * **Why's source label** is a fixed three-line map, not repo-tour's own `why` text: the ticket
  * pins the exact wording (`interpret` → "from the model, reading the code", `docstring` →
@@ -176,8 +175,10 @@ import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
 import { renderPage } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
-import { FALLBACK_DIAL, type OptionLike, type StepLike, type WhySource } from './model.js';
+import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, optionsTable, type OptionLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
+
+export { MAX_OPTIONS_RENDERED };
 
 /** What `TutorView.spend` looks like once it has reached the page — named here so the two
  *  functions that read it (`spendHtml` and `stepRenderKey`) share one shape rather than each
@@ -239,27 +240,20 @@ const DIAL_LABEL: Record<Dial, string> = {
 /** Exported for the same reason `CHECK_NOTE` and `IDEA_FIRST_MESSAGE` are: a test should
  *  assert the string this page actually uses, never a copy of it that can drift. */
 export const AUTHOR_BADGE = 'What the author did';
-export const T10_BADGE = 'coming with T-10';
+/** T-21: the learner's own road, once it differs from the author's. */
+export const CHOSEN_BADGE = 'Your choice';
+/** T-21: the control on every option that is not the road this step is on. */
+export const CHOOSE_LABEL = 'Choose this instead';
+/** T-21: the line that says a choice has changed nothing else yet (T-22 is the replan). */
+export const DIVERGED_NOTE = 'You chose a different road. The rest of the walk still follows the author \u2014 re-planning from your choice isn\u2019t built yet.';
 
 // ── the render caps (T-4 security review, finding 3) ───────────────────────────────────────
 // See the file header for the threat: `webview.html = ...` is synchronous on the extension
 // host, every string here is third-party, repo-tour caps almost none of it, and this is the
 // one path Workspace Trust does not gate. Both numbers are picked to sit far above anything a
 // real plan has ever produced, so neither can plausibly cut a learner off mid-sentence, and
-// far below anything that could make one render take meaningful time.
-
-/**
- * How many options this panel will draw for one step.
- *
- * Measured, not guessed. A plan built with no interpretation gives every step exactly ONE
- * option ("What the author did") — that is all 61 steps of the real sql-gauntlet plan. A fully
- * interpreted step gives THREE: the author's own, plus the "exactly two OTHER reasonable ways"
- * repo-tour's interpreter prompt asks for by name. Nothing repo-tour can legitimately produce
- * goes past three, so 24 leaves eight times the headroom a real plan needs — while a hostile
- * `alternatives` array (repo-tour's `parseAlternatives` keeps every entry the model emitted,
- * unbounded) stops here instead of at ten thousand `<li>`s.
- */
-export const MAX_OPTIONS_RENDERED = 24;
+// far below anything that could make one render take meaningful time. `MAX_OPTIONS_RENDERED`
+// lives in `./model.ts` beside `optionsTable`, the one place that applies it.
 
 /**
  * How many characters of any one plan-sourced string this panel will draw.
@@ -598,8 +592,13 @@ section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; col
 .option-label { display:block; font-weight:600; }
 .option-consequence { margin:4px 0 0; color:var(--muted); }
 .badge { display:inline-block; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; padding:2px 8px; border-radius:999px; margin-bottom:6px; }
-.badge-taken { background:var(--accent-soft); color:var(--accent); }
-.badge-t10 { background:var(--chip); color:var(--muted); }
+.badge-taken, .badge-chosen { background:var(--accent-soft); color:var(--accent); }
+.option-choose { margin-top:8px; }
+/* T-21: what the last press did, above the rows so a page that has just been drawn shows it
+   without a scroll. The refusal takes the note colour, like the write note: it is news. */
+.options-outcome { margin:0 0 10px; }
+.options-refused { color:var(--kw); font-size:12px; margin:0 0 6px; }
+.options-diverged { font-size:12px; margin:0; }
 .why-text { margin:0 0 4px; }
 .why-source, .witness-text { color:var(--muted); font-size:12px; margin:0; }
 /* The honest count under a capped options list — see MAX_OPTIONS_RENDERED. Styled like the
@@ -696,7 +695,8 @@ main, section, .option { min-width:0; }
 .step-head h1, .option-label, .option-consequence, .why-text, .why-source, .witness-text,
 .note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
 .write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty,
-.tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint { overflow-wrap:anywhere; }
+.tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint,
+.options-refused, .options-diverged { overflow-wrap:anywhere; }
 
 /* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
    title and the skin picker stop competing for one line and 48px of horizontal padding
@@ -713,7 +713,7 @@ main, section, .option { min-width:0; }
    colour, and muted text on it measured 4.09:1 in Dark Modern. Inside the highlight, the
    consequence takes the full ink colour; the badge, border and background still set the taken
    option apart from the others. Unscoped on purpose: in a named skin, ink on the highlight is
-   only ever more contrast. Coupled to the option markup's class names (T-21 rewrites it). */
+   only ever more contrast. Coupled to the option markup's class names. */
 .option-taken .option-consequence { color:var(--ink); }
 /* F-02: status roles. Under System, --kw and --str resolve to symbolIcon colours that every
    default theme sets to plain foreground, so a pass, a fail and every "news" line rendered as
@@ -737,7 +737,8 @@ main, section, .option { min-width:0; }
 /* :not(:empty) because the open-file hint is always on the page, empty when the file exists,
    and an empty line must not grow a stray mark. */
 .hint:not(:empty), .write-note:not(:empty), .tutor-note:not(:empty), .detour-note:not(:empty),
-.detour-open:not(:empty), .tutor-elsewhere:not(:empty), .tutor-spend:not(:empty) {
+.detour-open:not(:empty), .tutor-elsewhere:not(:empty), .tutor-spend:not(:empty),
+.options-refused:not(:empty), .options-diverged:not(:empty) {
   border-left:2px solid var(--status-news); padding-left:8px;
 }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
@@ -748,69 +749,62 @@ main, section, .option { min-width:0; }
 `;
 
 /**
- * Every option that is not what the author did: plain text/list markup, a "coming with T-10"
- * badge, and — deliberately — no `<button>`, no `<input>`, nothing in the DOM to select. The
- * author's own choice gets a distinct badge instead and no interactive markup either, since
- * nothing on this page is selectable yet (recreate mode; see the file header).
+ * The options, as a list the learner can act on (T-21): the road this step is on highlighted, a
+ * *Choose this instead* on every other road a press could name, and above them what the last press
+ * did: a press can come from any row, and the words have one place the client script can always
+ * bring into view (`outcome-choice`), including on a page drawn for a different step (see the
+ * stale-press reveal in `CLIENT_SCRIPT`).
  *
- * Three review fixes live in this one function, and each is load-bearing:
+ * Three review fixes still live here, and each is load-bearing:
  *
- *   - **`authorChoice` is a fallback for `taken`** (code review, finding 6). Resolved to ONE
- *     index before anything is drawn, so a plan cannot mark two options, and so a plan with
- *     `authorChoice` set but no `taken` anywhere still satisfies AC2 instead of badging every
- *     option "coming with T-10" and marking none.
- *   - **The list is capped** at `MAX_OPTIONS_RENDERED` (security, finding 3) — and the count
- *     of what is NOT drawn is printed under it. Never delete that line to tidy the markup:
- *     the cap is only defensible because the page admits to it.
- *   - **Nothing here trusts a field's declared type.** `opt.label.trim()` threw on a plan
- *     whose label was not a string, in a render nobody was listening to (security, finding 5).
+ *   - **The rows, the marked road and every control come from `optionsTable`** (T-4 code review,
+ *     finding 6; T-21's reviews). Resolved once, so a plan cannot mark two options, and so the
+ *     page never offers what the session would refuse.
+ *   - **The list is capped** at `MAX_OPTIONS_RENDERED` (security, finding 3) — and the count of
+ *     what is NOT drawn is printed under it. Never delete that line to tidy the markup: the cap is
+ *     only defensible because the page admits to it.
+ *   - **Nothing here trusts a field's declared type.** `opt.label.trim()` threw on a plan whose
+ *     label was not a string, in a render nobody was listening to (security, finding 5).
  *     `planText`/`planId` make every read total.
  */
-function optionsHtml(options: OptionLike[], authorChoice: unknown): string {
-  const all = Array.isArray(options) ? options : [];
+function optionsHtml(step: StepLike, choiceNote: unknown): string {
+  const table = optionsTable(step);
 
-  // `taken` first — it is what every real plan carries, and what a learner's own future
-  // choice (T-10) will set. `authorChoice` only answers when `taken` answers nothing at all.
-  const takenIndex = all.findIndex((opt) => opt?.taken === true);
-  const choice = planId(authorChoice);
-  const authorIndex = takenIndex !== -1
-    ? takenIndex
-    : (choice === '' ? -1 : all.findIndex((opt) => planId(opt?.id) === choice));
-
-  // AC2 outranks the cap. If a hostile plan buries the author's own option behind five
-  // thousand alternatives, the option that AC2 requires to be marked takes the window's last
-  // slot rather than being one of the ones dropped — a capped page that showed no marked
-  // choice would be a page that met the security fix by breaking the acceptance criterion.
-  const shown = all.slice(0, MAX_OPTIONS_RENDERED);
-  let markedIndex = authorIndex;
-  if (authorIndex >= MAX_OPTIONS_RENDERED) {
-    shown[MAX_OPTIONS_RENDERED - 1] = all[authorIndex]!;
-    markedIndex = MAX_OPTIONS_RENDERED - 1;
-  }
-  const omitted = all.length - shown.length;
-
-  const items = shown
+  const items = table.rows
     .map((opt, i) => {
-      const isAuthors = i === markedIndex;
-      const cls = isAuthors ? 'option option-taken' : 'option option-alt';
+      const isAuthors = i === table.author;
+      const isOn = i === table.on;
+      const cls = isOn ? 'option option-taken' : 'option option-alt';
       const label = planText(opt?.label);
+      const id = planId(opt?.id);
       // The badge is suppressed when it would only repeat the option's own label. That is
       // not a rare tidy-up: a plan built with no interpretation gives every step exactly one
       // option, labelled "What the author did" by repo-tour itself, so the badge said it
       // twice in a row on all 61 steps of the first real plan we rendered. The author's
       // choice is still marked — `.option-taken` carries the accent border and highlight —
       // and the badge comes back the moment a plan has options whose labels differ.
-      const badge = isAuthors
-        ? (label.trim().toLowerCase() === AUTHOR_BADGE.toLowerCase() ? '' : `<span class="badge badge-taken">${AUTHOR_BADGE}</span>`)
-        : `<span class="badge badge-t10">${T10_BADGE}</span>`;
-      return `<li class="${cls}" data-option-id="${escapeAttr(planId(opt?.id))}">${badge}<span class="option-label">${escapeHtml(label)}</span><p class="option-consequence">${escapeHtml(planText(opt?.consequence))}</p></li>`;
+      const authorBadge = isAuthors && label.trim().toLowerCase() !== AUTHOR_BADGE.toLowerCase()
+        ? `<span class="badge badge-taken">${AUTHOR_BADGE}</span>`
+        : '';
+      const chosenBadge = isOn && table.diverged ? `<span class="badge badge-chosen">${CHOSEN_BADGE}</span>` : '';
+      const choose = table.choosable[i] === true
+        ? `<button type="button" class="btn option-choose" id="choose-${i}" data-option-id="${escapeAttr(id)}">${CHOOSE_LABEL}</button>`
+        : '';
+      return `<li class="${cls}" data-option-id="${escapeAttr(id)}">${authorBadge}${chosenBadge}<span class="option-label">${escapeHtml(label)}</span><p class="option-consequence">${escapeHtml(planText(opt?.consequence))}</p>${choose}</li>`;
     })
     .join('');
 
-  const omittedNote = omitted > 0
-    ? `<p class="options-omitted">${escapeHtml(optionsOmittedMessage(omitted))}</p>`
+  const omittedNote = table.omitted > 0
+    ? `<p class="options-omitted">${escapeHtml(optionsOmittedMessage(table.omitted))}</p>`
     : '';
-  return `<ul class="options">${items}</ul>${omittedNote}`;
+  const refusedNote = typeof choiceNote === 'string' && choiceNote !== ''
+    ? `<p class="options-refused" id="choice-note" role="note">${escapeHtml(planText(choiceNote))}</p>`
+    : '';
+  const divergedNote = table.diverged ? `<p class="options-diverged" role="note">${escapeHtml(DIVERGED_NOTE)}</p>` : '';
+  const outcome = refusedNote !== '' || divergedNote !== ''
+    ? `<div class="options-outcome" id="outcome-choice">${refusedNote}${divergedNote}</div>`
+    : '';
+  return `${outcome}<ul class="options">${items}</ul>${omittedNote}`;
 }
 
 /** `NO_HISTORY_MESSAGE`, verbatim, when there is nothing to show — gated on `sha`, matching
@@ -1473,7 +1467,7 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
 
   <section>
     <h2>Options</h2>
-    ${optionsHtml(step.decision.options, step.decision.authorChoice)}
+    ${optionsHtml(step, state.choiceNote)}
   </section>
 
   <section>
@@ -1539,13 +1533,13 @@ const CLIENT_SCRIPT = `
   // authoritative for everything else (spec §5.1).
   var savedNote = '';
   var savedDraft = '';
-  // T-16 (F-01): every press re-renders this whole page, which starts at the top, so the result
-  // of a press below the fold (the check report, the tutor, the detour line) used to arrive
-  // out of sight. Two values ride in the same saved blob as the draft, and only when set:
+  // T-16 (F-01): every press re-renders this whole page, so the result of a press below the
+  // fold (the check report, the tutor, the detour line) used to arrive out of sight. Two
+  // values ride in the same saved blob as the draft, and only when set:
   // y, where the learner was on THIS step, and reveal, the one outcome the last press asked
   // to see. reveal is checked against a fixed list and is only ever used to find an element
   // by id; it never reaches markup.
-  var REVEALS = ['check', 'tutor', 'detour'];
+  var REVEALS = ['check', 'tutor', 'detour', 'choice'];
   // A reveal is honoured only by a repaint within this long of its press. A press the host
   // answers with no repaint and no note (a second identical check) must not leave a reveal
   // armed for some unrelated repaint much later (code review 2).
@@ -1557,9 +1551,23 @@ const CLIENT_SCRIPT = `
   var initial = restore();
   // The blob is ONE per view, written for one step. This page owns it when it was written for
   // this step, or once the learner does something here. Until then a scroll on this page keeps
-  // y in memory only, so visiting another step and scrolling there cannot erase the draft left
-  // on the previous one (code review 3).
+  // y in memory only (code review 3). A press does take the blob over, so the question left half
+  // typed on another step rides along in \`drafts\`, by step, and comes back when that step does
+  // (T-21 re-review F2): a press on one step must not cost the learner their words on another.
   var owns = !!(initial && initial.stepId === stepId);
+  var otherDrafts = Object.create(null);
+  if (initial && typeof initial.drafts === 'object' && initial.drafts !== null) {
+    Object.keys(initial.drafts).forEach(function (key) {
+      if (typeof initial.drafts[key] === 'string') { otherDrafts[key] = initial.drafts[key]; }
+    });
+  }
+  if (initial && typeof initial.stepId === 'string' && initial.stepId !== stepId && typeof initial.draft === 'string' && initial.draft !== '') {
+    otherDrafts[initial.stepId] = initial.draft;
+  }
+  if (typeof otherDrafts[stepId] === 'string') {
+    savedDraft = otherDrafts[stepId];
+    delete otherDrafts[stepId];
+  }
   if (initial && initial.stepId === stepId) {
     if (typeof initial.note === 'string') { savedNote = initial.note; }
     if (typeof initial.draft === 'string') { savedDraft = initial.draft; }
@@ -1579,6 +1587,7 @@ const CLIENT_SCRIPT = `
     // within the scroll debounce still saves where the learner really is (code review 7).
     if (restored && typeof window.scrollY === 'number') { savedY = window.scrollY > 0 ? Math.round(window.scrollY) : 0; }
     var blob = { stepId: stepId, note: savedNote, draft: savedDraft };
+    if (Object.keys(otherDrafts).length > 0) { blob.drafts = otherDrafts; }
     if (savedY > 0) { blob.y = savedY; }
     if (revealKey) { blob.reveal = revealKey; blob.revealAt = revealAt; }
     save(blob);
@@ -1628,6 +1637,19 @@ const CLIENT_SCRIPT = `
     revealKey = '';
     persist();
   }
+  // T-21 re-review F1: a press from a page for a step already left is answered on the page drawn
+  // for the step the learner is on, and the old page's reveal is keyed to the old step, so this is
+  // the page that has to bring the words into view. VS Code then puts the OLD page's scroll
+  // position on a new page at its load, but only a page still at 0 (\`setInitialScrollPosition\` in
+  // its webview pre/index.html), which is why 1 px matters: words already in view stay in view.
+  var choiceWords = document.getElementById('choice-note');
+  if (choiceWords && !(initial && initial.stepId === stepId)) {
+    var choiceOutcome = document.getElementById('outcome-choice');
+    if (choiceOutcome && typeof choiceOutcome.scrollIntoView === 'function') {
+      choiceOutcome.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    }
+    if (window.scrollY === 0 && typeof window.scrollTo === 'function') { window.scrollTo(0, 1); }
+  }
   // The note is the one node the host changes WITHOUT a repaint (a refusal, a check note), so
   // it is the page's live region: a screen reader hears it when it changes (WCAG 4.1.3). Set
   // here, not in the markup the existing tests pin. A repainted region cannot announce this
@@ -1667,6 +1689,22 @@ const CLIENT_SCRIPT = `
   on('btn-open', 'click', function () { post('step:open', {}); });
   on('btn-check', 'click', function () { reveal('check'); post('step:check', {}); });
   on('btn-next', 'click', function () { post('step:next', {}); });
+  // T-21: one button per choosable option, ids choose-0 … choose-N; each posts its option's id
+  // and the step this page was drawn for, both read from escaped attributes (never page-assembled
+  // markup). The host compares the step and refuses in words when it has moved on, because every
+  // step of a real plan has the same option ids.
+  for (var ci = 0; ci < ${MAX_OPTIONS_RENDERED}; ci++) {
+    (function (button) {
+      if (!button) { return; }
+      button.addEventListener('click', function () {
+        reveal('choice');
+        post('step:choose', {
+          optionId: button.getAttribute('data-option-id'),
+          stepId: mainEl ? mainEl.getAttribute('data-step-id') : null,
+        });
+      });
+    })(document.getElementById('choose-' + ci));
+  }
   // Only on the page while the offer stands (see reproduceHtml); \`on\` is null-safe, so the
   // rest of the time this line hooks nothing rather than needing a condition of its own.
   on('btn-reproduce', 'click', function () { post('reproduce:run', {}); });
@@ -1841,6 +1879,10 @@ export function renderNoticeHtml(notice: string): string {
  *                                        `.option-taken` marking, its two badges, and (through
  *                                        the array's LENGTH) the "n not shown" note
  *   - `step.decision.authorChoice`     → the same marking, when no option carries `taken`
+ *   - `step.decision.chosen`           → the learner's road (T-21): the mark, *Your choice* and
+ *                                        the line about what has not changed yet
+ *   - `state.choiceNote`               → the refusal above the options list (T-21), with its
+ *                                        count, so a second refused press still repaints
  *   - `step.decision.why`              → the why paragraph
  *   - `step.decision.whySource`        → its "from the model / the author / not inferable" line
  *   - `step.witness.{sha,subject,date}`→ the witness sentence, or `NO_HISTORY_MESSAGE`
@@ -1973,6 +2015,8 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
       keyOf(option?.id), keyOf(option?.label), keyOf(option?.consequence), option?.taken,
     ]),
     keyOf(decision.authorChoice),
+    keyOf(decision.chosen), // T-21: a choice must repaint, or the press is silent
+    keyOf(state.choiceNote ?? null), // T-21: so must a refusal, and a repeat of one (T-15)
     keyOf(decision.why, MAX_PLAN_TEXT),
     decision.whySource,
     [keyOf(witness?.sha), keyOf(witness?.subject), keyOf(witness?.date)],

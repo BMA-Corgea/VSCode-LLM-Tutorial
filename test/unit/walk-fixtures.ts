@@ -179,6 +179,27 @@ export function fixtureProgress(plan: PlanLike): Progress {
 }
 
 /**
+ * `fixturePlan()` with every step's options the way repo-tour really mints them: `author` on every
+ * step and `alt-1`, `alt-2` on every interpreted one (repo-tour `plan.ts`, `interpret.ts` — "small
+ * stable-within-this-step ids"), and `chosen: 'author'`, the recreate-mode norm. The ordinary
+ * fixture's alternatives have ids unique across the plan, which is exactly why T-21's first tests
+ * could not see a stale page: here, every step has the option a stale page names.
+ */
+export function repoTourShapedPlan(): PlanLike {
+  const plan = fixturePlan();
+  for (const step of plan.steps) {
+    step.decision.options = [
+      { id: 'author', label: 'What the author did', consequence: `${step.id}: what the author did.`, taken: true },
+      { id: 'alt-1', label: 'The first other road', consequence: `${step.id}: the first other road.`, taken: false },
+      { id: 'alt-2', label: 'The second other road', consequence: `${step.id}: the second other road.`, taken: false },
+    ];
+    step.decision.authorChoice = 'author';
+    step.decision.chosen = 'author';
+  }
+  return plan;
+}
+
+/**
  * The real files the plan's `target.file` paths point at. Line counts are load-bearing: each
  * file has at least as many lines as the highest `endLine` any step claims in it (20 / 14 /
  * 10), so a decoration or a reveal against these ranges addresses lines that genuinely exist.
@@ -244,8 +265,7 @@ export function render(body: string): string {
  * on purpose: this fixture states where the layout IS, so `walk-store.test.ts` proves the
  * store finds a plan at the documented location instead of merely agreeing with itself.
  */
-export function writeFixtureTarget(dir: string): void {
-  const plan = fixturePlan();
+export function writeFixtureTarget(dir: string, plan: PlanLike = fixturePlan()): void {
   const build = path.join(dir, '.repo-tour', 'build');
   fs.mkdirSync(build, { recursive: true });
   fs.writeFileSync(path.join(build, 'plan.json'), `${JSON.stringify(plan, null, 2)}\n`);
