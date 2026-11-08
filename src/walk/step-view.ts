@@ -584,8 +584,10 @@ const PAGE_CSS = `
 .notice-only { padding:20px 16px; }
 .notice-only .notice { opacity:0.85; margin:0; }
 main { max-width:640px; margin:0 auto; padding:20px 24px 40px; }
-.step-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:18px; }
-.step-head h1 { font-size:16px; margin:0; max-width:70%; }
+.step-head { margin-bottom:18px; }
+.step-head h1 { font-size:16px; margin:0; }
+/* T-41: the skin picker's place. A control used about once does not get the panel's second row. */
+.panel-foot { margin-top:20px; }
 section { margin-bottom:20px; }
 section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 8px; }
 .options { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px; }
@@ -701,13 +703,10 @@ main, section, .option { min-width:0; }
 .tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint,
 .options-refused, .options-diverged { overflow-wrap:anywhere; }
 
-/* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
-   title and the skin picker stop competing for one line and 48px of horizontal padding
-   stops eating a sixth of the width. */
+/* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, 48px of
+   horizontal padding stops eating a sixth of the width. */
 @media (max-width: 480px) {
   main { padding:16px 12px 32px; }
-  .step-head { flex-direction:column; gap:8px; }
-  .step-head h1 { max-width:100%; }
   fieldset.dial label { margin-right:12px; }
 }
 
@@ -1494,7 +1493,6 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   ${count ? `<p class="step-count">${escapeHtml(count)}</p>` : ''}
   <div class="step-head">
     <h1>${escapeHtml(planText(step.decision.question))}</h1>
-    ${pickerHtml(skins.SKINS, state.skin)}
   </div>
 
   <section>
@@ -1536,6 +1534,8 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   ${reproduceHtml(state.reproduce)}
 
   ${tutorHtml(state)}
+
+  <div class="panel-foot">${pickerHtml(skins.SKINS, state.skin)}</div>
 </main>`;
 }
 
