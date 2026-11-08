@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * The reference tree: the derived app's files, written where the walk reads a reference from
- * (T-17, AC9). The ONLY writer of model-written files to disk in the engine.
+ * (T-17, AC9). The ONLY permanent writer of model-written files in the engine (`extractAll` writes
+ * the same files to a scratch folder for a moment, so repo-tour can read them, and removes it).
  *
  * ── Where, and why there ──────────────────────────────────────────────────────────────────────
  *
@@ -30,7 +31,7 @@
  * than trusted to the parser that already ran it: one forgotten call site is how this class of
  * bug comes back (the detour's `prepareDetourWrite` does the same). The filesystem half is the
  * proved `derived/` folder (`./storage.ts`, equality not containment), a tutorial folder proved
- * the same way, and `writeTextAtomic`'s last-instant `prepareDirectory` against the staging
+ * the same way, and `writeTextAtomic`'s last-instant `prepareDirectory` against that proved
  * folder for every file.
  *
  * No `vscode` import — see `./types.ts`.
@@ -184,7 +185,9 @@ export function writeReferenceTree(
   const staging = path.join(tutorialDir, `.staging-${randomBytes(6).toString('hex')}`);
   try {
     fs.mkdirSync(staging);
-    for (const f of files) writeTextAtomic(path.join(staging, ...f.path.split('/')), f.content, staging);
+    // The root is the PROVED folder, not the one just composed: containment is always relative to
+    // the root you are handed, and a staging folder swapped for a link would agree with itself.
+    for (const f of files) writeTextAtomic(path.join(staging, ...f.path.split('/')), f.content, tutorialDir);
     if (existing !== null) {
       // The folder for this key holds the wrong bytes (or is a link or a file): move it aside
       // under a name only this call knows, put the right tree in, and only then remove it.

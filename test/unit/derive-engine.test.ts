@@ -15,13 +15,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
-import { derivePlan, replanPlan, type DerivationState, type DeriveDeps } from '../../src/derive/engine.js';
+import { derivePlan, extractAll, replanPlan, type DerivationState, type DeriveDeps } from '../../src/derive/engine.js';
 import type { DerivedPlan } from '../../src/derive/assemble.js';
 import { stepIdFor } from '../../src/derive/assemble.js';
 import { DERIVE_LIMITS } from '../../src/derive/types.js';
 import { AskLedger } from '../../src/tutor/ask.js';
 import { tutorCoreFor, type TutorCore } from '../../src/tutor/core.js';
-import { FIXTURE_IDEA, fixtureOutlineText } from './derive-fixtures.js';
+import { FIXTURE_IDEA, fixtureOutlineText, outlineWith, stepsOf } from './derive-fixtures.js';
 import { BUILD_PLAN_SCHEMA, validateBuildPlan } from './plan-schema.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
@@ -69,7 +69,7 @@ const MAIN_OBJECT = "import { Tally } from '../core/tally.mjs';\n\nconsole.log(n
  *   - replan: every step it is told it is replacing, again, with the question saying which option
  *     it now follows. A replanned step therefore has a NEW decision, and so a new id.
  */
-function fakeModel(code: Record<string, string> = {}, replan: (input: Record<string, unknown>) => unknown = followTheAnswer) {
+function fakeModel(code: Record<string, string> = {}, replan: (input: Record<string, unknown>) => unknown = followTheAnswer, outline: string = fixtureOutlineText()) {
   const asked: Asked[] = [];
   const run: TutorCore['runLlm'] = (prompt) => {
     const line = prompt.split('\n').find((l) => l.startsWith('INPUT (JSON): '));
@@ -78,7 +78,7 @@ function fakeModel(code: Record<string, string> = {}, replan: (input: Record<str
     asked.push({ task: String(input['task']), input });
     let text: string;
     if (input['task'] === 'outline') {
-      text = fixtureOutlineText();
+      text = outline;
     } else if (input['task'] === 'code') {
       const node = input['node'] as { path: string; question: string; chosen: { label: string } };
       const given = code[node.path];
@@ -124,6 +124,20 @@ function deps(run: TutorCore['runLlm'], gs: string, target: string): DeriveDeps 
     settings: { core, provider: 'claude', model: 'claude-sonnet-5', timeoutMs: 5_000, run },
     now: () => new Date('2026-11-05T08:00:00.000Z'),
   };
+}
+
+/** Every file under `dir`, as relative path and bytes, for before/after comparison. */
+function snapshotDir(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (rel: string): void => {
+    for (const name of fs.readdirSync(path.join(dir, rel))) {
+      const r = rel === '' ? name : `${rel}/${name}`;
+      if (fs.lstatSync(path.join(dir, r)).isDirectory()) walk(r);
+      else out[r] = fs.readFileSync(path.join(dir, r)).toString('base64');
+    }
+  };
+  walk('');
+  return out;
 }
 
 /** The plan's content: everything except the two fields that describe the RUN. */
@@ -292,6 +306,16 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.equal(fs.existsSync(path.join(gs, 'derived')), false);
   });
 
+  test('the scratch folder that reads derived files holds its own writes: a path that climbs out is a sentence, not a file', async () => {
+    const name = `derive-engine-escape-${process.pid}.mjs`;
+    const escaped = path.join(os.tmpdir(), name);
+    const out = await extractAll(dialCore, [{ path: `../${name}`, content: 'export {};\n' }]);
+    const landed = fs.existsSync(escaped);
+    if (landed) fs.rmSync(escaped, { force: true });
+    assert.equal(landed, false, 'nothing may land outside the scratch folder');
+    assert.equal(typeof out, 'string', 'it says why');
+  });
+
   test('a node: import is one of Node\'s own modules, and is allowed', async () => {
     const tally = "import { strict as assert } from 'node:assert';\nexport function total(xs) {\n  assert.ok(Array.isArray(xs));\n  return xs.reduce((a, b) => a + b, 0);\n}\n";
     const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': tally, 'cli/main.mjs': MAIN }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
@@ -428,6 +452,8 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     const d = second.plan.steps.find((s) => s.id === tallyId);
     assert.ok(d, 'the decision keeps its id, so the walk keeps its place');
     assert.equal(d.decision.chosen, 'object');
+    assert.equal(d.decision.authorChoice, 'pure', 'authorChoice stays the recommendation; chosen is what the learner said');
+    assert.deepEqual(d.decision.options.filter((o) => o.taken).map((o) => o.id), ['pure'], 'taken stays the recommendation');
     assert.equal(first.state.files['core/tally.mjs'], TALLY);
     assert.equal(second.state.files['core/tally.mjs'], OBJECT_TALLY);
   });
@@ -565,6 +591,104 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     const out = await replanPlan(tampered, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(POISONED, b.gs, b.target));
     assert.ok(!out.ok);
     assert.match(out.reason, /cannot be replanned: .*climbs out of the reference tree/);
+  });
+
+  /** Three files: the entry stands on both core files, and neither core file stands on the other. */
+  function threeFiles(): string {
+    return outlineWith((o) => {
+      const steps = stepsOf(o);
+      steps.splice(2, 0, { ...steps[1]!, path: 'core/extra.mjs', question: 'What else does it need?', dependsOn: ['core'] });
+      steps[4]!['dependsOn'] = ['cli', 'core/tally.mjs', 'core/extra.mjs'];
+    });
+  }
+
+  async function baseOfThree(replan?: (input: Record<string, unknown>) => unknown) {
+    const gs = tempDir('derive-engine-gs-');
+    const target = tempDir('derive-engine-target-');
+    const model = fakeModel({}, replan, threeFiles());
+    const first = await derivePlan({ idea: FIXTURE_IDEA }, deps(model.run, gs, target));
+    if (!first.ok) assert.fail(first.reason);
+    return { gs, target, model, first };
+  }
+
+  test('a replan is shown exactly the decision, its ancestors and what the old downstream stood on', async () => {
+    const b = await baseOfThree();
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(b.model.run, b.gs, b.target));
+    if (!out.ok) assert.fail(out.reason);
+    const asked = b.model.asked.find((a) => a.task === 'replan')!.input;
+    assert.equal((asked['decision'] as { path: string }).path, 'core/tally.mjs');
+    assert.deepEqual((asked['replacing'] as Array<{ path: string }>).map((s) => s.path), ['cli/main.mjs']);
+    assert.deepEqual((asked['shown'] as Array<{ path: string }>).map((s) => s.path), ['core', 'core/extra.mjs', 'cli']);
+  });
+
+  test('the honesty rule covers what a replanned step was SHOWN, not only the decision and its chapter', async () => {
+    const forgetting = (input: Record<string, unknown>): unknown => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      return { steps: out.steps.map((st) => ({ ...st, dependsOn: [] })) };
+    };
+    const b = await baseOfThree(forgetting);
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(b.model.run, b.gs, b.target));
+    if (!out.ok) assert.fail(out.reason);
+    const main = out.plan.steps.find((st) => st.target.file === 'cli/main.mjs')!;
+    assert.ok(main.dependsOn.includes(idOf(b.first.state, 'core/extra.mjs')), 'it was shown core/extra.mjs, which is neither the decision nor its own chapter');
+  });
+
+  test('a file the decision does not reach keeps its bytes, in the state and in the new tree', async () => {
+    const b = await baseOfThree();
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(b.model.run, b.gs, b.target));
+    if (!out.ok) assert.fail(out.reason);
+    assert.equal(out.state.files['core/extra.mjs'], b.first.state.files['core/extra.mjs']);
+    assert.equal(fs.readFileSync(path.join(out.referenceRoot, 'core/extra.mjs'), 'utf8'), b.first.state.files['core/extra.mjs']);
+  });
+
+  test('a replan never touches the learner\'s folder, even with their files at the paths it rewrites', async () => {
+    const b = await base();
+    const mine = path.join(b.target, 'core');
+    fs.mkdirSync(mine, { recursive: true });
+    fs.writeFileSync(path.join(mine, 'tally.mjs'), 'my own work\n');
+    fs.writeFileSync(path.join(b.target, 'notes.txt'), 'notes\n');
+    const before = snapshotDir(b.target);
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(b.model.run, b.gs, b.target));
+    if (!out.ok) assert.fail(out.reason);
+    assert.deepEqual(snapshotDir(b.target), before);
+  });
+
+  test('a replan that moves the entry names the new one, and a later replan can still use the state', async () => {
+    const b = await base();
+    const moved = fakeModel({ 'cli/start.mjs': MAIN }, (input) => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      return { steps: out.steps.map((st) => ({ ...st, path: 'cli/start.mjs' })), entry: 'cli/start.mjs' };
+    });
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(moved.run, b.gs, b.target));
+    if (!out.ok) assert.fail(out.reason);
+    assert.equal(out.state.entry, 'cli/start.mjs', 'the named entry is the entry');
+    assert.equal(out.state.files['cli/main.mjs'], undefined, 'the code of a step the replan dropped is gone');
+    const again = await replanPlan(out.state, idOf(out.state, 'core/tally.mjs'), 'pure', [], deps(moved.run, b.gs, b.target));
+    if (!again.ok) assert.fail(`a state a replan produced must be a state a replan accepts: ${again.reason}`);
+  });
+
+  test('a chapter a replan empties is dropped from the plan', async () => {
+    const gs = tempDir('derive-engine-gs-');
+    const target = tempDir('derive-engine-target-');
+    const withUi = outlineWith((o) => {
+      (o['chapters'] as unknown[]).splice(1, 0, { key: 'ui', title: 'The view', subtitle: 'what it looks like' });
+      const steps = stepsOf(o);
+      const opts = steps[0]!['options'];
+      steps.splice(2, 0,
+        { kind: 'shape', chapter: 'ui', path: 'ui', question: 'What shows it?', options: opts, recommended: 'a', why: 'w', dependsOn: ['core/tally.mjs'] },
+        { kind: 'file', chapter: 'ui', path: 'ui/view.mjs', question: 'How is it drawn?', options: opts, recommended: 'a', why: 'w', dependsOn: ['ui'] });
+    });
+    const keepOnlyTheEntry = (input: Record<string, unknown>): unknown => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      return { steps: out.steps.filter((st) => st['path'] === 'cli/main.mjs') };
+    };
+    const model = fakeModel({}, keepOnlyTheEntry, withUi);
+    const first = await derivePlan({ idea: FIXTURE_IDEA }, deps(model.run, gs, target));
+    if (!first.ok) assert.fail(first.reason);
+    assert.ok(first.plan.chapters.some((c) => c.key === 'ui'), 'the chapter is there to begin with');
+    const out = await replanPlan(first.state, idOf(first.state, 'core/tally.mjs'), 'object', [], deps(model.run, gs, target));
+    if (!out.ok) assert.fail(out.reason);
+    assert.deepEqual(out.plan.chapters.map((c) => c.key), ['core', 'cli']);
   });
 
   const bigText = 'x'.repeat(5_000_000);

@@ -30,12 +30,13 @@
  *
  * The exported symbols are what later steps use, so they are what a learner fills in: at most five,
  * non-overlapping (the widest wins a clash), in line order — load-bearing; every other line is
- * boilerplate. A file that exports nothing, which is usually the entry point with a `main()` nothing
- * imports, takes its own functions and multi-line variables instead: with no load-bearing lines at
- * all, `planWrite` copies the whole file in scaffolded mode, handing over the answer in the one
- * position that exists to hide it. The live run (AC-A2 b) found that on the first real entry point.
- * repo-tour's `selectLoadBearing` has the same fallback for the same reason (its T-15), with the
- * same screen; this does not claim to equal it beyond that.
+ * boilerplate. A file with no export worth stubbing (nothing exported, or only one-line values),
+ * which is usually the entry point with a `main()` nothing imports, takes its own functions and
+ * multi-line variables instead: with no load-bearing lines at all, `planWrite` copies the whole file
+ * in scaffolded mode, handing over the answer in the one position that exists to hide it. The live
+ * run (AC-A2 b) found that on the first real entry point. repo-tour's `selectLoadBearing` has the
+ * same fallback for a file that exports nothing (its T-15), with the same screen; this does not
+ * claim to equal it beyond that.
  *
  * No `vscode` import — see `./types.ts`.
  */
@@ -97,15 +98,21 @@ const ALWAYS_LOAD_BEARING_KINDS: ReadonlySet<string> = new Set(['function', 'met
 /** Below this many lines a `variable` is a reference, not code to fill in (repo-tour's number). */
 const TRIVIAL_SPAN = 3;
 
+/** Code a learner could fill in, as opposed to a one-line reference. */
+function worthStubbing(s: SymbolLike): boolean {
+  return ALWAYS_LOAD_BEARING_KINDS.has(s.kind) || s.endLine - s.line + 1 >= TRIVIAL_SPAN;
+}
+
 /**
- * The exported symbols, or, in a file that exports nothing, its own functions and multi-line
- * variables (see the header). Widest first through any clash, then in line order, at most five.
+ * The exported symbols, or, in a file with no export worth stubbing, its own functions and
+ * multi-line variables (see the header). Widest first through any clash, then in line order, at
+ * most five.
  */
 export function loadBearingRanges(extract: ExtractLike, totalLines: number): RangeLike[] {
   const inFile = extract.symbols
     .filter((s) => Number.isInteger(s.line) && Number.isInteger(s.endLine) && s.line >= 1 && s.endLine >= s.line && s.endLine <= totalLines);
   const exported = inFile.filter((s) => s.exported);
-  const pool = exported.length > 0 ? exported : inFile.filter((s) => ALWAYS_LOAD_BEARING_KINDS.has(s.kind) || s.endLine - s.line + 1 >= TRIVIAL_SPAN);
+  const pool = exported.some(worthStubbing) ? exported : inFile.filter(worthStubbing);
   const candidates = [...pool].sort((a, b) => (b.endLine - b.line) - (a.endLine - a.line) || a.line - b.line);
   const chosen: RangeLike[] = [];
   for (const s of candidates) {

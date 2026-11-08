@@ -183,6 +183,14 @@ suite('scaffold ranges — Mode A\'s own rule, stated', () => {
     assert.deepEqual(loadBearingRanges(nothingRecorded, 3), [], 'nothing recorded: nothing to stub');
   });
 
+  test('a file whose only exports are one-line values still has its functions stubbed', () => {
+    const ex: ExtractLike = {
+      path: 'cli/main.mjs', parseErrors: 0, imports: [],
+      symbols: [{ name: 'VERSION', kind: 'variable', line: 1, endLine: 1, exported: true }, sym('main', 3, 9, false)],
+    };
+    assert.deepEqual(loadBearingRanges(ex, 10), [{ startLine: 3, endLine: 9 }], 'one exported constant must not hand over main()');
+  });
+
   test(`at most ${MAX_LOAD_BEARING} ranges, in line order`, () => {
     const symbols = Array.from({ length: 8 }, (_, i) => sym(`f${i}`, i * 3 + 1, i * 3 + 2));
     const ranges = loadBearingRanges({ path: 'x.mjs', symbols, imports: [], parseErrors: 0 }, 30);

@@ -132,4 +132,21 @@ suite('the derive cache — asked once, read back exactly, and never looser than
     assert.equal(fs.readFileSync(bystander, 'utf8'), 'mine', 'a file that is not an entry is never removed');
     assert.ok(MAX_DERIVE_CACHE_ENTRIES >= 31 * 10, 'the shipped bound holds at least ten full derivations');
   });
+  test('the shipped bound holds through the real writer: a full folder stays at the bound and loses its oldest', () => {
+    const root = newRoot();
+    fs.mkdirSync(path.join(root, DERIVE_CACHE_DIR), { recursive: true });
+    const old = new Date(Date.now() - 3_600_000);
+    const keys = Array.from({ length: MAX_DERIVE_CACHE_ENTRIES }, (_, i) => deriveCacheKey(`seed ${i}`));
+    keys.forEach((k, i) => {
+      const file = entryFile(root, k);
+      fs.writeFileSync(file, JSON.stringify({ key: k, reply: 'x' }));
+      const t = new Date(old.getTime() + i);
+      fs.utimesSync(file, t, t);
+    });
+    const newest = deriveCacheKey('the newest');
+    assert.equal(writeCachedReply(root, newest, 'y'), true);
+    assert.equal(fs.readdirSync(path.join(root, DERIVE_CACHE_DIR)).length, MAX_DERIVE_CACHE_ENTRIES, 'held at the shipped bound');
+    assert.equal(readCachedReply(root, keys[0]!), null, 'the oldest went');
+    assert.equal(readCachedReply(root, newest), 'y', 'the newest stayed');
+  });
 });

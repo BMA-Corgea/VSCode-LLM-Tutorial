@@ -148,4 +148,41 @@ suite('the reference tree — written whole, once, and only where it belongs (AC
     assert.equal(treeSlug(''), 'app');
     assert.equal(treeSlug(42), 'app');
   });
+  test('a staging folder swapped for a link mid-write puts nothing outside the store', () => {
+    const gs = tempDir('derive-tree-gs-');
+    const outside = tempDir('derive-tree-outside-');
+    const realMkdir = fs.mkdirSync;
+    let swapped = false;
+    const patched = (p: fs.PathLike, options?: fs.MakeDirectoryOptions | fs.Mode | null): string | undefined => {
+      const made = realMkdir(p, options as fs.MakeDirectoryOptions & { recursive: true });
+      if (!swapped && String(p).includes('.staging-')) {
+        swapped = true;
+        fs.rmdirSync(p);
+        fs.symlinkSync(outside, p);
+      }
+      return made;
+    };
+    (fs as unknown as { mkdirSync: unknown }).mkdirSync = patched;
+    let out: ReturnType<typeof writeReferenceTree>;
+    try {
+      out = writeReferenceTree(gs, tempDir('derive-tree-target-'), 'Tally', FILES);
+    } finally {
+      (fs as unknown as { mkdirSync: unknown }).mkdirSync = realMkdir;
+    }
+    assert.ok(swapped, 'the swap has to have happened, or this test proves nothing');
+    assert.ok(isDeriveRefusal(out), 'a staging folder that turned into a link must not be written through');
+    assert.deepEqual(fs.readdirSync(outside), [], 'nothing landed outside the store');
+  });
+
+  test('a link planted inside an existing tree means the tree is replaced, and the link is never followed', () => {
+    const gs = tempDir('derive-tree-gs-');
+    const target = tempDir('derive-tree-target-');
+    const root = mustWrite(gs, target);
+    const outside = path.join(tempDir('derive-tree-outside-'), 'victim.txt');
+    fs.writeFileSync(outside, 'mine');
+    fs.symlinkSync(outside, path.join(root, 'core', 'planted.mjs'));
+    assert.equal(mustWrite(gs, target), root);
+    assert.deepEqual([...snapshot(root).keys()].sort(), FILES.map((f) => f.path).sort(), 'the tree holds exactly its files again');
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'mine', 'the link was removed, not followed');
+  });
 });

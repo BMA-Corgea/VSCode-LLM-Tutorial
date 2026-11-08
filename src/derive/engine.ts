@@ -192,7 +192,7 @@ function computedImportReason(content: string, language: DeriveLanguage): string
 }
 
 /** Run repo-tour's `extract` over the derived files, from a scratch folder this call made. */
-async function extractAll(core: Pick<DialCore, 'extract'>, files: readonly DerivedFile[]): Promise<Map<string, ExtractLike> | string> {
+export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonly DerivedFile[]): Promise<Map<string, ExtractLike> | string> {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'derive-extract-'));
   try {
     const records: FileRecord[] = [];
