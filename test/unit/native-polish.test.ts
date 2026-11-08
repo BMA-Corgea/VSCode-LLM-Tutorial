@@ -282,6 +282,17 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
     assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, 'detour');
   });
 
+  test('a press of Choose this instead records its own outcome, and the repaint brings the answer into view (T-21, C8)', () => {
+    const state = stateAt('st-4-symbol-render', { choiceNote: 'That press was refused.' });
+    const html = renderStepHtml(state, FAKE_SKINS);
+    const pressed = runStepScript(html);
+    pressed.elements.get('choose-1')!.dispatch('click');
+    assert.equal((pressed.states[pressed.states.length - 1] as { reveal?: string }).reveal, 'choice');
+    const dom = runStepScript(html, { stepId: 'st-4-symbol-render', note: '', draft: '', reveal: 'choice', revealAt: Date.now() });
+    assert.deepEqual(dom.elements.get('outcome-choice')!.scrolled, [{ block: 'nearest', behavior: 'auto' }]);
+    assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, undefined, 'one-shot');
+  });
+
   test('the page after the repaint scrolls that outcome into view, once', () => {
     const html = renderStepHtml(stateAt('st-2-file-parse', CHECK_PASS), FAKE_SKINS);
     const dom = runStepScript(html, { stepId: 'st-2-file-parse', note: '', draft: '', reveal: 'check', revealAt: Date.now() });

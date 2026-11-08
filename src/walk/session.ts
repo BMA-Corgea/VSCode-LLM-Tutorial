@@ -220,6 +220,7 @@ import {
   markDone as markDoneIn,
   setDial as setDialIn,
   setChosen as setChosenIn,
+  optionsTable,
   withChosen,
   type PlanLike,
   type Progress,
@@ -241,10 +242,22 @@ import { resolveInsideTarget } from './paths.js';
  * coherent (merely stale) picture — which is exactly what makes the panel's "did the step
  * actually change?" comparison against its previous view meaningful.
  */
-/** What the panel says when a choice names no option of the step (T-21) — a stale or forged page. */
+/** What the panel says when a choice names no road the page offers at this step (T-21) — a stale or forged page. */
 export const CHOICE_NOT_AN_OPTION = 'That is not one of this step\u2019s options, so nothing was recorded.';
 /** What the panel says when the road pressed is the one already taken (T-21, T-15). */
 export const CHOICE_ALREADY_TAKEN = 'That is already the road this step is on.';
+/** What the panel says when the press came from a page for a step the learner has left (T-21, AC2). */
+export const CHOICE_STALE_PAGE = 'That press was for a step you have since left, so nothing was recorded.';
+
+/**
+ * A refusal, in words, and how many times in a row it has been given (T-21, AC5). A refused press
+ * must change the screen and a second identical one must change it again: the same sentence twice
+ * is the same frame twice, which is T-15's defect one press later. So the count goes in the words,
+ * the same way the start screen's `inARow` does.
+ */
+export function choiceRefusalText(reason: string, inARow: number): string {
+  return inARow > 1 ? `${reason} Tried ${inARow} times.` : reason;
+}
 
 export interface WalkView {
   plan: PlanLike;
@@ -282,6 +295,13 @@ export interface WalkView {
    * and false of a step the learner has merely arrived at.
    */
   writeNote?: string;
+  /**
+   * T-21 (AC5): why the last press of *Choose this instead* was refused, with the count once it
+   * has been refused more than once in a row. Drawn beside the options list, where the press was
+   * — not with `writeNote` under the dial, a screen away. Cleared by a recorded choice and by
+   * moving; held in memory only, because it describes a press and not the walk.
+   */
+  choiceNote?: string;
   /**
    * T-5 (AC6): `plan.reproduce`'s never-taught files — generated, vendored, lockfiles, data,
    * binaries. Absent when the plan lists none, so the panel has nothing to offer rather than
@@ -604,6 +624,8 @@ export class WalkSession {
    *  with the step it belongs to, which is how both stop being shown when the walk moves. */
   private shape: { stepId: string; shape: FileShape } | undefined;
   private note: { stepId: string; text: string } | undefined;
+  /** T-21: the last refused press of *Choose this instead* and how many times in a row it has happened (`WalkView.choiceNote`). */
+  private choiceRefusal: { stepId: string; reason: string; inARow: number } | undefined;
   /**
    * T-6: the ask in flight, and the step it belongs to. `undefined` means nothing is waiting
    * on a model, which is exactly what `TutorView.thinking` reports — so there is ONE answer to
@@ -786,25 +808,48 @@ export class WalkSession {
    * re-deriving the rest of the walk from it is T-22's. Latest wins until then; choosing the
    * author's option returns to the author's road.
    *
-   * `optionId` came from a webview and is only a KEY: it is matched against the step's real
-   * options, and one that names none of them writes nothing and says so — as does choosing the
-   * road already taken, so a press always changes something on screen (T-15).
+   * `optionId` came from a webview and is only a KEY: it is matched against the rows the page can
+   * show (`optionsTable`, the same answer the page drew from), and one that names none of them
+   * writes nothing and says so — as does choosing the road already taken — so a press always
+   * changes something on screen (T-15). Whether the page was drawn for this step at all has
+   * already been asked by the protocol (`handleStepMessage`, then `refuseStaleChoice` below).
    */
   choose(stepId: string, optionId: string): void {
     if (this.disposed || !this.hasStep(stepId)) return;
     const step = withChosen(this.plan, this.progress).steps.find((s) => s.id === stepId);
-    const options = Array.isArray(step?.decision?.options) ? step.decision.options : [];
-    if (!options.some((option) => option?.id === optionId)) {
-      this.noteFor(stepId, CHOICE_NOT_AN_OPTION);
+    if (!step) return;
+    const table = optionsTable(step);
+    const row = table.keys.indexOf(optionId);
+    if (row !== -1 && row === table.on) {
+      this.refuseChoice(stepId, CHOICE_ALREADY_TAKEN);
       return;
     }
-    const taken = step?.decision.chosen ?? step?.decision.authorChoice;
-    if (taken === optionId) {
-      this.noteFor(stepId, CHOICE_ALREADY_TAKEN);
+    if (table.choosable[row] !== true) {
+      this.refuseChoice(stepId, CHOICE_NOT_AN_OPTION);
       return;
     }
+    this.choiceRefusal = undefined;
     this.progress = setChosenIn(this.progress, stepId, optionId);
     this.commit(false);
+  }
+
+  /**
+   * A press from a page that was not drawn for the step the walk is on (T-21, AC2): nothing is
+   * recorded, anywhere, and the panel says so on the step the learner is standing on. `stepId` is
+   * the walk's own current step, never the page's. Repo-tour gives every step the same option ids,
+   * so without this a stale page's `alt-1` is a real option of the new step and lands there.
+   */
+  refuseStaleChoice(stepId: string): void {
+    if (this.disposed || !this.hasStep(stepId)) return;
+    this.refuseChoice(stepId, CHOICE_STALE_PAGE);
+  }
+
+  /** Records and pushes a refusal, counting it when it repeats the last one (see `choiceRefusalText`). Writes nothing to disk. */
+  private refuseChoice(stepId: string, reason: string): void {
+    const last = this.choiceRefusal;
+    const inARow = last?.stepId === stepId && last.reason === reason ? last.inARow + 1 : 1;
+    this.choiceRefusal = { stepId, reason, inARow };
+    this.refresh(false);
   }
 
   /**
@@ -2216,6 +2261,8 @@ export class WalkSession {
   private clearStepNotes(): void {
     this.shape = undefined;
     this.note = undefined;
+    // T-21: a refused press describes that press, not the step.
+    this.choiceRefusal = undefined;
     // T-6: the tutor's own sentence goes with them, for the identical reason — "the tutor did
     // not answer within 120 seconds" describes something that just happened, not a step. What
     // does NOT go is `unreachable`: that one is a standing condition of the provider rather
@@ -2410,6 +2457,9 @@ export class WalkSession {
       ...(this.shape?.stepId === step.id ? { shape: this.shape.shape } : {}),
       ...(check ? { check } : {}),
       ...(this.note?.stepId === step.id ? { writeNote: this.note.text } : {}),
+      ...(this.choiceRefusal?.stepId === step.id
+        ? { choiceNote: choiceRefusalText(this.choiceRefusal.reason, this.choiceRefusal.inARow) }
+        : {}),
       ...(reproducible > 0
         ? { reproduce: { count: reproducible, done: this.progress.reproduced !== undefined } }
         : {}),

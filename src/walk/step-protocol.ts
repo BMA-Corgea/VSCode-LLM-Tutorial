@@ -51,7 +51,7 @@
 import type { CheckOutcome } from '../dial/check.js';
 import { DIALS, type Dial } from '../start/request.js';
 import type { AskMessage } from '../tutor/core.js';
-import { nextStepId, prevStepId, type PlanLike, type Progress, type StepLike } from './model.js';
+import { isOptionKey, nextStepId, prevStepId, type PlanLike, type Progress, type StepLike } from './model.js';
 
 /**
  * The longest question this panel will hand the tutor, in characters (T-6 AC2).
@@ -128,6 +128,8 @@ export interface StepViewState {
    * repaint decision (see `step-panel.ts`'s key).
    */
   writeNote?: string;
+  /** T-21: why the last press of *Choose this instead* was refused — the session's, server-rendered beside the options list (`WalkView.choiceNote`). */
+  choiceNote?: string;
   /**
    * `plan.reproduce`'s never-taught files: how many there are, and whether they have already
    * been copied into the target. The offer is worth making exactly once — `done` is what turns
@@ -261,9 +263,11 @@ export type InboundMessage =
   | { type: 'dial:set'; payload: { dial: Dial } }
   // T-21: the learner takes a road. The option id IS a webview-supplied key — unlike the detour
   // messages below, there is no way to say WHICH option without one — so it is bounded here and
-  // matched against the current step's real options by the session; the step is always the
-  // host's current one (`state.step.id`), never one named by the page.
-  | { type: 'step:choose'; payload: { optionId: string } }
+  // matched against the rows the page can show by the session. `stepId` is the step the page says
+  // it was drawn for (`null` when it named none): a CHECK and nothing else. `handleStepMessage`
+  // compares it with the host's current step and refuses when they differ; it is never a target,
+  // never stored and never echoed, so it needs no length bound of its own.
+  | { type: 'step:choose'; payload: { optionId: string; stepId: string | null } }
   | { type: 'skin:set'; payload: { skin: string } }
   | { type: 'tutor:ask'; payload: { text: string } }
   | { type: 'tutor:cancel' }
@@ -297,8 +301,10 @@ export interface StepEffects {
    */
   reproduce(): void;
   persistDial(stepId: string, dial: Dial): void;
-  /** T-21: records the learner's choice at a step (`WalkSession.choose`). */
+  /** T-21: records the learner's choice at a step (`WalkSession.choose`). `stepId` is always the host's current step. */
   choose(stepId: string, optionId: string): void;
+  /** T-21: answers a press from a page drawn for some other step, in words, on the host's current step (`WalkSession.refuseStaleChoice`). */
+  refuseStaleChoice(stepId: string): void;
   persistSkin(name: string): void;
 
   // ── T-6: the tutor ────────────────────────────────────────────────────────────────────
@@ -404,7 +410,12 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
       return { state };
     }
     case 'step:choose': {
-      effects.choose(state.step.id, message.payload.optionId);
+      // The page's step id is compared here and goes no further. Repo-tour gives every step the
+      // same option ids (`author`, `alt-1`, `alt-2`), so a page left over from another step names
+      // a real option of this one: matching the option alone records its press on a step the
+      // learner never saw it for. A page that names no step is refused the same way, not waved through.
+      if (message.payload.stepId !== state.step.id) effects.refuseStaleChoice(state.step.id);
+      else effects.choose(state.step.id, message.payload.optionId);
       return { state };
     }
     case 'skin:set': {
@@ -484,8 +495,7 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
 
 // ── validating what actually arrives from the webview (mirrors src/start/protocol.ts) ──────
 
-/** The longest option id `step:choose` accepts (T-21) — ids are keys, and a key longer than this is not one a plan carries. */
-export const MAX_OPTION_ID = 256;
+export { MAX_OPTION_ID } from './model.js';
 
 const INBOUND_TYPES = [
   'step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'dial:set', 'step:choose', 'skin:set',
@@ -554,9 +564,12 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
       const payload = raw['payload'];
       if (!isRecord(payload)) return null;
       const optionId = payload['optionId'];
-      // A KEY, bounded: non-empty, and no longer than any id a plan could sensibly carry.
-      if (typeof optionId !== 'string' || optionId.length === 0 || optionId.length > MAX_OPTION_ID) return null;
-      return { type, payload: { optionId } };
+      // A KEY, bounded by the same rule the page draws its controls by (`isOptionKey`).
+      if (!isOptionKey(optionId)) return null;
+      // Kept whatever it is, and answered in words if it is not this step: a dropped message is a
+      // silent one, and "the page named no step" must be refused, not treated as a match.
+      const stepId = payload['stepId'];
+      return { type, payload: { optionId, stepId: typeof stepId === 'string' ? stepId : null } };
     }
     case 'skin:set': {
       const payload = raw['payload'];

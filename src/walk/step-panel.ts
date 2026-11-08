@@ -145,6 +145,8 @@ export interface WalkSessionLike {
   setDial(stepId: string, dial: Dial): void;
   /** T-21: the learner takes a road at a step. */
   choose(stepId: string, optionId: string): void;
+  /** T-21: a press from a page drawn for some other step, answered on the current one. */
+  refuseStaleChoice(stepId: string): void;
   /**
    * T-6's two: one question for the tutor (AC2, AC3) and the press that stops waiting for it
    * (AC4). `void` like the four above, and for a sharper version of the same reason — an ask
@@ -282,6 +284,7 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       returnFromDetour: () => { this.deps.session()?.returnFromDetour(); },
       persistDial: (stepId: string, dial: Dial) => { this.deps.session()?.setDial(stepId, dial); },
       choose: (stepId: string, optionId: string) => { this.deps.session()?.choose(stepId, optionId); },
+      refuseStaleChoice: (stepId: string) => { this.deps.session()?.refuseStaleChoice(stepId); },
       persistSkin: (name: string) => {
         // Updated here, not merely taken from `handleStepMessage`'s returned state: `setView`
         // rebuilds that state from scratch on the session's next refresh, so the field is

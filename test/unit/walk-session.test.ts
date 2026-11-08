@@ -72,8 +72,10 @@ import {
 } from '../../src/walk/model.js';
 import type { AskMessage, Availability, LlmReply, TutorCore } from '../../src/tutor/core.js';
 import { getTranscript } from '../../src/tutor/transcript.js';
-import { CHOICE_ALREADY_TAKEN, CHOICE_NOT_AN_OPTION, WalkSession, type WalkAdapters, type WalkView } from '../../src/walk/session.js';
-import { fixturePlan, fixtureProgress, writeFixtureTarget } from './walk-fixtures.js';
+import { CHOICE_ALREADY_TAKEN, CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, WalkSession, type WalkAdapters, type WalkView } from '../../src/walk/session.js';
+import { handleStepMessage, parseStepMessage } from '../../src/walk/step-protocol.js';
+import { commitSubject } from '../../src/dial/commit.js';
+import { fixturePlan, fixtureProgress, repoTourShapedPlan, writeFixtureTarget } from './walk-fixtures.js';
 
 /** The in-memory target: nothing under it exists, so `readText` answers `undefined` for every
  *  path and no position can ever put bytes there. It is a stable absolute path and nothing
@@ -785,6 +787,108 @@ suite('choose — the learner takes a road at a step (T-21, T-10 E1)', () => {
     assert.deepEqual(pick(fake, 'revealEditor'), [], 'a choice moves nothing in the editor');
   });
 
+  test('a choice adds `chosen` to its step and changes nothing else in progress — the walk has not moved (AC4, C9)', () => {
+    const { session, fake } = opened();
+    session.goTo(STEP);
+    const before = structuredClone(fake.stored()!);
+    session.choose(STEP, 'stream');
+    assert.deepEqual(fake.stored(), { ...before, steps: { ...before.steps, [STEP]: { status: 'pending', chosen: 'stream' } } },
+      'a choice must not mark the step done, move current, or touch any other step');
+  });
+
+  test('the commit subject stays the author\'s after a choice: the code is still theirs (AC4, C9)', () => {
+    const { session, plan } = opened();
+    session.goTo(STEP);
+    const authors = commitSubject(plan.steps.find((s) => s.id === STEP)!);
+    session.choose(STEP, 'stream');
+    const view = session.getView();
+    assert.equal(view?.step.decision.chosen, 'stream', 'discriminates: the step really is showing the learner\'s road');
+    assert.equal(commitSubject(view.step), authors);
+  });
+
+  test('a refused press, then a real one: the refusal does not outlive the choice (C3)', () => {
+    const { session, fake } = opened();
+    session.goTo(STEP);
+    session.choose(STEP, 'an-option-nobody-offered');
+    assert.equal(session.getView()?.choiceNote, CHOICE_NOT_AN_OPTION, 'discriminates: the refusal was on screen');
+    session.choose(STEP, 'stream');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, 'stream');
+    assert.equal(session.getView()?.choiceNote, undefined, 'a recorded choice clears the sentence that says nothing was recorded');
+  });
+
+  test('every refused press changes what the page says, the second identical one included (AC5, T-15, C8)', () => {
+    const { session } = opened();
+    session.goTo(STEP);
+    const notes = [1, 2, 3].map(() => {
+      session.choose(STEP, 'an-option-nobody-offered');
+      return session.getView()?.choiceNote;
+    });
+    assert.deepEqual(notes, [CHOICE_NOT_AN_OPTION, `${CHOICE_NOT_AN_OPTION} Tried 2 times.`, `${CHOICE_NOT_AN_OPTION} Tried 3 times.`]);
+  });
+
+  test('a different refusal starts its own count, and moving on forgets the last one', () => {
+    const { session } = opened();
+    session.goTo(STEP);
+    session.choose(STEP, 'an-option-nobody-offered');
+    session.choose(STEP, 'an-option-nobody-offered');
+    session.choose(STEP, 'author');
+    assert.equal(session.getView()?.choiceNote, CHOICE_ALREADY_TAKEN, 'a new reason is a new sentence, not a third of the old one');
+    session.prev();
+    assert.equal(session.getView()?.choiceNote, undefined, 'a refusal describes a press, not a step');
+    session.goTo(STEP);
+    assert.equal(session.getView()?.choiceNote, undefined, 'and it is not there when the learner comes back');
+  });
+
+  test('the page and the session agree about the road a step is on when `taken` and `authorChoice` disagree (C4, S3)', () => {
+    const plan = fixturePlan();
+    const step = plan.steps.find((s) => s.id === STEP)!;
+    step.decision.options = step.decision.options.map((o) => ({ ...o, taken: o.id === 'stream' }));
+    step.decision.chosen = null; // `authorChoice` still names `author`
+    const { session, fake } = opened({ plan });
+    session.goTo(STEP);
+    session.choose(STEP, 'stream');
+    assert.equal(session.getView()?.choiceNote, CHOICE_ALREADY_TAKEN, 'the page marks `stream` — that is the road this step is on');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined);
+    session.choose(STEP, 'author');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, 'author', 'and `author` is offered, so it must be taken, not refused');
+    assert.equal(session.getView()?.choiceNote, undefined);
+  });
+
+  test('a press on a row whose id another row shares is refused in words (C4)', () => {
+    const plan = fixturePlan();
+    const step = plan.steps.find((s) => s.id === STEP)!;
+    step.decision.options = step.decision.options.map((o, i) => (i === 0 ? o : { ...o, id: 'dup' }));
+    const { session, fake } = opened({ plan });
+    session.goTo(STEP);
+    session.choose(STEP, 'dup');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined);
+    assert.equal(session.getView()?.choiceNote, CHOICE_NOT_AN_OPTION);
+  });
+
+  test('the session never records what the page cannot show: past the window, or an id two rows share (C5, S2)', () => {
+    const plan = fixturePlan();
+    const step = plan.steps.find((s) => s.id === STEP)!;
+    step.decision.options = Array.from({ length: 30 }, (_, i) => ({ id: i === 0 ? 'author' : `alt-${i}`, label: `road ${i}`, consequence: 'c', taken: i === 0 }));
+    const { session, fake } = opened({ plan });
+    session.goTo(STEP);
+    session.choose(STEP, 'alt-27');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined, 'never drawn, so never recorded');
+    assert.equal(session.getView()?.choiceNote, CHOICE_NOT_AN_OPTION);
+    session.choose(STEP, 'alt-3');
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, 'alt-3', 'discriminates: a road the page drew is taken');
+  });
+
+  test('a progress.json naming a road the page cannot show shows the author\'s road, and decision.chosen says the same (C5, S2)', () => {
+    const plan = fixturePlan();
+    const step = plan.steps.find((s) => s.id === STEP)!;
+    step.decision.options = Array.from({ length: 30 }, (_, i) => ({ id: i === 0 ? 'author' : `alt-${i}`, label: `road ${i}`, consequence: 'c', taken: i === 0 }));
+    step.decision.chosen = null;
+    const progress = { ...setCurrent(emptyProgress(plan), STEP), steps: { [STEP]: { status: 'pending' as const, chosen: 'alt-27' } } };
+    const { session } = opened({ plan, progress });
+    session.goTo(STEP);
+    assert.equal(session.getView()?.step.decision.chosen, null, 'the overlay and the page agree: no road the page cannot show');
+  });
+
   test('latest wins, and the author\'s option returns to the author\'s road', () => {
     const { session, fake } = opened();
     session.goTo(STEP);
@@ -803,7 +907,8 @@ suite('choose — the learner takes a road at a step (T-21, T-10 E1)', () => {
     session.choose(STEP, 'an-option-nobody-offered');
     assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined, 'a forged id must never reach progress.json');
     void plan;
-    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.writeNote, CHOICE_NOT_AN_OPTION, 'and the press is answered in words');
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.choiceNote, CHOICE_NOT_AN_OPTION, 'and the press is answered in words');
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.writeNote, undefined, 'beside the options list, not under the dial');
   });
 
   test('pressing the road already taken writes nothing and is answered in words (T-15)', () => {
@@ -813,7 +918,7 @@ suite('choose — the learner takes a road at a step (T-21, T-10 E1)', () => {
     session.choose(STEP, 'author'); // nothing chosen yet: the author's road is the one this step is on
     assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined);
     void plan;
-    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.writeNote, CHOICE_ALREADY_TAKEN);
+    assert.equal(pick(fake, 'setPanel').at(-1)?.view?.choiceNote, CHOICE_ALREADY_TAKEN);
   });
 
   test('an unknown step is ignored entirely, like setDial', () => {
@@ -834,6 +939,104 @@ suite('choose — the learner takes a road at a step (T-21, T-10 E1)', () => {
     again.session.goTo(STEP);
     const step = pick(again.fake, 'setPanel').at(-1)?.view?.plan.steps.find((s) => s.id === STEP);
     assert.equal(step?.decision.chosen, 'stream', 'a reload forgot the learner\'s road');
+  });
+});
+
+suite('a press from a page for a step the walk has left (T-21, AC2 — code review 1, security review 1)', () => {
+  const A = 'st-2-file-parse';
+  const NEXT_AFTER_A = 'st-3-symbol-handle';
+  const B = 'st-4-symbol-render';
+
+  /** The panel's own message path with no panel in it: the real parser, the real protocol, this session. */
+  function deliver(session: WalkSession, raw: unknown): void {
+    const view = session.getView();
+    assert.ok(view, 'there is a walk to press in');
+    const parsed = parseStepMessage(raw);
+    assert.ok(parsed, `did not parse: ${JSON.stringify(raw)}`);
+    const nothing = (): void => undefined;
+    handleStepMessage({ ...view, skin: 'system' }, parsed, {
+      goTo: (id) => { session.goTo(id); },
+      choose: (step, option) => { session.choose(step, option); },
+      refuseStaleChoice: (step) => { session.refuseStaleChoice(step); },
+      openFile: nothing, runCheck: nothing, reproduce: nothing, persistDial: nothing, persistSkin: nothing, ask: nothing,
+      cancelAsk: nothing, clearConversation: nothing, startDetour: nothing, regenerateDetour: nothing, returnFromDetour: nothing,
+    });
+  }
+  const choose = (stepId: string | undefined, optionId: string): unknown => ({ type: 'step:choose', payload: { optionId, stepId } });
+
+  test('every step has the option a stale page names — the shape that hid this from the ordinary fixture', () => {
+    for (const step of repoTourShapedPlan().steps) assert.deepEqual(step.decision.options.map((o) => o.id), ['author', 'alt-1', 'alt-2']);
+  });
+
+  test('is recorded on neither step, writes nothing, and the step the learner is on says so', () => {
+    const { session, fake } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(B); // the page on screen is drawn for B…
+    session.goTo(A); // …and the host has moved on before its press arrives
+    fake.clearLog();
+    deliver(session, choose(B, 'alt-1'));
+    assert.equal(fake.stored()?.steps[A]?.chosen, undefined, 'recorded on the step the learner never saw that option for');
+    assert.equal(fake.stored()?.steps[B]?.chosen, undefined, 'recorded on the step the page was drawn for, which is not the current one');
+    assert.deepEqual(pick(fake, 'saveProgress'), [], 'a refusal writes nothing at all');
+    assert.equal(session.getView()?.choiceNote, CHOICE_STALE_PAGE, 'and it is answered, on the page for the step the learner is on');
+  });
+
+  test('the same press from the page for the step the walk is on is recorded there (the positive path still works)', () => {
+    const { session, fake } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(A);
+    deliver(session, choose(A, 'alt-1'));
+    assert.equal(fake.stored()?.steps[A]?.chosen, 'alt-1');
+    assert.equal(session.getView()?.choiceNote, undefined);
+  });
+
+  test('one page\'s Next then Choose before its reload (a quick double action): the choice lands nowhere (security S3)', () => {
+    const { session, fake } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(A);
+    deliver(session, { type: 'step:next' });
+    assert.equal(session.getView()?.step.id, NEXT_AFTER_A, 'the Next really moved the host');
+    deliver(session, choose(A, 'alt-2'));
+    assert.equal(fake.stored()?.steps[A]?.chosen, undefined);
+    assert.equal(fake.stored()?.steps[NEXT_AFTER_A]?.chosen, undefined, 'the road of the step pressed on must not land on the next one');
+    assert.equal(session.getView()?.choiceNote, CHOICE_STALE_PAGE);
+  });
+
+  test('a stale press on the author\'s row must not undo a real choice made since (security S2)', () => {
+    const { session, fake } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(A);
+    deliver(session, choose(A, 'alt-1'));
+    session.goTo(B);
+    deliver(session, choose(B, 'alt-2'));
+    deliver(session, choose(A, 'author')); // the old page's author row
+    assert.equal(fake.stored()?.steps[A]?.chosen, 'alt-1');
+    assert.equal(fake.stored()?.steps[B]?.chosen, 'alt-2', 'a stale press silently undid the learner\'s real choice');
+    assert.equal(session.getView()?.choiceNote, CHOICE_STALE_PAGE);
+  });
+
+  test('a press that names no step at all records nothing and is answered (never waved through)', () => {
+    const { session, fake } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(A);
+    fake.clearLog();
+    deliver(session, choose(undefined, 'alt-1'));
+    assert.deepEqual(pick(fake, 'saveProgress'), []);
+    assert.equal(fake.stored()?.steps[A]?.chosen, undefined);
+    assert.equal(session.getView()?.choiceNote, CHOICE_STALE_PAGE);
+  });
+
+  test('pressed again, it says something new, and a real press afterwards clears it (AC5, C3, C8)', () => {
+    const { session, fake } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(A);
+    deliver(session, choose(B, 'alt-1'));
+    deliver(session, choose(B, 'alt-1'));
+    assert.equal(session.getView()?.choiceNote, `${CHOICE_STALE_PAGE} Tried 2 times.`);
+    deliver(session, choose(A, 'alt-2'));
+    assert.equal(fake.stored()?.steps[A]?.chosen, 'alt-2');
+    assert.equal(session.getView()?.choiceNote, undefined);
+  });
+
+  test('a stale page cannot be used to name the target: the host answers only for its own current step', () => {
+    const { session } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(A);
+    session.refuseStaleChoice('st-99-from-the-old-plan');
+    assert.equal(session.getView()?.choiceNote, undefined, 'an unknown step is ignored entirely, like choose');
   });
 });
 
