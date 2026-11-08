@@ -78,6 +78,29 @@ succeed.
 - **`async` on a signature says nothing.** `buildPlan` is declared `async` and never awaits. `grep`
   for `await` in the body before believing a phase can yield.
 
+## What VS Code does to a webview's scroll position when its html is replaced (T-42, 2026-11-08, VS Code 1.145.2)
+
+T-16 could only call this unverified. Measured in the real Current Step panel (about 300 × 322 CSS
+px, under `xvfb-run`): **VS Code keeps the page's scroll offset across a `webview.html` replacement**,
+the absolute offset and not a proportion: with every line of the page's own restore removed,
+`scrollY` did not move while the document grew by about 200 px. (The exact figures move with the
+fixture and the commit; the spec and the review each carry a set.) It puts the page back when the
+page comes up at 0: a script that scrolled to 0 was undone, one that scrolled to 1 was not.
+
+So a press does not throw anyone to the top, and whatever a repaint adds below the controls lands
+off-screen. In the step panel the one-shot reveal is what brings the outcome into view for *Check my
+work* (the verdict is drawn below the buttons; without the reveal it sat entirely below the panel)
+and for *Show me an unrelated example*. For *Ask* it makes no difference a person would notice on
+the real path: the ask box is where they just pressed and the answer is drawn in place (it can
+move the box by its 16 px margin, and that is all).
+
+**A reveal that fires once for a press is spent on the early paints, and never reaches the last
+one.** Ask paints "getting ready", then "thinking…", then the answer. The reveal fired on the first
+of those, in one instrumented run on the first two, and on the answer's never. A stand-in that
+answered at once sometimes merged those paints and sometimes did not: a test that flaked, and a fast
+stub that had hidden what the real path does. Hold the answer back and release it. The pin is
+`test/step-outcomes-screen.test.ts`.
+
 ## A worker thread contains less than it looks like (T-30, 2026-11-08)
 
 Moving work to a worker felt like moving it out of harm's way, and the first version of T-30's spec
