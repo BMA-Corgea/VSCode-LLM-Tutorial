@@ -26,6 +26,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type * as vscode from 'vscode';
 
+/** How many times `Screen.reader` tries a read whose frame keeps going away (see there). */
+const READER_ATTEMPTS = 5;
+
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -187,20 +190,25 @@ export class Screen {
   /**
    * A reader for the webview titled `title` that survives its frame being replaced: when a read
    * fails because the session or the isolated world it used has gone (a re-render, an iframe the
-   * renderer moved, a session dropped under load), it finds the frame again and retries ONCE. Any
-   * other failure — and a second stale one — is thrown, never swallowed.
+   * renderer moved, a session dropped under load), it finds the frame again and retries, a bounded
+   * few times with a short wait, because a loaded machine can replace a frame more than once while
+   * one read looks for it (T-21 re-review F5). Any other failure — and a stale one on the last try
+   * — is thrown, never swallowed. A press made through a reader can land on the new page; a test
+   * that must press one particular page calls `evaluate` with its frame instead.
    */
   reader<T>(title: string, expression: string, first?: Frame, exclude: ReadonlySet<string> = new Set()): () => Promise<T> {
     let frame = first;
     return async () => {
       frame ??= await this.webview(title, undefined, exclude);
-      try {
-        return await this.evaluate<T>(frame, expression);
-      } catch (err) {
-        if (!stale(err)) throw err;
-        for (const [targetId, sessionId] of this.sessions) if (sessionId === frame.sessionId) this.sessions.delete(targetId);
-        frame = await this.webview(title, undefined, exclude);
-        return this.evaluate<T>(frame, expression);
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await this.evaluate<T>(frame, expression);
+        } catch (err) {
+          if (!stale(err) || attempt === READER_ATTEMPTS) throw err;
+          for (const [targetId, sessionId] of this.sessions) if (sessionId === frame.sessionId) this.sessions.delete(targetId);
+          await sleep(100 * attempt);
+          frame = await this.webview(title, undefined, exclude);
+        }
       }
     };
   }

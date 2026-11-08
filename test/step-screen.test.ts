@@ -87,7 +87,7 @@ interface Drive {
    * start, never clicked on the new page. `clickedOn` is the step the page that took the click
    * was drawn for; `progressAfterMove` is progress.json the instant the host had moved.
    */
-  pressFromLeftPage: (leaving: string, moveOn: () => void, selector: string) => Promise<{ clickedOn: string; progressAfterMove: Buffer }>;
+  pressFromLeftPage: (leaving: string, moveOn: () => void, selector: string, prepare?: string) => Promise<{ clickedOn: string; progressAfterMove: Buffer }>;
 }
 
 suite('the Current Step panel, read off the screen (T-21)', function () {
@@ -127,11 +127,12 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
       };
       const pressNow = (expression: string): Promise<unknown> => screen.reader<unknown>(TITLE, expression)();
       const progress = (): Progress => JSON.parse(fs.readFileSync(progressFile, 'utf8')) as Progress;
-      const pressFromLeftPage: Drive['pressFromLeftPage'] = async (leaving, moveOn, selector) => {
+      const pressFromLeftPage: Drive['pressFromLeftPage'] = async (leaving, moveOn, selector, prepare) => {
         const click = `(() => { document.querySelector(${JSON.stringify(selector)}).click(); return document.getElementById('step-main').getAttribute('data-step-id'); })()`;
         for (let attempt = 0; attempt < 8; attempt++) {
           await onStep(leaving);
           const page = await pageShowing(leaving);
+          if (prepare) await screen.evaluate(page, prepare);
           moveOn();
           const progressAfterMove = fs.readFileSync(progressFile);
           try {
@@ -219,6 +220,44 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     const chosen = await until(read, (o) => (o?.on[0] ?? '') === 'alt-1', 'a press from the page for this step is recorded here');
     assert.equal(chosen?.refused, '', 'the sentence that says nothing was recorded goes when something is');
     assert.equal(progress().steps[NOW]?.chosen, 'alt-1');
+  }, repoTourShapedPlan()));
+
+  test('a press made from far down a page for a step already left is answered in view on the page drawn in reply (AC2, AC5; re-review F1)', () => drive(async ({ read, api, progress, progressFile, pressFromLeftPage }) => {
+    const LEFT = STEP;
+    const NOW = 'st-2-file-parse';
+    const button = choose('alt-2');
+    // A real press from this panel comes from a scrolled page: scroll until the button is near the top, as a person would to reach it.
+    const scrollToButton = `(() => { const b = document.querySelector(${JSON.stringify(button)}); window.scrollTo(0, b.getBoundingClientRect().top + window.scrollY - 40); return window.scrollY; })()`;
+    const { clickedOn, progressAfterMove } = await pressFromLeftPage(LEFT, () => api._walk.session()!.goTo(NOW), button, scrollToButton);
+    assert.equal(clickedOn, LEFT, 'the click landed on the page for the step the host had left');
+
+    await until(read, (o) => o?.step === NOW && o.refused === CHOICE_STALE_PAGE, 'the refusal reaches the page for the step the learner is on');
+    // VS Code restores the old page's scroll position at the new page's load, a moment after its script runs: read after that.
+    await sleep(800);
+    const settled = await read();
+    assert.equal(settled?.refused, CHOICE_STALE_PAGE);
+    assert.equal(settled?.refusedInView, true, `the words must be on screen once the page has settled, frame ${JSON.stringify(settled)}`);
+    assert.ok(fs.readFileSync(progressFile).equals(progressAfterMove), 'and nothing was written');
+    assert.equal(progress().steps[NOW]?.chosen, undefined);
+    assert.equal(progress().steps[LEFT]?.chosen, undefined);
+  }, repoTourShapedPlan()));
+
+  test('a question left half typed on one step survives a press on another (re-review F2)', () => drive(async ({ screen, read, onStep, pressNow }) => {
+    const A = 'st-2-file-parse';
+    const NEXT = 'st-3-symbol-handle';
+    const box = screen.reader<string>(TITLE, `document.getElementById('tutor-input').value`);
+    await onStep(A);
+    await pressNow(`(() => { const b = document.getElementById('tutor-input'); b.value = 'kept for later'; b.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await pressNow(`document.getElementById('btn-next').click()`);
+    await until(read, (o) => o?.step === NEXT && o.choosable.length > 0, 'the next step');
+    assert.equal(await box(), '', 'the question is not shown under another step');
+
+    await pressNow(`document.querySelector(${JSON.stringify(choose('alt-1'))}).click()`);
+    await until(read, (o) => o?.step === NEXT && (o.on[0] ?? '') === 'alt-1', 'a real press on the other step');
+
+    await pressNow(`document.getElementById('btn-prev').click()`);
+    await until(read, (o) => o?.step === A, 'back on the first step');
+    assert.equal(await until(box, (v) => v !== '', 'the question comes back'), 'kept for later');
   }, repoTourShapedPlan()));
 
   test('one page\'s Next then Choose, before its reload: the choice lands on neither step and the new page says so (AC2; security S3)', () => drive(async ({ read, onStep, pageShowing, screen, progress }) => {

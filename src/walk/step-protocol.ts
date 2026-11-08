@@ -563,13 +563,14 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
     case 'step:choose': {
       const payload = raw['payload'];
       if (!isRecord(payload)) return null;
+      // Both are kept whatever they are, and answered in words if they will not do: a dropped
+      // message is a silent one (AC2: "and the page says why"). The option id is a KEY, bounded by
+      // the same rule the page draws its controls by (`isOptionKey`), so anything else becomes
+      // `''`, which is never a key: the session answers it as it answers any id not on the table.
+      // "The page named no step" must be refused, not treated as a match.
       const optionId = payload['optionId'];
-      // A KEY, bounded by the same rule the page draws its controls by (`isOptionKey`).
-      if (!isOptionKey(optionId)) return null;
-      // Kept whatever it is, and answered in words if it is not this step: a dropped message is a
-      // silent one, and "the page named no step" must be refused, not treated as a match.
       const stepId = payload['stepId'];
-      return { type, payload: { optionId, stepId: typeof stepId === 'string' ? stepId : null } };
+      return { type, payload: { optionId: isOptionKey(optionId) ? optionId : '', stepId: typeof stepId === 'string' ? stepId : null } };
     }
     case 'skin:set': {
       const payload = raw['payload'];

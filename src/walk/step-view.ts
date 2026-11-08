@@ -751,8 +751,9 @@ main, section, .option { min-width:0; }
 /**
  * The options, as a list the learner can act on (T-21): the road this step is on highlighted, a
  * *Choose this instead* on every other road a press could name, and above them what the last press
- * did. Above, because a press may have come from a page for another step, and the page drawn in
- * reply starts at the top: the words have to be where the eye lands, not under the rows.
+ * did: a press can come from any row, and the words have one place the client script can always
+ * bring into view (`outcome-choice`), including on a page drawn for a different step (see the
+ * stale-press reveal in `CLIENT_SCRIPT`).
  *
  * Three review fixes still live here, and each is load-bearing:
  *
@@ -1532,9 +1533,9 @@ const CLIENT_SCRIPT = `
   // authoritative for everything else (spec §5.1).
   var savedNote = '';
   var savedDraft = '';
-  // T-16 (F-01): every press re-renders this whole page, which starts at the top, so the result
-  // of a press below the fold (the check report, the tutor, the detour line) used to arrive
-  // out of sight. Two values ride in the same saved blob as the draft, and only when set:
+  // T-16 (F-01): every press re-renders this whole page, so the result of a press below the
+  // fold (the check report, the tutor, the detour line) used to arrive out of sight. Two
+  // values ride in the same saved blob as the draft, and only when set:
   // y, where the learner was on THIS step, and reveal, the one outcome the last press asked
   // to see. reveal is checked against a fixed list and is only ever used to find an element
   // by id; it never reaches markup.
@@ -1550,9 +1551,23 @@ const CLIENT_SCRIPT = `
   var initial = restore();
   // The blob is ONE per view, written for one step. This page owns it when it was written for
   // this step, or once the learner does something here. Until then a scroll on this page keeps
-  // y in memory only, so visiting another step and scrolling there cannot erase the draft left
-  // on the previous one (code review 3).
+  // y in memory only (code review 3). A press does take the blob over, so the question left half
+  // typed on another step rides along in \`drafts\`, by step, and comes back when that step does
+  // (T-21 re-review F2): a press on one step must not cost the learner their words on another.
   var owns = !!(initial && initial.stepId === stepId);
+  var otherDrafts = Object.create(null);
+  if (initial && typeof initial.drafts === 'object' && initial.drafts !== null) {
+    Object.keys(initial.drafts).forEach(function (key) {
+      if (typeof initial.drafts[key] === 'string') { otherDrafts[key] = initial.drafts[key]; }
+    });
+  }
+  if (initial && typeof initial.stepId === 'string' && initial.stepId !== stepId && typeof initial.draft === 'string' && initial.draft !== '') {
+    otherDrafts[initial.stepId] = initial.draft;
+  }
+  if (typeof otherDrafts[stepId] === 'string') {
+    savedDraft = otherDrafts[stepId];
+    delete otherDrafts[stepId];
+  }
   if (initial && initial.stepId === stepId) {
     if (typeof initial.note === 'string') { savedNote = initial.note; }
     if (typeof initial.draft === 'string') { savedDraft = initial.draft; }
@@ -1572,6 +1587,7 @@ const CLIENT_SCRIPT = `
     // within the scroll debounce still saves where the learner really is (code review 7).
     if (restored && typeof window.scrollY === 'number') { savedY = window.scrollY > 0 ? Math.round(window.scrollY) : 0; }
     var blob = { stepId: stepId, note: savedNote, draft: savedDraft };
+    if (Object.keys(otherDrafts).length > 0) { blob.drafts = otherDrafts; }
     if (savedY > 0) { blob.y = savedY; }
     if (revealKey) { blob.reveal = revealKey; blob.revealAt = revealAt; }
     save(blob);
@@ -1620,6 +1636,19 @@ const CLIENT_SCRIPT = `
     }
     revealKey = '';
     persist();
+  }
+  // T-21 re-review F1: a press from a page for a step already left is answered on the page drawn
+  // for the step the learner is on, and the old page's reveal is keyed to the old step, so this is
+  // the page that has to bring the words into view. VS Code then puts the OLD page's scroll
+  // position on a new page at its load, but only a page still at 0 (\`setInitialScrollPosition\` in
+  // its webview pre/index.html), which is why 1 px matters: words already in view stay in view.
+  var choiceWords = document.getElementById('choice-note');
+  if (choiceWords && !(initial && initial.stepId === stepId)) {
+    var choiceOutcome = document.getElementById('outcome-choice');
+    if (choiceOutcome && typeof choiceOutcome.scrollIntoView === 'function') {
+      choiceOutcome.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    }
+    if (window.scrollY === 0 && typeof window.scrollTo === 'function') { window.scrollTo(0, 1); }
   }
   // The note is the one node the host changes WITHOUT a repaint (a refusal, a check note), so
   // it is the page's live region: a screen reader hears it when it changes (WCAG 4.1.3). Set

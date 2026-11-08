@@ -214,7 +214,7 @@ class El {
   scrollIntoView(opts: unknown): void { this.scrolled.push(opts); }
 }
 
-function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = []) {
+function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = [], scrollY?: number) {
   const elements = new Map<string, El>();
   for (const m of html.matchAll(/\sid="([^"]+)"/g)) elements.set(m[1]!, new El());
   const stepId = /<main id="step-main" data-step-id="([^"]*)"/.exec(html)?.[1];
@@ -223,6 +223,7 @@ function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = []) {
   const windowCalls: unknown[] = [];
   const windowListeners = new Map<string, Array<(e: unknown) => void>>();
   const fakeWindow: { scrollY?: number; addEventListener: (t: string, fn: (e: unknown) => void) => void; scrollTo: (...a: unknown[]) => void } = {
+    ...(scrollY === undefined ? {} : { scrollY }),
     addEventListener: (t: string, fn: (e: unknown) => void) => { windowListeners.set(t, [...(windowListeners.get(t) ?? []), fn]); },
     scrollTo: (...args: unknown[]) => { windowCalls.push(args); },
   };
@@ -291,6 +292,53 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
     const dom = runStepScript(html, { stepId: 'st-4-symbol-render', note: '', draft: '', reveal: 'choice', revealAt: Date.now() });
     assert.deepEqual(dom.elements.get('outcome-choice')!.scrolled, [{ block: 'nearest', behavior: 'auto' }]);
     assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, undefined, 'one-shot');
+  });
+
+  test('a refusal answered on a page for another step is brought into view there (T-21 re-review F1)', () => {
+    const REFUSED = 'That press was for a step you have since left, so nothing was recorded.';
+    const html = renderStepHtml(stateAt('st-2-file-parse', { choiceNote: REFUSED }), FAKE_SKINS);
+    const dom = runStepScript(html, { stepId: 'st-4-symbol-render', note: '', draft: '', reveal: 'choice', revealAt: Date.now() }, [], 0);
+    assert.deepEqual(dom.elements.get('outcome-choice')!.scrolled, [{ block: 'nearest', behavior: 'auto' }]);
+    assert.deepEqual(dom.windowCalls, [[0, 1]], 'off 0, or VS Code restores the old page\'s position over it');
+  });
+
+  test('no refusal, or one on the page the press was made on, needs no extra reveal (F1 discriminates)', () => {
+    const REFUSED = 'That press was refused.';
+    const quiet = runStepScript(renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS), { stepId: 'st-4-symbol-render', note: '', draft: '' }, [], 0);
+    assert.deepEqual(quiet.windowCalls, [], 'no refusal on the page, nothing to bring into view');
+    const samePage = runStepScript(renderStepHtml(stateAt('st-2-file-parse', { choiceNote: REFUSED }), FAKE_SKINS), { stepId: 'st-2-file-parse', note: '', draft: '' }, [], 0);
+    assert.deepEqual(samePage.elements.get('outcome-choice')!.scrolled, [], 'a press on this step arms its own reveal, or asks for none');
+    assert.deepEqual(samePage.windowCalls, []);
+  });
+
+  test('a question left half typed on one step survives a press on another, and is not shown there (T-21 re-review F2)', () => {
+    const on = (id: string, saved?: unknown) => runStepScript(renderStepHtml(stateAt(id), FAKE_SKINS), saved);
+    const lastBlob = (dom: ReturnType<typeof runStepScript>): Record<string, unknown> => dom.states[dom.states.length - 1] as Record<string, unknown>;
+
+    const typed = on('st-2-file-parse');
+    typed.elements.get('tutor-input')!.value = 'half a question';
+    typed.elements.get('tutor-input')!.dispatch('input');
+
+    const elsewhere = on('st-4-symbol-render', lastBlob(typed));
+    assert.equal(elsewhere.elements.get('tutor-input')!.value, '', 'a draft never appears under another step');
+    elsewhere.elements.get('btn-check')!.dispatch('click');
+    assert.deepEqual({ ...(lastBlob(elsewhere)['drafts'] as object) }, { 'st-2-file-parse': 'half a question' }, 'the press took the blob over and carried the draft along');
+
+    const back = on('st-2-file-parse', lastBlob(elsewhere));
+    assert.equal(back.elements.get('tutor-input')!.value, 'half a question', 'the draft is back on its own step');
+    back.elements.get('btn-check')!.dispatch('click');
+    assert.equal(lastBlob(back)['drafts'], undefined, 'and it is held once, not twice');
+    assert.equal(lastBlob(back)['draft'], 'half a question');
+  });
+
+  test('a step id that spells an Object.prototype member is just a key in the drafts (F2)', () => {
+    const blob = { stepId: '__proto__', note: '', draft: 'half a question' };
+    const html = renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS);
+    const dom = runStepScript(html, blob);
+    dom.elements.get('btn-check')!.dispatch('click');
+    const saved = dom.states[dom.states.length - 1] as { drafts?: Record<string, unknown> };
+    assert.ok(saved.drafts !== undefined && Object.prototype.hasOwnProperty.call(saved.drafts, '__proto__'), 'kept as an own key');
+    assert.equal(({} as { polluted?: unknown }).polluted, undefined);
   });
 
   test('the page after the repaint scrolls that outcome into view, once', () => {

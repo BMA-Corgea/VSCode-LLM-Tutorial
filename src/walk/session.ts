@@ -2391,7 +2391,7 @@ export class WalkSession {
     this.persistReported = true;
     this.adapters.reportError(
       `Could not save your progress in ${this.target}. The walk still works, but it will not `
-      + 'remember which step you are on the next time you open this folder — the folder may be '
+      + 'remember which step you are on, or any road you have chosen, the next time you open this folder — the folder may be '
       + `read-only, or the disk full. (${reason})`,
     );
   }

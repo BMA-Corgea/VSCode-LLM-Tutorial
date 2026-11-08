@@ -73,7 +73,7 @@ import {
 import type { AskMessage, Availability, LlmReply, TutorCore } from '../../src/tutor/core.js';
 import { getTranscript } from '../../src/tutor/transcript.js';
 import { CHOICE_ALREADY_TAKEN, CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, WalkSession, type WalkAdapters, type WalkView } from '../../src/walk/session.js';
-import { handleStepMessage, parseStepMessage } from '../../src/walk/step-protocol.js';
+import { MAX_OPTION_ID, handleStepMessage, parseStepMessage } from '../../src/walk/step-protocol.js';
 import { commitSubject } from '../../src/dial/commit.js';
 import { fixturePlan, fixtureProgress, repoTourShapedPlan, writeFixtureTarget } from './walk-fixtures.js';
 
@@ -806,6 +806,16 @@ suite('choose — the learner takes a road at a step (T-21, T-10 E1)', () => {
     assert.equal(commitSubject(view.step), authors);
   });
 
+  test('a choice that cannot be written says the road will not be remembered (re-review F4)', () => {
+    const { session, fake } = opened({ saveFails: true });
+    session.goTo(STEP);
+    fake.clearLog();
+    const fresh = opened({ saveFails: true });
+    fresh.session.choose('st-2-file-parse', 'inline-in-routes');
+    assert.equal(fresh.session.getView()?.step.decision.chosen, 'inline-in-routes', 'the walk still works from memory');
+    assert.match(pick(fresh.fake, 'reportError')[0]?.message ?? '', /any road you have chosen/, 'and the learner is told the road may not survive');
+  });
+
   test('a refused press, then a real one: the refusal does not outlive the choice (C3)', () => {
     const { session, fake } = opened();
     session.goTo(STEP);
@@ -1032,6 +1042,16 @@ suite('a press from a page for a step the walk has left (T-21, AC2 — code revi
     assert.equal(session.getView()?.choiceNote, undefined);
   });
 
+  test('a press from the current page that names no usable road is answered in words, not dropped (AC2; re-review F3)', () => {
+    const { session, fake } = opened({ plan: repoTourShapedPlan() });
+    session.goTo(A);
+    fake.clearLog();
+    for (const optionId of [7, null, {}, '', 'x'.repeat(MAX_OPTION_ID + 1)]) deliver(session, choose(A, optionId as string));
+    assert.deepEqual(pick(fake, 'saveProgress'), [], 'nothing is written for an id that will not do');
+    assert.equal(fake.stored()?.steps[A]?.chosen, undefined);
+    assert.equal(session.getView()?.choiceNote, `${CHOICE_NOT_AN_OPTION} Tried 5 times.`, 'and each press is answered, the page says why');
+  });
+
   test('a stale page cannot be used to name the target: the host answers only for its own current step', () => {
     const { session } = opened({ plan: repoTourShapedPlan() });
     session.goTo(A);
@@ -1122,8 +1142,8 @@ suite('a saveProgress that throws — the surfaces may never be left disagreeing
     const message = pick(fake, 'reportError')[0]?.message ?? '';
     assert.match(message, /Could not save your progress/, 'in the learner\'s words, not a stack trace');
     assert.ok(message.includes(TARGET), 'which folder — a window can have several open');
-    assert.match(message, /will not remember/,
-      'what they lost is their PLACE next time, not their work and not this session — the walk keeps working');
+    assert.match(message, /will not remember which step you are on, or any road you have chosen/,
+      'what they lost is their PLACE and their ROADS next time, not their work and not this session — the walk keeps working');
     assert.match(message, /EACCES/, 'and the underlying reason rides along for the output channel');
   });
 

@@ -920,7 +920,7 @@ class FakeElement {
 const ELEMENT_IDS = [
   'step-main', 'step-note', 'btn-prev', 'btn-open', 'btn-check', 'btn-next', 'btn-reproduce',
   // T-21: the page's Choose this instead buttons; the tests that press one give it its option id.
-  'choose-0', 'choose-1',
+  'choose-0', 'choose-1', `choose-${MAX_OPTIONS_RENDERED - 1}`,
   'dial-manual', 'dial-scaffolded', 'dial-automated', 'skinpick',
   // T-6. `btn-tutor-cancel` is only on the page while an ask is in flight and
   // `btn-tutor-ask` only while one is not, so the tests that care delete whichever the page
@@ -1046,6 +1046,14 @@ suite('the step panel\'s client script, actually executed against a fake DOM (AC
     assert.deepEqual(dom.posted[0], { type: 'step:choose', payload: { optionId: 'alt-1', stepId: 'st-4-symbol-render' } });
     assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'step:choose', payload: { optionId: 'alt-1', stepId: 'st-4-symbol-render' } });
     assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, 'choice', 'the answer will be brought into view on the repaint');
+  });
+
+  test('the last control the list can draw is wired too: the script covers every row the cap allows (re-review R29)', () => {
+    const dom = buildFakeDom();
+    dom.elements.get(`choose-${MAX_OPTIONS_RENDERED - 1}`)!.setAttribute('data-option-id', 'the-last-road');
+    runScript(dom, stateAt('st-4-symbol-render'));
+    dom.elements.get(`choose-${MAX_OPTIONS_RENDERED - 1}`)!.dispatch('click');
+    assert.deepEqual(dom.posted, [{ type: 'step:choose', payload: { optionId: 'the-last-road', stepId: 'st-4-symbol-render' } }]);
   });
 
   test('each of the four buttons posts exactly the message parseStepMessage accepts for it', () => {

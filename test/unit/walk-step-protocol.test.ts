@@ -316,13 +316,21 @@ suite('step:choose — the learner takes a road (T-21)', () => {
       { type: 'step:choose', payload: { optionId: 'stream', stepId: null } });
   });
 
-  for (const [label, raw] of [
-    ['no payload', { type: 'step:choose' }],
-    ['an id that is not a string', { type: 'step:choose', payload: { optionId: 7 } }],
-    ['an empty id', { type: 'step:choose', payload: { optionId: '' } }],
-    ['an id longer than any key', { type: 'step:choose', payload: { optionId: 'x'.repeat(MAX_OPTION_ID + 1) } }],
+  test('no payload at all is not a step:choose', () => {
+    assert.equal(parseStepMessage({ type: 'step:choose' }), null);
+  });
+
+  for (const [label, optionId] of [
+    ['an option id that is not a string', 7],
+    ['an empty option id', ''],
+    ['a missing option id', undefined],
+    ['an option id longer than any key', 'x'.repeat(MAX_OPTION_ID + 1)],
   ] as const) {
-    test(`${label}`, () => { assert.equal(parseStepMessage(raw), null); });
+    test(`${label} reaches the session as no option at all, so the page is told why (AC2; re-review F3)`, () => {
+      const payload = optionId === undefined ? { stepId: HERE } : { optionId, stepId: HERE };
+      assert.deepEqual(parseStepMessage({ type: 'step:choose', payload }), { type: 'step:choose', payload: { optionId: '', stepId: HERE } });
+      assert.deepEqual(press(payload).choose, [[HERE, '']], 'the id that will not do is answered by the session, never used as a key');
+    });
   }
 
   test('the longest id a button can post still parses: the parser and the page share one limit (C6)', () => {
