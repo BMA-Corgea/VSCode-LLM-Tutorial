@@ -44,7 +44,7 @@ import { assemblePlan, lineCountOf, stepIdFor, type DeriveCost, type DerivedPlan
 import { ancestorsOf, externalDependencies, insertInOrder, keptBy } from './graph.js';
 import {
   codePrompt, outlinePrompt, parseCodeReply, parseOutlineReply, parseReplanReply, replanPrompt, unsafeDerivedFileReason, validatePlan,
-  type DecisionForPrompt, type DependencyForPrompt, type ShownStep,
+  type DecisionForPrompt, type DependencyForPrompt, type ReplanReply, type ShownStep,
 } from './prompt.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
 import { isDeriveRefusal, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
@@ -176,6 +176,31 @@ async function extractAll(core: Pick<DialCore, 'extract'>, files: readonly Deriv
   }
 }
 
+/** Why repo-tour's reading of `node`'s file means the file may not stand, or `null`. */
+function refusalForReading(node: DerivedNode, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, language: DeriveLanguage): DeriveRefusal | null {
+  if (extract === undefined) return refuse(`repo-tour returned no reading of ${node.path}`);
+  const unsound = unsoundFileReason(extract, allowedFiles, language);
+  return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
+}
+
+/**
+ * The deeper half of judging a code reply: repo-tour's own parser over the real file, with the
+ * files it depends on beside it so its imports resolve. It runs inside the door (`askOnce`'s
+ * `parse`), so a reply that parses as JSON and fails here is never cached: the next press asks
+ * again instead of being handed the same refusal for free, forever.
+ */
+async function refusalForCode(state: DerivationState, node: DerivedNode, content: string, deps: DeriveDeps): Promise<DeriveRefusal | null> {
+  const kindOf = new Map(state.nodes.map((n) => [n.path, n.kind] as const));
+  const dependencies: DerivedFile[] = [];
+  for (const p of new Set(node.dependsOn)) {
+    const code = kindOf.get(p) === 'file' ? state.files[p] : undefined;
+    if (code !== undefined) dependencies.push({ path: p, content: code });
+  }
+  const extracts = await extractAll(deps.dialCore, [...dependencies, { path: node.path, content }]);
+  if (typeof extracts === 'string') return refuse(extracts);
+  return refusalForReading(node, extracts.get(node.path), new Set(dependencies.map((d) => d.path)), state.language);
+}
+
 /**
  * Write the code of the file nodes in `paths`, in plan order, into `state.files` (the caller's
  * working copy). Each code prompt holds exactly the node's chapter decision and the decisions and
@@ -203,7 +228,11 @@ async function writeCode(state: DerivationState, paths: ReadonlySet<string>, dep
       node: { ...decisionOf(node, state.answers), isEntry: node.path === state.entry },
       dependencies,
     });
-    const code = await askOnce(deps, `derive:code:${stepIdFor(node)}`, prompt, (t) => parseCodeReply(t, node.path), tally);
+    const code = await askOnce(deps, `derive:code:${stepIdFor(node)}`, prompt, async (t) => {
+      const reply = parseCodeReply(t, node.path);
+      if (isDeriveRefusal(reply)) return reply;
+      return (await refusalForCode(state, node, reply.content, deps)) ?? reply;
+    }, tally);
     if (isDeriveRefusal(code)) return code;
     state.files[node.path] = code.content;
   }
@@ -223,11 +252,9 @@ async function checkAndWrite(state: DerivationState, deps: DeriveDeps): Promise<
   if (typeof extracts === 'string') return refuse(extracts);
   const kindOf = new Map(state.nodes.map((n) => [n.path, n.kind] as const));
   for (const node of fileNodes) {
-    const extract = extracts.get(node.path);
-    if (extract === undefined) return refuse(`repo-tour returned no reading of ${node.path}`);
     const allowed = new Set(node.dependsOn.filter((p) => kindOf.get(p) === 'file'));
-    const unsound = unsoundFileReason(extract, allowed, state.language);
-    if (unsound !== null) return refuse(`the derived file ${node.path} ${unsound}`);
+    const refused = refusalForReading(node, extracts.get(node.path), allowed, state.language);
+    if (refused !== null) return refused;
   }
   const tree = writeReferenceTree(deps.globalStorageRoot, deps.target, state.title, files);
   if (isDeriveRefusal(tree)) return tree;
@@ -243,6 +270,49 @@ function finish(state: DerivationState, checked: { extracts: Map<string, Extract
   });
   const files = state.nodes.filter((n) => n.kind === 'file').map((n) => ({ path: n.path, content: state.files[n.path]! }));
   return { ok: true, plan, referenceRoot: checked.root, files, state };
+}
+
+interface MergedReplan {
+  nodes: DerivedNode[];
+  chapters: DerivedChapter[];
+  entry: string;
+  /** the steps this replan created, with the edges the honesty rule owes them */
+  fresh: DerivedNode[];
+}
+
+/**
+ * Merge a parsed replan into the plan, or say why it cannot be. Pure, and run inside the door
+ * (`askOnce`'s `parse`), so a replan that parses and cannot be merged is never cached.
+ */
+function mergeReplan(
+  prev: DerivationState, reply: ReplanReply, decisionPath: string, externals: readonly string[], kept: ReadonlySet<string>, replaced: ReadonlySet<string>,
+): MergedReplan | DeriveRefusal {
+  const known = new Set(prev.chapters.map((c) => c.key));
+  for (const c of reply.chapters) {
+    if (known.has(c.key)) return refuse(`the replan lists a new chapter "${c.key}" that the plan already has`);
+  }
+  // The honesty rule — see the header. Owed edges first, then the model's own, without repeats.
+  const owed = [decisionPath, ...externals];
+  const fresh = reply.nodes.map((n) => ({ ...n, dependsOn: [...new Set([...owed, ...n.dependsOn])] }));
+  const keptFolded = new Set(prev.nodes.filter((n) => kept.has(n.path)).map((n) => n.path.toLowerCase()));
+  for (const n of fresh) {
+    if (keptFolded.has(n.path.toLowerCase())) return refuse(`the replan returned a step at ${JSON.stringify(n.path)}, which is a step it was told to keep`);
+  }
+  const nodes = insertInOrder(prev.nodes.filter((n) => kept.has(n.path)), fresh);
+  // The entry moves only if the step that held it was replaced: a replan that re-creates it at the
+  // same path keeps it; one that drops the path must name the new one.
+  let entry = prev.entry;
+  if (replaced.has(prev.entry)) {
+    const recreated = nodes.some((n) => n.path === prev.entry && n.kind === 'file');
+    const named = reply.entry;
+    if (named !== null) entry = named;
+    else if (!recreated) return refuse('the replan replaced the file that starts the app without naming a new one');
+  }
+  const used = new Set(nodes.map((n) => n.chapter));
+  const chapters = [...prev.chapters, ...reply.chapters].filter((c) => used.has(c.key));
+  const problem = validatePlan(chapters, nodes, entry);
+  if (problem !== null) return refuse(`the replanned steps do not make a plan: ${problem.refused}`);
+  return { nodes, chapters, entry, fresh };
 }
 
 /**
@@ -277,39 +347,16 @@ async function replanCore(
       shown: prev.nodes.filter((n) => shownPaths.has(n.path)).map((n) => shownStepOf(n, state.answers)),
       replacing: prev.nodes.filter((n) => replaced.has(n.path)).map((n) => shownStepOf(n, state.answers)),
     });
-    const reply = await askOnce(deps, `derive:replan:${id}`, prompt, (t) => parseReplanReply(t, prev.language), tally);
-    if (isDeriveRefusal(reply)) return reply;
-
-    const known = new Set(prev.chapters.map((c) => c.key));
-    for (const c of reply.chapters) {
-      if (known.has(c.key)) return refuse(`the replan lists a new chapter "${c.key}" that the plan already has`);
-    }
-    // The honesty rule — see the header. Owed edges first, then the model's own, without repeats.
-    const owed = [decisionPath, ...externals];
-    const fresh = reply.nodes.map((n) => ({ ...n, dependsOn: [...new Set([...owed, ...n.dependsOn])] }));
-    const keptFolded = new Set(prev.nodes.filter((n) => kept.has(n.path)).map((n) => n.path.toLowerCase()));
-    for (const n of fresh) {
-      if (keptFolded.has(n.path.toLowerCase())) return refuse(`the replan returned a step at ${JSON.stringify(n.path)}, which is a step it was told to keep`);
-    }
-    const merged = insertInOrder(prev.nodes.filter((n) => kept.has(n.path)), fresh);
-    // The entry moves only if the step that held it was replaced: a replan that re-creates it at the
-    // same path keeps it; one that drops the path must name the new one.
-    let entry = prev.entry;
-    if (replaced.has(prev.entry)) {
-      const recreated = merged.some((n) => n.path === prev.entry && n.kind === 'file');
-      const named = reply.entry;
-      if (named !== null) entry = named;
-      else if (!recreated) return refuse('the replan replaced the file that starts the app without naming a new one');
-    }
-    const used = new Set(merged.map((n) => n.chapter));
-    const chapters = [...prev.chapters, ...reply.chapters].filter((c) => used.has(c.key));
-    const problem = validatePlan(chapters, merged, entry);
-    if (problem !== null) return refuse(`the replanned steps do not make a plan: ${problem.refused}`);
-    state.nodes = merged;
-    state.chapters = chapters;
-    state.entry = entry;
+    const merged = await askOnce(deps, `derive:replan:${id}`, prompt, (t) => {
+      const reply = parseReplanReply(t, prev.language);
+      return isDeriveRefusal(reply) ? reply : mergeReplan(prev, reply, decisionPath, externals, kept, replaced);
+    }, tally);
+    if (isDeriveRefusal(merged)) return merged;
+    state.nodes = merged.nodes;
+    state.chapters = merged.chapters;
+    state.entry = merged.entry;
     for (const p of replaced) delete state.files[p];
-    for (const n of fresh) if (n.kind === 'file') rewrite.add(n.path);
+    for (const n of merged.fresh) if (n.kind === 'file') rewrite.add(n.path);
   }
   const wrote = await writeCode(state, rewrite, deps, tally);
   if (wrote !== null) return wrote;

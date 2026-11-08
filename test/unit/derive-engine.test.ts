@@ -203,6 +203,24 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     });
   }
 
+  for (const [name, broken, pattern] of [
+    ['a TypeScript annotation in a .mjs file (it parses as JSON and fails as code)', 'export function total(xs: number[]) {\n  return 0;\n}\n', /does not parse/],
+    ['an import of a package that would need installing', "import _ from 'lodash';\nexport function total(xs) { return _.sum(xs); }\n", /would need installing/],
+  ] as Array<[string, string, RegExp]>) {
+    test(`a code reply with ${name} is refused and NOT kept: the next press asks again and can succeed`, async () => {
+      const gs = tempDir('derive-engine-gs-');
+      const target = tempDir('derive-engine-target-');
+      const first = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': broken, 'cli/main.mjs': MAIN }).run, gs, target));
+      assert.ok(!first.ok, 'the broken reply fails the derivation');
+      assert.match(first.reason, pattern);
+      const good = fakeModel();
+      const again = await derivePlan({ idea: FIXTURE_IDEA }, deps(good.run, gs, target));
+      if (!again.ok) assert.fail(`a good model was given no chance, because the bad reply was served again: ${again.reason}`);
+      assert.deepEqual(good.asked.map((a) => a.task), ['code', 'code'], 'the outline was kept; the bad file was asked again');
+      assert.deepEqual({ calls: again.plan.cost.calls, cachedStops: again.plan.cost.cachedStops }, { calls: 2, cachedStops: 1 });
+    });
+  }
+
   test('AC10: the plan\'s cost is the run\'s, honestly: summed, named, and a floor once any reply was unmetered', async () => {
     const model = fakeModel();
     let n = 0;
@@ -459,6 +477,34 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     const out = await replanPlan(tampered, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(POISONED, b.gs, b.target));
     assert.ok(!out.ok);
     assert.match(out.reason, /not one of its file steps/);
+  });
+
+  test('a replan reply the merge refuses is NOT kept: the next press asks again and can succeed', async () => {
+    const b = await base();
+    const tallyId = idOf(b.first.state, 'core/tally.mjs');
+    const opts = [{ id: 'a', label: 'A', consequence: 'x' }, { id: 'b', label: 'B', consequence: 'y' }];
+    const clashing = fakeModel({}, (input) => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      return { steps: [{ kind: 'shape', chapter: 'cli', path: 'cli', question: 'again?', options: opts, recommended: 'a', why: 'w', dependsOn: [] }, ...out.steps] };
+    });
+    const refused = await replanPlan(b.first.state, tallyId, 'object', [], deps(clashing.run, b.gs, b.target));
+    assert.ok(!refused.ok);
+    assert.match(refused.reason, /a step it was told to keep/);
+    const good = fakeModel();
+    const again = await replanPlan(b.first.state, tallyId, 'object', [], deps(good.run, b.gs, b.target));
+    if (!again.ok) assert.fail(`a good model was given no chance, because the refused replan was served again: ${again.reason}`);
+    assert.equal(good.asked.filter((a) => a.task === 'replan').length, 1, 'the replan was asked again');
+  });
+
+  test('a replanned step that depends on something no step provides is refused: the MERGED plan is validated', async () => {
+    const b = await base();
+    const dangling = fakeModel({}, (input) => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      return { steps: out.steps.map((st) => ({ ...st, dependsOn: ['core/ghost.mjs'] })) };
+    });
+    const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(dangling.run, b.gs, b.target));
+    assert.ok(!out.ok, 'a dangling dependency must not make a plan');
+    assert.match(out.reason, /do not make a plan: .*not an earlier step/);
   });
 
   test('a replan that replaces the entry file without naming a new one is refused', async () => {

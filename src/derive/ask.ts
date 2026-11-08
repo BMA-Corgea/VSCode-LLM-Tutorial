@@ -15,8 +15,10 @@
  *      that `abandonAll()` reaches, and the running total that `spend()` reports. Nothing here
  *      names `runLlm`, `startAsk`, `startPromptAsk`, `askTutor` or `askWithPrompt`, and the unit
  *      suite scans `src/derive/` to keep it that way.
- *   3. **Then the parser**, and only a reply that PARSED is written to the cache. A bad reply is
- *      asked again on the next press rather than served forever.
+ *   3. **Then the parser**, and only a reply that PASSED is written to the cache. `parse` is every
+ *      check a reply has to survive, so the engine hands it the deeper ones too (does the file
+ *      really parse, does the replan merge into a plan). A reply that fails ANY of them is asked
+ *      again on the next press rather than served forever.
  *
  * Each distinct prompt is therefore asked at most once while its answer stays cached — which is
  * the whole of the engine's determinism, and why the second derivation of the same idea and
@@ -84,12 +86,13 @@ function countCost(tally: AskTally, outcome: AskOutcome): void {
 /**
  * Ask `prompt` at most once: the cache, then the ledger, then the parser — see the header.
  * `parse` is the SAME function for a cached reply and a live one; that sameness is the point.
+ * It may be async because one of the checks it carries is repo-tour's parser over a real file.
  */
 export async function askOnce<T>(
   deps: DeriveAskDeps,
   ticketId: string,
   prompt: string,
-  parse: (text: string) => T | DeriveRefusal,
+  parse: (text: string) => T | DeriveRefusal | Promise<T | DeriveRefusal>,
   tally: AskTally,
 ): Promise<T | DeriveRefusal> {
   if (deps.isCancelled?.() === true) return { refused: 'the derivation was cancelled before this question was asked' };
@@ -97,7 +100,7 @@ export async function askOnce<T>(
   const key = deriveCacheKey(prompt);
   const cached = readCachedReply(deps.globalStorageRoot, key);
   if (cached !== null) {
-    const fromCache = parse(cached);
+    const fromCache = await parse(cached);
     if (!isDeriveRefusal(fromCache)) {
       tally.cachedStops += 1;
       return fromCache;
@@ -121,7 +124,7 @@ export async function askOnce<T>(
     case 'failed':
       return { refused: `the request failed: ${outcome.detail}` };
     case 'reply': {
-      const parsed = parse(outcome.text);
+      const parsed = await parse(outcome.text);
       if (isDeriveRefusal(parsed)) {
         tally.failures.push(parsed.refused);
         return parsed;
