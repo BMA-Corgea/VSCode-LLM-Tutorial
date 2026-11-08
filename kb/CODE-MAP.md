@@ -128,7 +128,7 @@ will be overwritten.
 
 ## src/start/off-thread.ts
 
-- Exports: offThreadCore
+- Exports: BUILD_WORKER_HEAP_MB, offThreadCore
 - Imports: (none)
 
 ## src/start/panel.ts

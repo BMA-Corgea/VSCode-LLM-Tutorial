@@ -27,6 +27,26 @@ succeed.
 - **`async` on a signature says nothing.** `buildPlan` is declared `async` and never awaits. `grep`
   for `await` in the body before believing a phase can yield.
 
+## A worker thread contains less than it looks like (T-30, 2026-11-08)
+
+Moving work to a worker felt like moving it out of harm's way, and the first version of T-30's spec
+said so: an out-of-memory ends the worker, not the host. Driven in the real extension host, that was
+false. Three things a thread is not, all found by review after the green:
+
+- **A heap limit it was not given.** With none, a worker inherits the host's (about 4 GiB), and the
+  real host died reaching it. Set `resourceLimits`. Even then one huge single allocation can take the
+  process down: only a separate process is a real wall.
+- **Stoppable.** `terminate()` cannot interrupt a native call or a blocking child. A promise that waits
+  for the thread hands Cancel to whatever that call feels like doing, so settle on your own timer, and
+  say what is still running. `unref` frees the event loop and not the process, which still waits at exit.
+- **Listened to for free.** Listeners attached per request come off when the request ends, so a thread
+  that dies in the gap is heard by nothing: the next request posts into a dead thread, and an `'error'`
+  with no listener is thrown on the thread every extension shares. Attach them for the thread's life.
+
+**Check what the library does whatever you asked it not to.** `write: false` stops `digest` writing;
+it still reads `<outDir>/inventory.json`, and that followed a symlink committed in the repository being
+read.
+
 ## Clean-up that stops at the file leaves the folder it made (T-30, 2026-11-08)
 
 A cancelled build deleted its write-ahead marker, and every check for the marker said the build had
