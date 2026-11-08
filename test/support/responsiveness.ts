@@ -55,8 +55,13 @@ export interface Clause {
   status: 'pass' | 'fail' | 'not-evaluated';
   why: string;
 }
+/** Which files the walk put on each side: "pass" also has to say how much it judged. */
+export interface Partition {
+  downstream: string[];
+  independent: string[];
+}
 export type Verdict =
-  | { kind: 'judged'; precondition: Clause; downstream: Clause; independent: Clause }
+  | { kind: 'judged'; precondition: Clause; downstream: Clause; independent: Clause; partition: Partition | null }
   | { kind: 'cannot-judge'; why: string };
 
 /** "It listened", and nothing weaker: a verdict that could not judge is not a pass. */
@@ -146,9 +151,14 @@ function sortedFiles(derived: Finished): DerivedFileLike[] {
 }
 
 function checkDownstream(a: Finished, b: Finished, decision: StepLike, downstream: readonly StepLike[], answers: readonly [string, string]): Clause {
-  const aDecision = decision.decision.chosen;
-  const bDecision = stepFor(b.plan, decision.target.file)?.decision.chosen;
-  if (aDecision === bDecision) return fail(`the decision itself did not take the answer: ${decision.target.file} chose ${String(aDecision)} in both runs (asked for ${answers[0]} and ${answers[1]})`);
+  const file = decision.target.file;
+  const inB = stepFor(b.plan, file);
+  if (inB === undefined) return fail(`${file}, the decision itself, is gone from the second run`);
+  const tookAnswer = (taken: string | null, asked: string): boolean => taken === asked;
+  if (!tookAnswer(decision.decision.chosen, answers[0])) return fail(`the decision did not take the answer: ${file} chose ${String(decision.decision.chosen)} when asked for ${answers[0]}`);
+  if (!tookAnswer(inB.decision.chosen, answers[1])) return fail(`the decision did not take the answer: ${file} chose ${String(inB.decision.chosen)} when asked for ${answers[1]}`);
+  const code = bytesOf(a, file);
+  if (code !== undefined && code === bytesOf(b, file)) return fail(`${file} was answered differently and its own code did not change`);
   for (const step of downstream) {
     const counterpart = stepFor(b.plan, step.target.file);
     if (counterpart === undefined) continue; // gone is a difference
@@ -159,7 +169,7 @@ function checkDownstream(a: Finished, b: Finished, decision: StepLike, downstrea
   return PASS;
 }
 
-function checkIndependent(a: Finished, b: Finished, decisionFile: string, independent: readonly StepLike[], bDownstream: ReadonlySet<string>): Clause {
+function checkIndependent(a: Finished, b: Finished, decisionFile: string, independent: readonly StepLike[], downstream: readonly StepLike[], bDownstream: ReadonlySet<string>): Clause {
   for (const step of independent) {
     const counterpart = stepFor(b.plan, step.target.file);
     if (counterpart === undefined) return fail(`${step.target.file} is independent of ${decisionFile} and is gone from the second run`);
@@ -167,13 +177,35 @@ function checkIndependent(a: Finished, b: Finished, decisionFile: string, indepe
     if (bytesOf(a, step.target.file) !== bytesOf(b, step.target.file)) return fail(`${step.target.file} is independent of ${decisionFile} and its file changed`);
   }
   const known = new Set(independent.map((s) => s.target.file));
-  const inOrder = (derived: Finished): string[] => derived.plan.steps.map((s) => s.target.file).filter((f) => known.has(f));
+  // By `ordinal`, the order the walk presents, not the order of the array.
+  const inOrder = (derived: Finished): string[] => [...derived.plan.steps]
+    .sort((x, y) => ordinalOf(x) - ordinalOf(y))
+    .map((s) => s.target.file)
+    .filter((f) => known.has(f));
   if (!same(inOrder(a), inOrder(b))) return fail(`the steps independent of ${decisionFile} are in a different order: ${inOrder(a).join(', ')} then ${inOrder(b).join(', ')}`);
   for (const step of b.plan.steps) {
     if (step.target.file === decisionFile || bDownstream.has(step.id) || known.has(step.target.file)) continue;
     return fail(`${step.target.file} appeared in the second run and is not downstream of ${decisionFile}`);
   }
+
+  // Beyond the steps: what the decision does not reach includes every other file and chapter.
+  const reachedFiles = new Set([decisionFile, ...downstream.map((s) => s.target.file), ...b.plan.steps.filter((s) => bDownstream.has(s.id)).map((s) => s.target.file)]);
+  for (const path of new Set([...a.files, ...b.files].map((f) => f.path))) {
+    if (!reachedFiles.has(path) && bytesOf(a, path) !== bytesOf(b, path)) return fail(`the file ${path}, which the decision does not reach, changed`);
+  }
+  const chapterOf = (s: StepLike): unknown => s['chapter'];
+  const touched = new Set([...a.plan.steps, ...b.plan.steps].filter((s) => reachedFiles.has(s.target.file)).map(chapterOf));
+  const chapters = (plan: PlanLike): Array<Record<string, unknown>> => (Array.isArray(plan['chapters']) ? plan['chapters'] as Array<Record<string, unknown>> : []);
+  for (const chapter of chapters(a.plan)) {
+    if (touched.has(chapter['key'])) continue;
+    const other = chapters(b.plan).find((c) => c['key'] === chapter['key']);
+    if (!same(chapter, other)) return fail(`the chapter ${String(chapter['key'])}, which the decision does not reach, changed`);
+  }
   return PASS;
+}
+
+function ordinalOf(step: StepLike): number {
+  return typeof step['ordinal'] === 'number' ? step['ordinal'] : 0;
 }
 
 /**
@@ -181,9 +213,10 @@ function checkIndependent(a: Finished, b: Finished, decisionFile: string, indepe
  * precondition), and once with the second.
  *
  * An answer is keyed by step id, and a step's id comes from its decision's words and not from the
- * answer, so the ids read from the first derivation stay good for D and for anything independent of
- * it. They do not stay good downstream of D, whose words a replan can rewrite, which is one reason a
- * scenario may not answer there; the other is that it would no longer differ at exactly one decision.
+ * answer, so the ids read from the first derivation stay good for D and for steps it has nothing to
+ * do with. A replan can rewrite the words of anything downstream of the step it answers, so they do
+ * not stay good downstream of D (where answering would also stop it differing at exactly one
+ * decision), and D's own does not stay good if an ancestor of D is answered. A scenario may do neither.
  */
 export async function judgeResponsiveness(derive: Derivation, scenario: Scenario): Promise<Verdict> {
   const cannot = (why: string): Verdict => ({ kind: 'cannot-judge', why });
@@ -202,6 +235,7 @@ export async function judgeResponsiveness(derive: Derivation, scenario: Scenario
     const other = stepFor(first.plan, file);
     if (other === undefined) return cannot(`no step targets ${file}`);
     if (other.id === decision.id || reachable.has(other.id)) return cannot(`${file} is the decision or downstream of it: answering it too would not differ at exactly one decision`);
+    if (stepsReaching(first.plan, other.id).has(decision.id)) return cannot(`${file} is an ancestor of the decision: answering it can rewrite the decision's own words, so its id would go stale`);
     shared[other.id] = option;
   }
 
@@ -213,7 +247,7 @@ export async function judgeResponsiveness(derive: Derivation, scenario: Scenario
   const again = await derive({ idea: scenario.idea, answers: answersA });
   if (!again.ok) return refused(again);
   const precondition = checkPrecondition(a, again);
-  if (precondition.status !== 'pass') return { kind: 'judged', precondition, downstream: NOT_EVALUATED, independent: NOT_EVALUATED };
+  if (precondition.status !== 'pass') return { kind: 'judged', precondition, downstream: NOT_EVALUATED, independent: NOT_EVALUATED, partition: null };
 
   const b = await derive({ idea: scenario.idea, answers: answersB });
   if (!b.ok) return refused(b);
@@ -232,6 +266,7 @@ export async function judgeResponsiveness(derive: Derivation, scenario: Scenario
     kind: 'judged',
     precondition,
     downstream: checkDownstream(a, b, decided, downstream, scenario.answers),
-    independent: checkIndependent(a, b, scenario.decision, independent, bDown),
+    independent: checkIndependent(a, b, scenario.decision, independent, downstream, bDown),
+    partition: { downstream: downstream.map((s) => s.target.file), independent: independent.map((s) => s.target.file) },
   };
 }

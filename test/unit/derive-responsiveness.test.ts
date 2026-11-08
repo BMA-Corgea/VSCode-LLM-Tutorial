@@ -6,9 +6,11 @@
  * the steps independent of D do not. Determinism first, or neither clause can be evaluated.
  *
  * The real `derivePlan`, the real `AskLedger`, repo-tour's real `extract`. The model is a fake
- * whose answers are a pure function of the WHOLE of the prompt's `INPUT (JSON):` line: every file
- * it writes carries a hash of that line, so a step shown anything different comes back different,
- * and "the independent steps do not differ" also means nothing they were shown differed.
+ * whose answers are a pure function of the prompt's `INPUT (JSON):` line: every file it writes
+ * carries a hash of that line WITHOUT its `dependencies`, so a step shown anything else different
+ * comes back different, and "the independent steps do not differ" also means nothing they were
+ * shown differed. Not the dependencies: an independent step's dependencies are independent too, and
+ * hashing them would make a step that nothing re-derived look as though it had responded.
  * `core.runLlm` is poisoned, so a test that forgot the fake fails instead of dialling out (pinned
  * below). No test spends a token. Every derivation starts from an empty cache, or the engine's cache
  * would answer the second run and hide a derivation that is not deterministic.
@@ -28,7 +30,7 @@ import { AskLedger } from '../../src/tutor/ask.js';
 import { tutorCoreFor, type TutorCore } from '../../src/tutor/core.js';
 import {
   judgeResponsiveness, passed, stepsReaching,
-  type Derivation, type Derived, type PlanLike, type Scenario, type StepLike, type Verdict,
+  type DerivedFileLike, type Derivation, type Derived, type PlanLike, type Scenario, type StepLike, type Verdict,
 } from '../support/responsiveness.js';
 import { FIXTURE_IDEA, outlineWith, stepsOf } from './derive-fixtures.js';
 
@@ -65,6 +67,11 @@ function tempDir(prefix: string): string {
 const CHAIN_OUTLINE = outlineWith((o) => {
   (o['chapters'] as unknown[]).splice(1, 0, { key: 'notes', title: 'Notes', subtitle: 'beside the rest' });
   const steps = stepsOf(o);
+  // A third option on each decision the tests answer, so both runs can answer OFF the
+  // recommendation: answering the recommendation does not replan at all.
+  const optionsOf = (file: string): unknown[] => steps.find((s) => s['path'] === file)?.['options'] as unknown[];
+  optionsOf('core/tally.mjs').push({ id: 'array', label: 'A list it appends to', consequence: 'simple; grows with use' });
+  optionsOf('core').push({ id: 'c', label: 'A folder per feature', consequence: 'roomy; too much for a tally' });
   const main = steps.findIndex((s) => s['path'] === 'cli/main.mjs');
   steps.splice(main, 0, {
     kind: 'file', chapter: 'cli', path: 'cli/format.mjs', question: 'How is a total shown?',
@@ -107,7 +114,8 @@ const promptReadingModel: TutorCore['runLlm'] = (prompt) => {
   } else if (input['task'] === 'code') {
     const node = input['node'] as { path: string; question: string; chosen: { label: string } };
     // The whole input, hashed: a step that was shown something else writes something else.
-    const tag = `// ${node.chosen.label}: ${node.question} [${createHash('sha256').update(line).digest('hex').slice(0, 12)}]\n`;
+    const shown = createHash('sha256').update(JSON.stringify({ ...input, dependencies: undefined })).digest('hex').slice(0, 12);
+    const tag = `// ${node.chosen.label}: ${node.question} [${shown}]\n`;
     const code: Record<string, string> = {
       'core/tally.mjs': `${tag}export function total(xs) {\n  return xs.reduce((a, b) => a + b, 0);\n}\n`,
       'cli/format.mjs': `${tag}import { total } from '../core/tally.mjs';\n\nexport function show(xs) {\n  return String(total(xs));\n}\n`,
@@ -140,8 +148,9 @@ const derivationWith = (run: TutorCore['runLlm'] | undefined): Derivation => asy
 
 const realDerivation: Derivation = derivationWith(promptReadingModel);
 
+/** Both answers are off the recommendation, so BOTH runs really replan and the determinism check covers it. */
 const ON_THE_TALLY: Scenario = {
-  idea: FIXTURE_IDEA, decision: 'core/tally.mjs', answers: ['pure', 'object'], alsoAnswered: { 'notes/about.mjs': 'long' },
+  idea: FIXTURE_IDEA, decision: 'core/tally.mjs', answers: ['object', 'array'], alsoAnswered: { 'notes/about.mjs': 'long' },
 };
 
 function judged(verdict: Verdict): Extract<Verdict, { kind: 'judged' }> {
@@ -165,6 +174,17 @@ suite('AC-A1 on the real engine (T-19)', function () {
     assert.equal(verdict.precondition.status, 'pass', verdict.precondition.why);
     assert.equal(verdict.downstream.status, 'pass', verdict.downstream.why);
     assert.equal(verdict.independent.status, 'pass', verdict.independent.why);
+    assert.deepEqual(verdict.partition, {
+      downstream: ['cli/format.mjs', 'cli/main.mjs'],
+      independent: ['core', 'notes', 'notes/about.mjs', 'cli'],
+    }, 'the plan\'s own edges decide what may change: the fixture knows what they should be');
+  });
+
+  test('when one answer is the recommendation it is still recorded, and the comparison still holds', async () => {
+    const verdict = judged(await judgeResponsiveness(realDerivation, { ...ON_THE_TALLY, answers: ['pure', 'object'] }));
+    assert.equal(verdict.precondition.status, 'pass', verdict.precondition.why);
+    assert.equal(verdict.downstream.status, 'pass', verdict.downstream.why);
+    assert.equal(verdict.independent.status, 'pass', verdict.independent.why);
   });
 
   test('nothing here can reach a model: with no fake, the poisoned runner is what answers, and it refuses', async () => {
@@ -174,10 +194,12 @@ suite('AC-A1 on the real engine (T-19)', function () {
   });
 
   test('AC7: the same for a decision that is a shape step, whose whole directory is downstream', async () => {
-    const verdict = judged(await judgeResponsiveness(realDerivation, { idea: FIXTURE_IDEA, decision: 'core', answers: ['a', 'b'] }));
+    const verdict = judged(await judgeResponsiveness(realDerivation, { idea: FIXTURE_IDEA, decision: 'core', answers: ['b', 'c'] }));
     assert.equal(verdict.precondition.status, 'pass', verdict.precondition.why);
     assert.equal(verdict.downstream.status, 'pass', verdict.downstream.why);
     assert.equal(verdict.independent.status, 'pass', verdict.independent.why);
+    assert.deepEqual(new Set(verdict.partition?.downstream), new Set(['core/tally.mjs', 'cli/format.mjs', 'cli/main.mjs']));
+    assert.deepEqual(new Set(verdict.partition?.independent), new Set(['notes', 'notes/about.mjs', 'cli']));
   });
 });
 
@@ -201,15 +223,15 @@ suite('the harness can fail: three mutant derivations (T-19 AC6)', function () {
 
   const ignoresTheAnswers: Derivation = (request) => realDerivation({ idea: request.idea });
 
-  /** Changes nothing about any step, only the order of two the decision has nothing to do with. */
+  /** Changes nothing about any step, only the order the walk would present two the decision has nothing to do with. */
   const reordersTheIndependentSteps: Derivation = async (request) => {
     const out = await realDerivation(request);
     if (!out.ok) return out;
-    if (!Object.values(request.answers ?? {}).includes('object')) return out;
-    const steps = [...out.plan.steps];
-    const notes = steps.findIndex((s) => s.target.file === 'notes/about.mjs');
-    const cli = steps.findIndex((s) => s.target.file === 'cli');
-    [steps[notes], steps[cli]] = [steps[cli] as StepLike, steps[notes] as StepLike];
+    if (!Object.values(request.answers ?? {}).includes('array')) return out;
+    const steps = out.plan.steps.map((s) => ({ ...s }));
+    const notes = steps.find((s) => s.target.file === 'notes/about.mjs') as StepLike;
+    const cli = steps.find((s) => s.target.file === 'cli') as StepLike;
+    [notes['ordinal'], cli['ordinal']] = [cli['ordinal'], notes['ordinal']];
     return { ...out, plan: { ...out.plan, steps } };
   };
 
@@ -317,12 +339,128 @@ suite('"cannot judge" is its own outcome, and is never a pass (T-19 AC5)', funct
   test('another answer on a step downstream of the decision is not "differing at exactly one decision"', async () => {
     cannotJudge(await judgeResponsiveness(realDerivation, { ...ON_THE_TALLY, alsoAnswered: { 'cli/main.mjs': 'steps' } }), /downstream/i);
   });
+
+  test('an answer on an ancestor of the decision is the scenario\'s mistake, and says so', async () => {
+    cannotJudge(await judgeResponsiveness(realDerivation, { ...ON_THE_TALLY, alsoAnswered: { core: 'b' } }), /ancestor/i);
+  });
+});
+
+suite('every branch of the judge has a failure of its own (T-19 code review F6)', () => {
+  const D = (chosen: string | null): StepLike => ({ ...step('d'), decision: { chosen } });
+  const SCENARIO: Scenario = { idea: 'x', decision: 'd', answers: ['a', 'b'] };
+  type Shape = { steps: StepLike[]; files?: DerivedFileLike[]; extra?: Record<string, unknown> };
+
+  /** A hand-built derivation: `d` takes the answer, `down` depends on it and follows it, `ind` is left alone. */
+  function fromAnswer(make: (answer: string | null, call: number) => Shape): Derivation {
+    let calls = 0;
+    return (request) => {
+      calls += 1;
+      const { steps, files = [], extra = {} } = make(request.answers?.['d'] ?? null, calls);
+      return Promise.resolve({ ok: true, plan: { ...extra, steps }, files });
+    };
+  }
+  const followed = (answer: string | null): StepLike => ({ ...step('down', ['d']), decision: { chosen: answer } });
+  const plain = (answer: string | null): StepLike[] => [D(answer), followed(answer), step('ind')];
+
+  async function clauses(derive: Derivation): Promise<Extract<Verdict, { kind: 'judged' }>> {
+    return judged(await judgeResponsiveness(derive, SCENARIO));
+  }
+
+  test('precondition: a file that differs between two runs of the same input', async () => {
+    const verdict = await clauses(fromAnswer((a, call) => ({ steps: plain(a), files: [{ path: 'ind', content: String(call) }] })));
+    assert.equal(verdict.precondition.status, 'fail');
+    assert.match(verdict.precondition.why, /the file ind differs/);
+  });
+
+  test('precondition: a plan-level field that differs between two runs of the same input', async () => {
+    const verdict = await clauses(fromAnswer((a, call) => ({ steps: plain(a), extra: { title: String(call) } })));
+    assert.equal(verdict.precondition.status, 'fail');
+    assert.match(verdict.precondition.why, /the plan differs/);
+  });
+
+  test('precondition: `generatedAt` and `cost` describe the run, and may differ', async () => {
+    const verdict = await clauses(fromAnswer((a, call) => ({ steps: plain(a), extra: { generatedAt: String(call), cost: call } })));
+    assert.equal(verdict.precondition.status, 'pass', verdict.precondition.why);
+  });
+
+  test('independent: only its file changed', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: plain(a), files: [{ path: 'ind', content: String(a) }] })));
+    assert.equal(verdict.independent.status, 'fail');
+    assert.match(verdict.independent.why, /^ind is independent of d and its file changed/);
+  });
+
+  test('independent: only its record changed', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: [D(a), followed(a), { ...step('ind'), why: String(a) }] })));
+    assert.equal(verdict.independent.status, 'fail');
+    assert.match(verdict.independent.why, /^ind is independent of d and its step changed/);
+  });
+
+  test('independent: gone from the second run', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: a === 'b' ? [D(a), followed(a)] : plain(a) })));
+    assert.equal(verdict.independent.status, 'fail');
+    assert.match(verdict.independent.why, /is gone from the second run/);
+  });
+
+  test('independent: a step appears in the second run that is not downstream of the decision', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: a === 'b' ? [...plain(a), step('extra')] : plain(a) })));
+    assert.equal(verdict.independent.status, 'fail');
+    assert.match(verdict.independent.why, /^extra appeared in the second run/);
+  });
+
+  test('independent: a file no step owns, and a chapter the decision does not reach', async () => {
+    const stray = await clauses(fromAnswer((a) => ({ steps: plain(a), files: [{ path: 'stray', content: String(a) }] })));
+    assert.equal(stray.independent.status, 'fail');
+    assert.match(stray.independent.why, /the file stray, which the decision does not reach, changed/);
+    const inChapter = (s: StepLike, chapter: string): StepLike => ({ ...s, chapter });
+    const chapter = await clauses(fromAnswer((a) => ({
+      steps: [inChapter(D(a), 'near'), inChapter(followed(a), 'near'), inChapter(step('ind'), 'far')],
+      extra: { chapters: [{ key: 'near', title: 'n' }, { key: 'far', title: String(a) }] },
+    })));
+    assert.equal(chapter.independent.status, 'fail');
+    assert.match(chapter.independent.why, /the chapter far, which the decision does not reach, changed/);
+  });
+
+  test('downstream: a step whose only change is its file has responded', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: [D(a), step('down', ['d']), step('ind')], files: [{ path: 'down', content: String(a) }] })));
+    assert.equal(verdict.downstream.status, 'pass', verdict.downstream.why);
+  });
+
+  test('downstream: a step that is gone from the second run has responded', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: a === 'b' ? [D(a), step('ind')] : plain(a) })));
+    assert.equal(verdict.downstream.status, 'pass', verdict.downstream.why);
+  });
+
+  test('the decision itself: it must take the answer it was given, in each run', async () => {
+    const swapped = await clauses(fromAnswer((a) => ({ steps: [D(a === 'a' ? 'b' : 'a'), followed(a), step('ind')] })));
+    assert.equal(swapped.downstream.status, 'fail');
+    assert.match(swapped.downstream.why, /did not take the answer/);
+    const unrecorded = await clauses(fromAnswer((a) => ({ steps: [D(a === 'a' ? null : a), followed(a), step('ind')] })));
+    assert.equal(unrecorded.downstream.status, 'fail');
+    assert.match(unrecorded.downstream.why, /chose null when asked for a/);
+  });
+
+  test('the decision itself: gone from the second run', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: a === 'b' ? [followed(a), step('ind')] : plain(a) })));
+    assert.equal(verdict.downstream.status, 'fail');
+    assert.match(verdict.downstream.why, /the decision itself, is gone/);
+  });
+
+  test('the decision itself: its own code has to change with the answer', async () => {
+    const verdict = await clauses(fromAnswer((a) => ({ steps: plain(a), files: [{ path: 'd', content: 'the same whatever was asked' }] })));
+    assert.equal(verdict.downstream.status, 'fail');
+    assert.match(verdict.downstream.why, /its own code did not change/);
+  });
 });
 
 suite('the walk over dependsOn stands on its own (T-19 AC4)', () => {
   test('a transitive chain: everything that reaches the decision, and not the decision itself', () => {
     const plan = planOf(step('root'), step('d', ['root']), step('one', ['d']), step('two', ['one']), step('elsewhere', ['root']));
     assert.deepEqual([...stepsReaching(plan, 'd')].sort(), ['one', 'two']);
+  });
+
+  test('the plan does not have to be in order: it is what is being judged', () => {
+    const plan = planOf(step('after', ['mid']), step('mid', ['d']), step('d'), step('elsewhere'));
+    assert.deepEqual([...stepsReaching(plan, 'd')].sort(), ['after', 'mid']);
   });
 
   test('a diamond is counted once and reached by either side', () => {
