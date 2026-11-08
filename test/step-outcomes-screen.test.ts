@@ -14,10 +14,14 @@
  * The step is made tall on purpose. On a step that fits the panel, every outcome is on screen
  * whatever the code does and these tests would prove nothing, so each one first proves the page is
  * taller than the panel. "Fully in view" rather than "intersects": measured without the reveal, the
- * boxes for Ask and the detour still clip the panel's edge, and "intersects" passes on that defect.
+ * detour's box still clips the panel's edge, and "intersects" passes on that defect.
+ *
+ * "In view" means a person can see it. `innerText` and `checkVisibility` rather than `textContent`
+ * and geometry alone, because a verdict that has been hidden by CSS has a perfectly good box.
  *
  * Each test reads the panel before the press and again after it (T-15's rule: compare consecutive
  * frames). What must have changed is stated by the reading before and the condition waited for after.
+ * That is the FIRST press of each control. A second identical check changes nothing on screen: T-73.
  */
 
 import * as assert from 'node:assert/strict';
@@ -38,15 +42,22 @@ const ANSWER = 'An answer the tutor gave, in place of a model.';
 const FIXTURE_FILES = ['src/parse.ts', 'src/api/routes.ts', 'src/api/render.ts'];
 
 interface Box { top: number; bottom: number; height: number; fullyInView: boolean; words: string }
-interface NewestTurn { top: number; bottom: number; inView: boolean; words: string }
-interface Reading { y: number; panelHeight: number; pageHeight: number; outcome: Box | null; newestTurn: NewestTurn | null; thinking: boolean; step: string | null }
+interface NewestTurn { top: number; bottom: number; words: string }
+interface WaitingLine { visible: boolean; insideTheBox: boolean; fullyInView: boolean }
+/** `y` is read only to go into a failure's message, where it says where the panel had got to. */
+interface Reading { y: number; panelHeight: number; pageHeight: number; outcome: Box | null; summary: string | null; newestTurn: NewestTurn | null; thinking: WaitingLine | null; step: string | null }
 
 /** What is on screen, from inside the page: where it is scrolled to, and where the outcome is. */
 const READ = (outcomeId: string): string => `(() => {
   const panelHeight = window.innerHeight;
   const element = document.getElementById(${JSON.stringify(outcomeId)});
   const box = element ? element.getBoundingClientRect() : null;
-  const words = (el) => (el.textContent || '').replace(/\\s+/g, ' ').trim();
+  // innerText, not textContent: it leaves out what a person cannot see.
+  const words = (el) => (el.innerText || '').replace(/\\s+/g, ' ').trim();
+  const visible = (el) => el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+  const within = (b) => b.height > 0 && b.top >= 0 && b.bottom <= panelHeight;
+  const summary = element ? element.querySelector('.check-summary') : null;
+  const waiting = document.getElementById('tutor-thinking');
   const log = document.querySelector('ul.tutor-log');
   const newest = log ? log.lastElementChild : null;
   const turn = newest ? newest.getBoundingClientRect() : null;
@@ -56,15 +67,19 @@ const READ = (outcomeId: string): string => `(() => {
     pageHeight: document.documentElement.scrollHeight,
     outcome: box ? {
       top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height),
-      fullyInView: box.height > 0 && box.top >= 0 && box.bottom <= panelHeight,
+      fullyInView: visible(element) && within(box),
       words: words(element),
     } : null,
+    summary: summary && visible(summary) ? words(summary) : null,
     newestTurn: turn ? {
       top: Math.round(turn.top), bottom: Math.round(turn.bottom),
-      inView: turn.height > 0 && turn.bottom > 0 && turn.top < panelHeight,
       words: words(newest),
     } : null,
-    thinking: document.getElementById('tutor-thinking') !== null,
+    thinking: waiting ? {
+      visible: visible(waiting),
+      insideTheBox: element ? element.contains(waiting) : false,
+      fullyInView: within(waiting.getBoundingClientRect()),
+    } : null,
     step: (document.getElementById('step-main') || { getAttribute: () => null }).getAttribute('data-step-id'),
   };
 })()`;
@@ -104,6 +119,13 @@ interface Drive {
   type: (text: string) => Promise<void>;
   /** What the stand-in does when it is called: a test holds the answer back, or never gives one. */
   modelReplies: (how: () => Promise<LlmReply>) => void;
+}
+
+/** Fully in view cannot hold for an outcome taller than the panel, whatever the code does. Said as
+ *  that, so a short panel does not read as a defect in the product. */
+function assertTheOutcomeCanFit(reading: Reading): void {
+  assert.ok(reading.outcome && reading.outcome.height <= reading.panelHeight,
+    `this panel (${reading.panelHeight} px) cannot judge "fully in view": the outcome is taller than it: ${JSON.stringify(reading)}`);
 }
 
 function assertTallPage(reading: Reading): void {
@@ -172,7 +194,7 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
             if (JSON.stringify(next) === JSON.stringify(now)) return next;
             now = next;
           }
-          return now;
+          return assert.fail(`the panel never stopped moving after ${what}: last ${JSON.stringify(now)}`);
         },
         type: async (text) => { await onPage(`document.getElementById('tutor-input').value = ${JSON.stringify(text)}`); },
         modelReplies: (how) => { reply = how; },
@@ -193,9 +215,12 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
     assert.equal(before.outcome, null, 'there is no verdict before the first check');
 
     await click('btn-check');
-    const after = await whenShown('outcome-check', (r) => r.outcome?.words.startsWith(CHECK_HEADING) === true, 'the verdict');
+    // Compared without case: `innerText` is what is drawn, and the heading is drawn in capitals.
+    const after = await whenShown('outcome-check', (r) => r.outcome?.words.toLowerCase().startsWith(CHECK_HEADING.toLowerCase()) === true, 'the verdict');
 
+    assertTheOutcomeCanFit(after);
     assert.ok(after.outcome?.fullyInView, `the check's verdict is not fully in the panel: ${JSON.stringify(after)}`);
+    assert.ok((after.summary ?? '') !== '', `the verdict does not say what the check found: ${JSON.stringify(after)}`);
   }));
 
   // The answer is held back on purpose. A real ask paints at least twice — waiting, then the answer —
@@ -214,17 +239,19 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
     });
     const before = await atButton('btn-tutor-ask', 'outcome-tutor');
     assertTallPage(before);
-    assert.equal(before.thinking, false, 'nothing is being asked before the press');
+    assert.equal(before.thinking, null, 'nothing is being asked before the press');
     assert.equal(before.newestTurn, null, 'there is no conversation before the first question');
 
     await type('why this?');
     await click('btn-tutor-ask');
-    const waiting = await whenShown('outcome-tutor', (r) => r.thinking, 'the waiting line');
-    assert.ok(waiting.outcome?.fullyInView, `the ask box, with the waiting line in it, is not fully in the panel: ${JSON.stringify(waiting)}`);
+    const waiting = await whenShown('outcome-tutor', (r) => r.thinking?.visible === true, 'the waiting line');
+    assertTheOutcomeCanFit(waiting);
+    assert.ok(waiting.outcome?.fullyInView, `the ask box is not fully in the panel: ${JSON.stringify(waiting)}`);
+    assert.ok(waiting.thinking?.insideTheBox, `the waiting line is not in the ask box: ${JSON.stringify(waiting)}`);
+    assert.ok(waiting.thinking?.fullyInView, `the waiting line is not fully in the panel: ${JSON.stringify(waiting)}`);
 
     answerNow();
     const after = await whenShown('outcome-tutor', (r) => r.newestTurn?.words.includes(ANSWER) === true, 'the answer');
-    console.log(`T-42 AC2 measured: ${JSON.stringify({ waiting, after })}`);
     const turn = after.newestTurn;
     assert.ok(turn && turn.top >= 0 && turn.top < after.panelHeight, `the answer does not start on screen: ${JSON.stringify(after)}`);
   }));
@@ -238,6 +265,7 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
     await click('btn-detour-start');
     const after = await whenShown('outcome-detour', (r) => r.outcome?.words.includes(DETOUR_WAITING_MESSAGE) === true, 'the waiting line');
 
+    assertTheOutcomeCanFit(after);
     assert.ok(after.outcome?.fullyInView, `"${DETOUR_WAITING_MESSAGE}" is not fully in the panel: ${JSON.stringify(after)}`);
   }));
 });
