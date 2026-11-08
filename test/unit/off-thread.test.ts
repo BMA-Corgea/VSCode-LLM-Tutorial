@@ -315,6 +315,22 @@ suite('a worker that cannot answer is a sentence, never a hang (T-30 AC8)', func
     }), /^reading the repository stopped unexpectedly/, { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
   });
 
+  test('a digest that cannot be sent to the worker is a failure, and the poll stops with it', async () => {
+    const repo = mixedFixture();
+    const core = offThreadCore(harness().deps);
+    await core.digest(repo, { write: false });
+    const unsendable = { inventory: { files: [] }, later: () => 1 } as unknown as DigestResultLike;
+    let polls = 0;
+    await assert.rejects(
+      core.buildPlan(unsendable, { root: repo }, { isCancelled: () => { polls += 1; return false; } }),
+      /could not be cloned/,
+    );
+    const seen = polls;
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    core.release?.();
+    assert.equal(polls, seen, 'the poll went on running after the phase had already failed');
+  });
+
   test('a result that cannot cross the boundary', async () => {
     await endsWithASentence(stubCore({
       'digest.js': `export async function digest() { return { manifest: {}, inventory: { files: [] }, later: () => 1 }; }\n`,

@@ -135,7 +135,13 @@ export function offThreadCore(deps: OffThreadDeps): BuildCore {
       const poll = control?.isCancelled === undefined ? undefined : setInterval(() => {
         if (control.isCancelled?.()) finish(() => { stopWorker(); reject(new BuildPhaseCancelled()); });
       }, pollMs);
-      running.postMessage({ id, ...body } satisfies WorkerRequest);
+      try {
+        running.postMessage({ id, ...body } satisfies WorkerRequest);
+      } catch (err) {
+        // Something that cannot be cloned. A throw here would reject the promise and leave the
+        // poll running behind it, so this ends the phase the same way every other path does.
+        finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+      }
     });
   }
 
