@@ -384,7 +384,7 @@ interface MergeContext {
   steps: readonly StepLike[];
   replaced: ReadonlySet<string>;
   aliases: ReadonlyMap<string, string>;
-  keyOf(s: StepLike): string;
+  keyOf: (s: StepLike) => string;
   owedKeys: readonly string[];
   ownFile: string | null;
 }
@@ -419,8 +419,9 @@ function mergeReply(reply: ReplanReply, ctx: MergeContext): Merged | DeriveRefus
     }
     const ids: string[] = [];
     for (const key of new Set([...owedKeys, ...n.dependsOn])) {
-      if (key === n.chapter) continue;
       const id = allKeys.get(key) ?? freshKeys.get(key);
+      // A file's edge to its own chapter is only owed when the chapter still has a shape step.
+      if (id === undefined && key === n.chapter) continue;
       if (id === undefined) return refuse(`the replanned step ${JSON.stringify(n.path)} depends on ${JSON.stringify(key)}, which no step provides, so the replanned steps do not make a plan`);
       ids.push(id);
     }
