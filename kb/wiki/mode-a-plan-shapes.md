@@ -27,7 +27,9 @@ unchanged in a real dev host (`test/derive.test.ts`).
   the code. Answering keeps a step's id; a replanned decision gets a new one
   (`derive-assemble.test.ts`).
 - **Scaffold ranges** come from the derived file's own exported symbols: at most five,
-  non-overlapping, widest through a clash. The rest of the file is boilerplate.
+  non-overlapping, widest through a clash. A file that exports nothing (usually the entry point)
+  takes its own functions and multi-line variables instead, or scaffolded mode would hand over the
+  whole file. The rest of the file is boilerplate.
 - **Languages:** JavaScript as `.mjs` (ES modules, which Node runs with no `package.json`) and
   Python as `.py`, standard library only. A JavaScript bare import must be a Node built-in. A
   derived app needs no install to start (`derive-smoke.test.ts`).

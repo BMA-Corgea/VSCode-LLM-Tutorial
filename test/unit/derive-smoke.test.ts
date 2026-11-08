@@ -38,6 +38,8 @@ suiteSetup(async () => {
 
 const TALLY = 'export function total(xs) {\n  return xs.reduce((a, b) => a + b, 0);\n}\n';
 const MAIN = "import { total } from '../core/tally.mjs';\n\nconsole.log(`total: ${total([1, 2, 3])}`);\n";
+/** The shape the live run's model actually wrote for an entry point: a `main()` nothing exports. */
+const MAIN_WITH_A_FUNCTION = "import { total } from '../core/tally.mjs';\n\nasync function main() {\n  console.log(`total: ${total([1, 2, 3])}`);\n}\n\nmain();\n";
 
 const made: string[] = [];
 const ledgers: AskLedger[] = [];
@@ -53,13 +55,13 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-async function derived() {
+async function derived(entryCode = MAIN) {
   const run: TutorCore['runLlm'] = (prompt) => {
     const line = prompt.split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
     const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
     const text = input['task'] === 'outline'
       ? fixtureOutlineText()
-      : JSON.stringify({ content: (input['node'] as Record<string, unknown>)['path'] === 'core/tally.mjs' ? TALLY : MAIN });
+      : JSON.stringify({ content: (input['node'] as Record<string, unknown>)['path'] === 'core/tally.mjs' ? TALLY : entryCode });
     return Promise.resolve({ text, inputTokens: 0, outputTokens: 0, usd: 0, metered: true });
   };
   const ledger = new AskLedger();
@@ -104,6 +106,22 @@ suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
     assert.ok(write.content.includes('export function total(xs)'), 'the signature is kept');
     assert.ok(!write.content.includes('reduce'), 'the body — the answer — is hidden');
     assert.match(write.content, /TODO/);
+  });
+
+  test('scaffolded: an entry point that exports nothing hides its main() rather than handing over the answer', async () => {
+    const { plan, referenceRoot, target } = await derived(MAIN_WITH_A_FUNCTION);
+    const entry = plan.steps.find((s) => s.target.file === 'cli/main.mjs')!;
+    const write = planWrite(entry, 'scaffolded', referenceRoot, target, plan, dialCore);
+    assert.ok(write !== null && !isRefusal(write), write !== null && isRefusal(write) ? write.refused : 'expected a write');
+    assert.notEqual(write.content, fs.readFileSync(path.join(referenceRoot, 'cli/main.mjs'), 'utf8'), 'scaffolded must not equal automated on this step');
+    assert.ok(write.content.includes('async function main()'), 'the signature is kept');
+    assert.ok(!write.content.includes('total([1, 2, 3])'), 'the body — the answer — is hidden');
+    assert.match(write.content, /TODO/);
+    const stub = path.join(tempDir('derive-smoke-stub-'), 'main.mjs');
+    fs.writeFileSync(stub, write.content);
+    await new Promise<void>((resolve, reject) => {
+      execFile(process.execPath, ['--check', stub], { timeout: 10_000 }, (err, _out, stderr) => (err ? reject(new Error(`the stub does not parse: ${stderr}`)) : resolve()));
+    });
   });
 
   test('automated: walking every file step writes the reference bytes, and the app STARTS', async () => {

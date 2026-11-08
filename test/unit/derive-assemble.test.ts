@@ -166,6 +166,23 @@ suite('scaffold ranges — Mode A\'s own rule, stated', () => {
     assert.deepEqual(loadBearingRanges(ex, 20), [{ startLine: 1, endLine: 10 }, { startLine: 11, endLine: 12 }]);
   });
 
+  test('a file that exports NOTHING still has its functions stubbed: an entry point\'s main() is the answer', () => {
+    // Found by the live run (AC-A2 b): the model wrote `async function main()` for cli/main.mjs,
+    // nothing in that file was exported, and scaffolded mode handed over the whole file.
+    const ex: ExtractLike = { path: 'cli/main.mjs', parseErrors: 0, imports: [], symbols: [sym('main', 5, 35, false)] };
+    assert.deepEqual(loadBearingRanges(ex, 38), [{ startLine: 5, endLine: 35 }]);
+  });
+
+  test('that fallback is only for a file that exports nothing, and a one-line variable never earns a range', () => {
+    const variable = (name: string, line: number, endLine: number): SymbolLike => ({ name, kind: 'variable', line, endLine, exported: false });
+    const exportsOne: ExtractLike = { path: 'x.mjs', parseErrors: 0, imports: [], symbols: [sym('pub', 1, 3), sym('priv', 5, 9, false)] };
+    assert.deepEqual(loadBearingRanges(exportsOne, 10), [{ startLine: 1, endLine: 3 }], 'a file that exports something keeps to its exports');
+    const script: ExtractLike = { path: 'cli/main.mjs', parseErrors: 0, imports: [], symbols: [variable('PATH', 1, 1), sym('main', 3, 8, false), variable('CONFIG', 10, 14)] };
+    assert.deepEqual(loadBearingRanges(script, 14), [{ startLine: 3, endLine: 8 }, { startLine: 10, endLine: 14 }], 'a one-liner is a reference, not code to fill in; a real span is');
+    const nothingRecorded: ExtractLike = { path: 'cli/main.mjs', parseErrors: 0, imports: [], symbols: [] };
+    assert.deepEqual(loadBearingRanges(nothingRecorded, 3), [], 'nothing recorded: nothing to stub');
+  });
+
   test(`at most ${MAX_LOAD_BEARING} ranges, in line order`, () => {
     const symbols = Array.from({ length: 8 }, (_, i) => sym(`f${i}`, i * 3 + 1, i * 3 + 2));
     const ranges = loadBearingRanges({ path: 'x.mjs', symbols, imports: [], parseErrors: 0 }, 30);

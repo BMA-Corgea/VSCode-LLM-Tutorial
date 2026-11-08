@@ -30,8 +30,12 @@
  *
  * The exported symbols are what later steps use, so they are what a learner fills in: at most five,
  * non-overlapping (the widest wins a clash), in line order — load-bearing; every other line is
- * boilerplate. This is Mode A's own rule and is stated as such; it does not claim to equal
- * repo-tour's `selectLoadBearing`, whose fallbacks exist for files nobody planned.
+ * boilerplate. A file that exports nothing, which is usually the entry point with a `main()` nothing
+ * imports, takes its own functions and multi-line variables instead: with no load-bearing lines at
+ * all, `planWrite` copies the whole file in scaffolded mode, handing over the answer in the one
+ * position that exists to hide it. The live run (AC-A2 b) found that on the first real entry point.
+ * repo-tour's `selectLoadBearing` has the same fallback for the same reason (its T-15), with the
+ * same screen; this does not claim to equal it beyond that.
  *
  * No `vscode` import — see `./types.ts`.
  */
@@ -88,11 +92,21 @@ export function lineCountOf(content: string): number {
   return content.endsWith('\n') ? parts.length - 1 : parts.length;
 }
 
-/** The exported symbols, widest first through any clash, then in line order, at most five. */
+/** The kinds whose span is always their own body, whatever its size (repo-tour's own list). */
+const ALWAYS_LOAD_BEARING_KINDS: ReadonlySet<string> = new Set(['function', 'method', 'class', 'interface', 'enum']);
+/** Below this many lines a `variable` is a reference, not code to fill in (repo-tour's number). */
+const TRIVIAL_SPAN = 3;
+
+/**
+ * The exported symbols, or, in a file that exports nothing, its own functions and multi-line
+ * variables (see the header). Widest first through any clash, then in line order, at most five.
+ */
 export function loadBearingRanges(extract: ExtractLike, totalLines: number): RangeLike[] {
-  const candidates = extract.symbols
-    .filter((s) => s.exported && Number.isInteger(s.line) && Number.isInteger(s.endLine) && s.line >= 1 && s.endLine >= s.line && s.endLine <= totalLines)
-    .sort((a, b) => (b.endLine - b.line) - (a.endLine - a.line) || a.line - b.line);
+  const inFile = extract.symbols
+    .filter((s) => Number.isInteger(s.line) && Number.isInteger(s.endLine) && s.line >= 1 && s.endLine >= s.line && s.endLine <= totalLines);
+  const exported = inFile.filter((s) => s.exported);
+  const pool = exported.length > 0 ? exported : inFile.filter((s) => ALWAYS_LOAD_BEARING_KINDS.has(s.kind) || s.endLine - s.line + 1 >= TRIVIAL_SPAN);
+  const candidates = [...pool].sort((a, b) => (b.endLine - b.line) - (a.endLine - a.line) || a.line - b.line);
   const chosen: RangeLike[] = [];
   for (const s of candidates) {
     if (chosen.length >= MAX_LOAD_BEARING) break;
