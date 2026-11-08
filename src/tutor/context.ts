@@ -464,7 +464,8 @@ export const Outbound = {
    */
   options(step: StepLike): { options: OutboundOption[]; omitted: number } {
     const all = optionsOf(step);
-    const taken = takenIdsOf(step);
+    // T-22: the prompt marks a taken road "[author]". A step a re-plan wrote has no author there.
+    const taken = step.derivedFrom === undefined ? takenIdsOf(step) : new Set<string>();
     const shown = all.slice(0, MAX_OPTIONS_SENT);
     const authorIndex = all.findIndex((o) => taken.has(o.id));
     if (authorIndex >= MAX_OPTIONS_SENT && shown.length === MAX_OPTIONS_SENT) {
@@ -807,6 +808,16 @@ async function learnerDiffFor(
  * `AskContext.build` draws in its own comment: the tutor is answering about this step, not
  * auditing the tutorial.
  */
+/**
+ * T-22: told to the tutor first on every step whose code a re-plan wrote. repo-tour's prompt says
+ * "the author" in its own words, and the file it is given here was not written by one.
+ */
+function derivedStepNote(step: StepLike): string {
+  const road = optionsOf(step).find((o) => o.id === step.decision.chosen);
+  const named = road === undefined ? '' : ` ("${Outbound.text(road.label, MAX_OPTION_TEXT)}")`;
+  return `There is no author for this step: its code was written by a model after the learner chose a different road${named}. Wherever this says "the author", read "the generated code".`;
+}
+
 export async function tutorContext(
   step: StepLike,
   refRoot: string,
@@ -826,7 +837,7 @@ export async function tutorContext(
     build: {
       question: Outbound.text(step.decision.question, MAX_PROMPT_TEXT),
       options: Outbound.options(step).options,
-      why: Outbound.text(step.decision.why, MAX_PROMPT_TEXT),
+      why: Outbound.text(step.derivedFrom === undefined ? step.decision.why : `${derivedStepNote(step)} ${typeof step.decision.why === 'string' ? step.decision.why : ''}`, MAX_PROMPT_TEXT),
       ...(learnerDiff === undefined ? {} : { learnerDiff }),
     },
   };

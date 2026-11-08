@@ -126,6 +126,19 @@ export function treeNamedBy(plan: PlanLike): string | undefined {
   return typeof tree === 'string' && tree.length > 0 ? tree : undefined;
 }
 
+/** T-22: the plan's own record of the last re-plan decided at this step, if it has one. */
+export function divergenceAt(plan: PlanLike, stepId: string): { staleDependents: string[] } | undefined {
+  const all: unknown = plan['divergences'];
+  if (!Array.isArray(all)) return undefined;
+  for (let i = all.length - 1; i >= 0; i -= 1) {
+    const entry: unknown = all[i];
+    if (typeof entry !== 'object' || entry === null || (entry as { stepId?: unknown }).stepId !== stepId) continue;
+    const stale: unknown = (entry as { staleDependents?: unknown }).staleDependents;
+    return { staleDependents: Array.isArray(stale) ? stale.filter((id): id is string => typeof id === 'string') : [] };
+  }
+  return undefined;
+}
+
 /** The steps this learner has walked: done, or before where they stand now (T-22's definition). */
 export function walkedSteps(plan: PlanLike, progress: Progress): Set<string> {
   const here = currentStep(plan, progress)?.ordinal ?? -Infinity;

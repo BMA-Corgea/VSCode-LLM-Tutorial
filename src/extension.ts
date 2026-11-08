@@ -668,7 +668,10 @@ const REPLAN_QUESTION_TIMEOUT_MS = 300_000;
  * would silently become the provider's strongest. The core is `tutorCoreNow`, so the suites'
  * stand-in reaches it and no test can spend a token.
  */
+let replannerStandIn: Replanner | undefined;
+
 async function replannerFor(context: vscode.ExtensionContext, target: string): Promise<Replanner | undefined> {
+  if (replannerStandIn !== undefined) return replannerStandIn;
   const [core, tutor, dialCore] = await Promise.all([loadCore(configuredRepoTourRoot(context)), tutorCoreNow(context), ensureDialCore(context)]);
   if (!core.found || tutor === undefined || dialCore === undefined) return undefined;
   const { provider, model } = resolveLlmSettings(core);
@@ -805,6 +808,8 @@ export interface ExtensionApi {
      * way to intercept it either cannot test the tutor or has to pay to.
      */
     useTutorCore: (core: TutorCore | undefined) => void;
+    /** vscode-test only: what a press re-plans with; `undefined` restores the real one (`replannerFor`). */
+    useReplanner: (replanner: Replanner | undefined) => void;
   };
 }
 
@@ -850,6 +855,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
       },
       tutorCore: () => ensureTutorCore(context),
       useTutorCore: (core: TutorCore | undefined) => { tutorCoreStandIn = core; },
+      useReplanner: (replanner: Replanner | undefined) => { replannerStandIn = replanner; },
     },
   };
 }

@@ -361,7 +361,9 @@ export async function identityConfigured(target: string, git: GitRunner): Promis
  * describing the wrong decision.
  */
 export function commitSubject(step: StepLike): string {
-  const taken = step.decision.options.find((option) => option.taken);
+  // T-22: code a re-plan wrote follows the road it was derived with, whoever took the other one.
+  const followed = step.derivedFrom === undefined ? undefined : step.decision.options.find((option) => option.id === step.decision.chosen);
+  const taken = followed ?? step.decision.options.find((option) => option.taken);
   const label = taken ? taken.label : '(no option marked taken)';
   return `${step.ordinal}: ${step.decision.question} — ${label}`;
 }

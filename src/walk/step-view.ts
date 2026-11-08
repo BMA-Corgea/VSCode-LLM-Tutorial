@@ -175,7 +175,7 @@ import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
 import { renderPage } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
-import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, optionsTable, type OptionLike, type StepLike, type WhySource } from './model.js';
+import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, optionsTable, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
 
 export { MAX_OPTIONS_RENDERED };
@@ -244,8 +244,24 @@ export const AUTHOR_BADGE = 'What the author did';
 export const CHOSEN_BADGE = 'Your choice';
 /** T-21: the control on every option that is not the road this step is on. */
 export const CHOOSE_LABEL = 'Choose this instead';
-/** T-21: the line that says a choice has changed nothing else yet (T-22 is the replan). */
-export const DIVERGED_NOTE = 'You chose a different road. The rest of the walk still follows the author \u2014 re-planning from your choice isn\u2019t built yet.';
+/** T-22: what the row a re-plan recommended is called on a step that has no author. */
+export const SUGGESTED_BADGE = 'Suggested';
+/** T-22: on the step whose decision a re-plan followed. */
+export const REPLANNED_NOTE = 'The walk was re-planned from your choice at this step, by the model. What it re-derived is no longer the author\u2019s.';
+/** T-22: on a step a re-plan wrote from nothing. */
+export const WRITTEN_BY_THE_MODEL_NOTE = 'The model wrote this step when you took a different road. There is no author\u2019s version of it.';
+/** T-22: the control that stops a re-plan in flight. */
+export const REPLAN_CANCEL_LABEL = 'Cancel re-planning';
+/** T-22: how many walked steps the warning names before it counts the rest. */
+export const MAX_STALE_NAMED = 8;
+/** T-22 (M1): the warning on D's page, naming the walked steps that stood on the old road. */
+export function staleStepsNote(names: readonly string[], omitted: number): string {
+  const list = names.join(', ') + (omitted > 0 ? `, and ${omitted} more` : '');
+  const one = names.length + omitted === 1;
+  return `You have already walked ${one ? 'a step' : 'steps'} that stood on the old road: ${list}. Your files are as you left them, so ${one ? 'it' : 'they'} may need revisiting.`;
+}
+/** T-21, T-22: a choice that re-planned nothing, because nothing later depended on it. */
+export const DIVERGED_NOTE = 'You chose a different road here. Nothing later depended on it, so the rest of the walk stands.';
 
 // ── the render caps (T-4 security review, finding 3) ───────────────────────────────────────
 // See the file header for the threat: `webview.html = ...` is synchronous on the extension
@@ -599,6 +615,7 @@ section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; col
 .options-outcome { margin:0 0 10px; }
 .options-refused { color:var(--kw); font-size:12px; margin:0 0 6px; }
 .options-diverged { font-size:12px; margin:0; }
+.options-replanning { font-size:12px; margin:0 0 6px; }
 .why-text { margin:0 0 4px; }
 .why-source, .witness-text { color:var(--muted); font-size:12px; margin:0; }
 /* The honest count under a capped options list — see MAX_OPTIONS_RENDERED. Styled like the
@@ -696,7 +713,7 @@ main, section, .option { min-width:0; }
 .note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
 .write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty,
 .tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint,
-.options-refused, .options-diverged { overflow-wrap:anywhere; }
+.options-refused, .options-diverged, .options-replanning { overflow-wrap:anywhere; }
 
 /* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
    title and the skin picker stop competing for one line and 48px of horizontal padding
@@ -738,7 +755,7 @@ main, section, .option { min-width:0; }
    and an empty line must not grow a stray mark. */
 .hint:not(:empty), .write-note:not(:empty), .tutor-note:not(:empty), .detour-note:not(:empty),
 .detour-open:not(:empty), .tutor-elsewhere:not(:empty), .tutor-spend:not(:empty),
-.options-refused:not(:empty), .options-diverged:not(:empty) {
+.options-refused:not(:empty), .options-diverged:not(:empty), .options-replanning:not(:empty) {
   border-left:2px solid var(--status-news); padding-left:8px;
 }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
@@ -767,8 +784,11 @@ main, section, .option { min-width:0; }
  *     label was not a string, in a render nobody was listening to (security, finding 5).
  *     `planText`/`planId` make every read total.
  */
-function optionsHtml(step: StepLike, choiceNote: unknown): string {
+function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replanning: StepViewState['replanning']): string {
   const table = optionsTable(step);
+  // T-22: a step a re-plan wrote from nothing has no author, so its recommended row cannot be
+  // called the author's. The step a re-plan was decided AT keeps its author's row, which is true.
+  const noAuthor = step.derivedFrom !== undefined && step.derivedFrom !== step.id;
 
   const items = table.rows
     .map((opt, i) => {
@@ -784,7 +804,7 @@ function optionsHtml(step: StepLike, choiceNote: unknown): string {
       // choice is still marked — `.option-taken` carries the accent border and highlight —
       // and the badge comes back the moment a plan has options whose labels differ.
       const authorBadge = isAuthors && label.trim().toLowerCase() !== AUTHOR_BADGE.toLowerCase()
-        ? `<span class="badge badge-taken">${AUTHOR_BADGE}</span>`
+        ? `<span class="badge badge-taken">${noAuthor ? SUGGESTED_BADGE : AUTHOR_BADGE}</span>`
         : '';
       const chosenBadge = isOn && table.diverged ? `<span class="badge badge-chosen">${CHOSEN_BADGE}</span>` : '';
       const choose = table.choosable[i] === true
@@ -800,11 +820,28 @@ function optionsHtml(step: StepLike, choiceNote: unknown): string {
   const refusedNote = typeof choiceNote === 'string' && choiceNote !== ''
     ? `<p class="options-refused" id="choice-note" role="note">${escapeHtml(planText(choiceNote))}</p>`
     : '';
-  const divergedNote = table.diverged ? `<p class="options-diverged" role="note">${escapeHtml(DIVERGED_NOTE)}</p>` : '';
-  const outcome = refusedNote !== '' || divergedNote !== ''
-    ? `<div class="options-outcome" id="outcome-choice">${refusedNote}${divergedNote}</div>`
-    : '';
+  const record = divergenceAt(plan, step.id);
+  const road = record !== undefined ? REPLANNED_NOTE : table.diverged ? DIVERGED_NOTE : '';
+  const roadNote = road === '' ? '' : `<p class="options-diverged" role="note">${escapeHtml(road)}</p>`;
+  const writtenNote = noAuthor ? `<p class="options-diverged" role="note">${escapeHtml(WRITTEN_BY_THE_MODEL_NOTE)}</p>` : '';
+  const stale = staleNoteText(plan, record);
+  const staleNote = stale === '' ? '' : `<p class="options-stale options-diverged" role="note">${escapeHtml(stale)}</p>`;
+  const running = replanning === undefined
+    ? ''
+    : `<p class="options-replanning" id="replan-status" role="status">${escapeHtml(planText(replanning.message))} <button type="button" class="btn" id="btn-replan-cancel">${REPLAN_CANCEL_LABEL}</button></p>`;
+  const notes = `${running}${refusedNote}${roadNote}${writtenNote}${staleNote}`;
+  const outcome = notes !== '' ? `<div class="options-outcome" id="outcome-choice">${notes}</div>` : '';
   return `${outcome}<ul class="options">${items}</ul>${omittedNote}`;
+}
+
+/** T-22 (M1): the sentence naming the walked steps that stood on the old road, or '' when there are none. */
+function staleNoteText(plan: PlanLike, record: { staleDependents: string[] } | undefined): string {
+  if (record === undefined || record.staleDependents.length === 0) return '';
+  const known = new Map(plan.steps.map((s) => [s.id, s] as const));
+  const walked = record.staleDependents.flatMap((id) => { const s = known.get(id); return s === undefined ? [] : [s]; });
+  if (walked.length === 0) return '';
+  const named = walked.slice(0, MAX_STALE_NAMED).map((s) => `step ${planText(String(s.ordinal))} (${planText(s.target.file)})`);
+  return staleStepsNote(named, walked.length - named.length);
 }
 
 /** `NO_HISTORY_MESSAGE`, verbatim, when there is nothing to show — gated on `sha`, matching
@@ -1467,7 +1504,7 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
 
   <section>
     <h2>Options</h2>
-    ${optionsHtml(step, state.choiceNote)}
+    ${optionsHtml(step, state.choiceNote, state.plan, state.replanning)}
   </section>
 
   <section>
@@ -1708,6 +1745,8 @@ const CLIENT_SCRIPT = `
   // Only on the page while the offer stands (see reproduceHtml); \`on\` is null-safe, so the
   // rest of the time this line hooks nothing rather than needing a condition of its own.
   on('btn-reproduce', 'click', function () { post('reproduce:run', {}); });
+  // T-22: on the page only while a re-plan runs; \`on\` is null-safe the rest of the time.
+  on('btn-replan-cancel', 'click', function () { post('replan:cancel', {}); });
 
   // ── T-6: the tutor ────────────────────────────────────────────────────────────────────
 
@@ -2017,6 +2056,10 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
     keyOf(decision.authorChoice),
     keyOf(decision.chosen), // T-21: a choice must repaint, or the press is silent
     keyOf(state.choiceNote ?? null), // T-21: so must a refusal, and a repeat of one (T-15)
+    keyOf(state.step.derivedFrom ?? null), // T-22: the badge and the line follow it
+    state.replanning ? [keyOf(state.replanning.stepId), keyOf(state.replanning.message)] : null, // T-22: every report changes the page
+    divergenceAt(state.plan, id) !== undefined, // T-22: "the walk was re-planned here"
+    keyOf(staleNoteText(state.plan, divergenceAt(state.plan, id))), // T-22 (M1)
     keyOf(decision.why, MAX_PLAN_TEXT),
     decision.whySource,
     [keyOf(witness?.sha), keyOf(witness?.subject), keyOf(witness?.date)],

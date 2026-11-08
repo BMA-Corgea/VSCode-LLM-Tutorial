@@ -58,7 +58,7 @@ import {
   MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT,
   MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE,
   NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE,
-  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
+  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, MAX_STALE_NAMED, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, PREPARING_MESSAGE,
@@ -210,6 +210,7 @@ function recordingEffects(): { effects: StepEffects; asked: string[] } {
     persistDial: () => undefined,
     choose: () => undefined,
     refuseStaleChoice: () => undefined,
+    cancelReplan: () => undefined,
     persistSkin: () => undefined,
     ask: (text) => { asked.push(text); },
     cancelAsk: () => undefined,
@@ -918,7 +919,7 @@ class FakeElement {
 }
 
 const ELEMENT_IDS = [
-  'step-main', 'step-note', 'btn-prev', 'btn-open', 'btn-check', 'btn-next', 'btn-reproduce',
+  'step-main', 'step-note', 'btn-prev', 'btn-open', 'btn-check', 'btn-next', 'btn-reproduce', 'btn-replan-cancel',
   // T-21: the page's Choose this instead buttons; the tests that press one give it its option id.
   'choose-0', 'choose-1', `choose-${MAX_OPTIONS_RENDERED - 1}`,
   'dial-manual', 'dial-scaffolded', 'dial-automated', 'skinpick',
@@ -3183,5 +3184,136 @@ suite('T-21 AC7 — the promise that the options are not choosable is retired ev
     const header = read('src/walk/step-view.ts').slice(0, 2600);
     assert.ok(/Choose this[\s*]+instead/.test(header), 'the header describes the control');
     assert.ok(!/does not let the learner pick/.test(header), 'and no longer says the opposite');
+  });
+});
+
+suite('T-22 — what a re-planned step says, and the re-plan while it runs', () => {
+  const ON = 'st-4-symbol-render';
+  const html = (state: StepViewState): string => renderStepHtml(state, FAKE_SKINS);
+
+  /** The fixture's author row is labelled with the badge's own words, which hides the badge. */
+  function withARealLabel(step: StepLike): StepLike {
+    return { ...step, decision: { ...step.decision, options: step.decision.options.map((o) => (o.id === 'author' ? { ...o, label: 'Wrap it in a block' } : o)) } };
+  }
+
+  /** A step a re-plan wrote from nothing. */
+  function writtenByTheModel(): StepViewState {
+    const base = stateAt(ON);
+    return { ...base, step: { ...withARealLabel(base.step), derivedFrom: 'st-2-file-parse' } };
+  }
+
+  /** The step whose road changed, after the re-plan landed. */
+  function replannedHere(stale: string[] = [], chosen = 'stream'): StepViewState {
+    const base = stateAt(ON);
+    const relabelled = withARealLabel(base.step);
+    const step: StepLike = { ...relabelled, derivedFrom: ON, decision: { ...relabelled.decision, chosen } };
+    const plan: PlanLike = {
+      ...base.plan,
+      steps: base.plan.steps.map((s) => (s.id === ON ? step : s)),
+      divergences: [{ stepId: ON, answer: chosen, staleDependents: stale, at: 't', tree: 'k/t' }],
+    };
+    return { ...base, plan, step };
+  }
+
+  test('a step a re-plan wrote never says "What the author did", and says who wrote it (AC7)', () => {
+    const page = html(writtenByTheModel());
+    assert.ok(!page.includes(AUTHOR_BADGE), 'there is no author here');
+    assert.ok(page.includes(`>${SUGGESTED_BADGE}<`), 'the recommended row is called what it is');
+    assert.ok(WRITTEN_BY_THE_MODEL_NOTE.length > 0 && page.includes(escapeForHtml(WRITTEN_BY_THE_MODEL_NOTE)));
+  });
+
+  test('the step where the road changed keeps the author\'s row true, and says it was re-planned (AC7)', () => {
+    const page = html(replannedHere());
+    assert.ok(page.includes(`>${AUTHOR_BADGE}<`), 'the author really did take that road');
+    assert.ok(page.includes(`>${CHOSEN_BADGE}<`));
+    assert.ok(REPLANNED_NOTE.length > 0 && page.includes(escapeForHtml(REPLANNED_NOTE)));
+    assert.ok(!page.includes(escapeForHtml(DIVERGED_NOTE)), 'it is not the sentence for a choice that changed nothing');
+    assert.ok(!page.includes(escapeForHtml(WRITTEN_BY_THE_MODEL_NOTE)), 'and this step is not one the model invented');
+  });
+
+  test('back on the author\'s road after a re-plan, the page still says it was re-planned', () => {
+    const page = html(replannedHere([], 'author'));
+    assert.ok(page.includes(escapeForHtml(REPLANNED_NOTE)), 'the code there is still the model\'s');
+  });
+
+  test('a choice that changed nothing later says so, and the promise that this was not built is gone (AC7)', () => {
+    const base = stateAt(ON);
+    const step = { ...base.step, decision: { ...base.step.decision, chosen: 'stream' } };
+    const page = html({ ...base, step });
+    assert.ok(page.includes(escapeForHtml(DIVERGED_NOTE)));
+    assert.ok(!page.includes(escapeForHtml(REPLANNED_NOTE)));
+    assert.ok(!/isn.t built yet/.test(DIVERGED_NOTE), 'the sentence itself');
+    assert.ok(!/isn.t built yet/.test(fs.readFileSync(path.join(process.cwd(), 'src/walk/step-view.ts'), 'utf8')), 'and anywhere in the file');
+  });
+
+  test('an untouched step says none of it', () => {
+    const page = html(stateAt(ON));
+    for (const note of [REPLANNED_NOTE, WRITTEN_BY_THE_MODEL_NOTE]) assert.ok(note.length === 0 || !page.includes(escapeForHtml(note)));
+    assert.ok(!page.includes(`>${SUGGESTED_BADGE}<`));
+  });
+
+  test('M1: each walked step that stood on the old road is named on D\'s page (AC9)', () => {
+    const page = html(replannedHere(['st-1-shape-src', 'st-2-file-parse']));
+    assert.ok(page.includes(escapeForHtml(staleStepsNote(['step 1 (src)', 'step 2 (src/parse.ts)'], 0))));
+    assert.ok(/step 1 \(src\)/.test(staleStepsNote(['step 1 (src)'], 0)), 'the note really names them');
+  });
+
+  test('the warning is not on the page when no walked step stood on it, nor on any other step', () => {
+    assert.ok(!html(replannedHere([])).includes('options-stale'));
+    const elsewhere = stateAt('st-2-file-parse');
+    assert.ok(!html({ ...elsewhere, plan: replannedHere(['st-1-shape-src']).plan }).includes('options-stale'));
+  });
+
+  test('a name the plan does not have is dropped, the rest are escaped, and a long list says what it left out', () => {
+    const base = replannedHere();
+    const hostile: StepLike = { ...base.plan.steps[0]!, target: { file: '<img src=x>' } };
+    const plan = { ...base.plan, steps: [hostile, ...base.plan.steps.slice(1)] };
+    const ids = [hostile.id, 'not-in-this-plan'];
+    const page = html({ ...base, plan: { ...plan, divergences: [{ stepId: ON, staleDependents: ids }] } });
+    assert.ok(!page.includes('<img src=x>'));
+    assert.ok(page.includes(escapeForHtml(staleStepsNote(['step 1 (<img src=x>)'], 0))));
+    assert.equal(staleStepsNote(['a'], 3).includes('3 more'), true);
+    const many = Array.from({ length: MAX_STALE_NAMED + 3 }, (_, i) => ({ ...base.step, id: `w-${i}`, ordinal: 100 + i, target: { file: `f${i}.ts` } }));
+    const long = { ...base.plan, steps: [...base.plan.steps, ...many], divergences: [{ stepId: ON, staleDependents: many.map((s) => s.id) }] };
+    assert.ok(html({ ...base, plan: long }).includes(escapeForHtml(staleStepsNote(many.slice(0, MAX_STALE_NAMED).map((s) => `step ${s.ordinal} (${s.target.file})`), 3))));
+  });
+
+  test('a plan whose record is not the right shape draws nothing about it, and does not throw', () => {
+    const base = stateAt(ON);
+    for (const divergences of ['x', [null], [{ stepId: ON, staleDependents: 'x' }], [{ stepId: 7 }]]) {
+      assert.ok(html({ ...base, plan: { ...base.plan, divergences } }).length > 0);
+    }
+  });
+
+  test('while a re-plan runs the page says what it is doing and offers Cancel, wherever the learner is (AC6)', () => {
+    const page = html(stateAt('st-2-file-parse', { replanning: { stepId: ON, message: 'writing <src>…' } }));
+    assert.ok(page.includes('id="replan-status"'));
+    assert.ok(page.includes('writing &lt;src&gt;…'), 'and what it says is escaped');
+    assert.ok(page.includes(`id="btn-replan-cancel"`) && page.includes(REPLAN_CANCEL_LABEL));
+  });
+
+  test('with nothing running there is no Cancel to press', () => {
+    assert.ok(!html(stateAt(ON)).includes('id="btn-replan-cancel"'));
+  });
+
+  test('Cancel posts a message the parser keeps, with nothing in it the page chose', () => {
+    const dom = buildFakeDom();
+    runScript(dom, stateAt(ON, { replanning: { stepId: ON, message: 'x' } }));
+    dom.elements.get('btn-replan-cancel')!.dispatch('click');
+    assert.equal(dom.posted.length, 1, 'the press posts one message');
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'replan:cancel' });
+  });
+
+  test('the repaint key moves for everything new on the page, or a change is stored and never shown', () => {
+    const key = (state: StepViewState): string => stepRenderKey(state, FAKE_SKINS);
+    const base = stateAt(ON);
+    const pairs: Array<[string, StepViewState, StepViewState]> = [
+      ['a step a re-plan wrote', base, writtenByTheModel()],
+      ['a re-plan starting', base, { ...base, replanning: { stepId: ON, message: 'a' } }],
+      ['a re-plan moving on', { ...base, replanning: { stepId: ON, message: 'a' } }, { ...base, replanning: { stepId: ON, message: 'b' } }],
+      ['a re-plan being recorded', { ...base, plan: replannedHere().plan, step: { ...base.step } }, { ...base, plan: base.plan }],
+      ['the walked steps it names', { ...base, plan: replannedHere(['st-1-shape-src']).plan }, { ...base, plan: replannedHere(['st-2-file-parse']).plan }],
+    ];
+    for (const [name, a, b] of pairs) assert.notEqual(key(a), key(b), name);
   });
 });

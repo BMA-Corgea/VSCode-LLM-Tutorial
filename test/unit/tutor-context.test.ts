@@ -802,3 +802,38 @@ suite('MAX_CONTEXT_CHARS is the sum of the budgets — on a REFLECTIVELY hostile
       `an honest step already uses ${block.length} of ${MAX_CONTEXT_CHARS} — the ceiling is not headroom any more`);
   });
 });
+
+suite('a step a re-plan wrote has no author (T-22, AC7)', () => {
+  function rederived(chosen: string | null): StepLike {
+    const base = stepById('st-4-symbol-render');
+    return { ...base, derivedFrom: base.id, decision: { ...base.decision, chosen } };
+  }
+
+  test('no road is marked the author\'s, in either place the prompt lists them', async () => {
+    const step = rederived('stream');
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    assert.deepEqual(ctx.build?.options.map((o) => o.taken), [false, false, false]);
+    assert.doesNotMatch(renderOptionsText(step), /\[author\]/);
+    assert.doesNotMatch(core.buildContextBlock(ctx), /\[author\]/);
+  });
+
+  test('the tutor is told whose code it is, and which road the learner took', async () => {
+    const step = rederived('stream');
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    const label = step.decision.options.find((o) => o.id === 'stream')!.label;
+    assert.match(ctx.build?.why ?? '', /^There is no author for this step/);
+    assert.ok((ctx.build?.why ?? '').includes(label));
+    assert.ok((ctx.build?.why ?? '').includes(step.decision.why), 'and the reason is still there');
+  });
+
+  test('a step the model wrote, with no road chosen, still says so', async () => {
+    const ctx = await tutorContext(rederived(null), refRoot, target, realGit);
+    assert.match(ctx.build?.why ?? '', /^There is no author for this step/);
+  });
+
+  test('a step no re-plan touched is told nothing of the kind', async () => {
+    const ctx = await tutorContext(stepById('st-4-symbol-render'), refRoot, target, realGit);
+    assert.doesNotMatch(ctx.build?.why ?? '', /There is no author/);
+    assert.deepEqual(ctx.build?.options.map((o) => o.taken), [true, false, false]);
+  });
+});

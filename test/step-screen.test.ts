@@ -17,12 +17,21 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import type { PlanLike, Progress } from '../src/walk/model.js';
-import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE } from '../src/walk/session.js';
+import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, type Replanner } from '../src/walk/session.js';
 import { CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE } from '../src/walk/step-view.js';
 import { Screen, sleep, stale, type Frame } from './support/screen.js';
 import { repoTourShapedPlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
 const TITLE = 'Build Tutorials: Step';
+
+/** T-22: a press re-plans now. These tests are about the press and the page, so nothing follows and no model is near. */
+const NOTHING_FOLLOWS: Replanner = {
+  diverge: () => Promise.resolve({
+    ok: true, changed: false, staleDependents: [],
+    cost: { provider: 'none', model: 'none', metered: true, calls: 0, cachedStops: 0, interpretedStops: 0, inputTokens: 0, outputTokens: 0, usd: 0, failures: [] },
+  }),
+  savePlan: () => undefined,
+};
 const STEP = 'st-4-symbol-render'; // three options: the author's and two alternatives
 
 /** What a person could see in the options section: the rows, the words about the last press, and whether those words are on screen. */
@@ -105,6 +114,8 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     const screen = await Screen.open(api._context);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'step-screen-'));
     writeFixtureTarget(dir, plan);
+    fs.writeFileSync(path.join(dir, '.repo-tour', 'build', 'request.json'), JSON.stringify({ idea: '', recreate: true, repo: dir, target: dir, dial: 'manual', referenceRoot: dir }));
+    api._walk.useReplanner(NOTHING_FOLLOWS);
     const planFile = path.join(dir, '.repo-tour', 'build', 'plan.json');
     const progressFile = path.join(dir, '.repo-tour', 'build', 'progress.json');
     try {
@@ -146,6 +157,7 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
       };
       await body({ api, screen, planFile, progressFile, read, onStep, pageShowing, pressNow, progress, pressFromLeftPage });
     } finally {
+      api._walk.useReplanner(undefined);
       api._walk.session()?.dispose();
       screen.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');

@@ -219,6 +219,26 @@ suite('commitSubject — the one string the panel, the commit, and this suite al
   });
 });
 
+suite('commitSubject — a re-derived step is not the author\'s (T-22, AC7)', () => {
+  const chose = (derivedFrom: string | undefined): StepLike => {
+    const base = fixtureStep();
+    return { ...base, ...(derivedFrom === undefined ? {} : { derivedFrom }), decision: { ...base.decision, chosen: 'inline-in-routes' } };
+  };
+
+  test('the step whose road changed names the road its code now follows', () => {
+    assert.equal(commitSubject(chose('st-2-file-parse')), '2: Why does the tokenizer get its own module? — Tokenize inside the router');
+  });
+
+  test('a step the model wrote names the road it recommended', () => {
+    const base = fixtureStep();
+    assert.equal(commitSubject({ ...base, derivedFrom: 'x', decision: { ...base.decision, chosen: null } }), '2: Why does the tokenizer get its own module? — Split the tokenizer out of the router');
+  });
+
+  test('a choice that re-derived nothing leaves the code the author\'s, and the subject says so', () => {
+    assert.equal(commitSubject(chose(undefined)), '2: Why does the tokenizer get its own module? — Split the tokenizer out of the router');
+  });
+});
+
 suite('ensureRepo — git-inits a folder that is not in a work tree, and only then', () => {
   test('a folder with no .git becomes a repository', async () => {
     const target = tmpDir();

@@ -999,7 +999,7 @@ suite('a press from a page for a step the walk has left (T-21, AC2 — code revi
       choose: (step, option) => { session.choose(step, option); },
       refuseStaleChoice: (step) => { session.refuseStaleChoice(step); },
       openFile: nothing, runCheck: nothing, reproduce: nothing, persistDial: nothing, persistSkin: nothing, ask: nothing,
-      cancelAsk: nothing, clearConversation: nothing, startDetour: nothing, regenerateDetour: nothing, returnFromDetour: nothing,
+      cancelAsk: nothing, clearConversation: nothing, startDetour: nothing, regenerateDetour: nothing, returnFromDetour: nothing, cancelReplan: nothing,
     });
   }
   const choose = (stepId: string | undefined, optionId: string): unknown => ({ type: 'step:choose', payload: { optionId, stepId } });

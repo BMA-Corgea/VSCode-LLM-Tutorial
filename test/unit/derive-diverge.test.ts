@@ -163,6 +163,26 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.equal((fresh as unknown as { derivedFrom?: string }).derivedFrom, 's-parse');
   });
 
+  test('a step whose code was re-derived says so, and it keeps where it first came from (AC7)', async () => {
+    const { plan, root, gs, target } = setup();
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(stepNamed(out.plan, 's-parse')?.derivedFrom, 's-parse');
+
+    const again = setup();
+    stepNamed(again.plan, 's-render')!.derivedFrom = 'an-earlier-decision';
+    const second = await divergePlan(input(again.plan, again.root, 's-render'), depsFor(model().run, again.gs, again.target));
+    if (!second.ok || !second.changed) assert.fail(second.ok ? 'nothing changed' : second.reason);
+    assert.equal(stepNamed(second.plan, 's-render')?.derivedFrom, 'an-earlier-decision', 'it never had an author to go back to');
+  });
+
+  test('a shape decision has no code of its own, so it is not marked as if it did', async () => {
+    const { plan, root, gs, target } = setup();
+    const out = await divergePlan(input(plan, root, 's-api'), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(stepNamed(out.plan, 's-api')?.derivedFrom, undefined);
+  });
+
   test('the decision keeps its id and place, records the answer, and keeps the author\'s road as the author\'s', async () => {
     const { plan, root, gs, target } = setup();
     const out = await divergePlan(input(plan, root, 's-parse'), depsFor(model().run, gs, target));

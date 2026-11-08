@@ -98,6 +98,17 @@ suiteTeardown(() => {
 
 // ── outbound: what the prompt says ──────────────────────────────────────────────────────────
 
+suite('detourPrompt — a step a re-plan wrote (T-22, AC7)', () => {
+  test('it names no author\'s road', () => {
+    const { plan, step } = planAndStep();
+    const taken = step.decision.options.find((o) => o.taken)!;
+    const prompt = detourPrompt({ ...step, derivedFrom: step.id }, plan, 'sql-gauntlet');
+    assert.ok(prompt.includes('this plan does not record which option the author took'));
+    assert.ok(!prompt.includes(`"whatTheAuthorChose": ${JSON.stringify(`${taken.label} \u2014 ${taken.consequence}`)}`));
+    assert.ok(detourPrompt(step, plan, 'sql-gauntlet').includes(taken.label), 'discriminates: an untouched step names it');
+  });
+});
+
 suite('detourPrompt — the concept it states (AC1)', () => {
   test('the version is 1, and it is a number the cache can key on', () => {
     // `store.ts` caches by step id + THIS constant; a prompt whose text changed under an

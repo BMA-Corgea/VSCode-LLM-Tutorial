@@ -304,7 +304,8 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const answered: StepLike = {
       ...d,
       decision: { ...d.decision, chosen: answer },
-      ...(ownFile === null ? {} : { kind: 'file' as const, target: { file: ownFile }, scaffold: scaffoldOf(ownFile, derivedFiles, extracts) }),
+      // Its code is the model's now. A step the model wrote in the first place keeps saying where it came from.
+      ...(ownFile === null ? {} : { kind: 'file' as const, target: { file: ownFile }, scaffold: scaffoldOf(ownFile, derivedFiles, extracts), derivedFrom: d.derivedFrom ?? d.id }),
     };
     stepsById.set(d.id, answered);
     for (const f of merged.fresh) stepsById.set(f.id, freshStep(f, d.id, realKey, derivedFiles, extracts));
