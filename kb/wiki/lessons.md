@@ -39,6 +39,58 @@ into the raw characters, and a raw U+2028 ends a JavaScript line. It broke a reg
 `String.fromCharCode(0x2028)` writes the same value with no escape for a tool to "helpfully"
 decode. Check new files with `grep -cP "\x{2028}|\x{2029}"`.
 
+## The mechanism a ticket names is a hypothesis: measure every phase, not the one it blames (T-30, 2026-11-08)
+
+T-30 was filed against `core.digest()`, with the source read and the fix shape written out: move the
+digest off the extension host's thread. Measured in the real host, on 20,000 TypeScript files,
+`buildPlan` — which the ticket never mentioned — stalled that thread for longer (25.5 s against 20.3 s).
+It had no `await` in it either, so it was the same defect.
+
+The ticket's own reproduction could not have shown this: its fixture was Go only, and a Go repository
+stops at the language refusal, so `buildPlan` never runs. The fix the ticket named would have shipped
+the same freeze under a different sentence on the notification, and only on the repositories that can
+succeed.
+
+- **Before designing around the phase a report blames, time all of them on input that reaches them
+  all.** The failing input in a bug report is the one that *fails*, and that is not the same as the
+  one that exercises the whole path.
+- **`async` on a signature says nothing.** `buildPlan` is declared `async` and never awaits. `grep`
+  for `await` in the body before believing a phase can yield.
+
+## A worker thread contains less than it looks like (T-30, 2026-11-08)
+
+Moving work to a worker felt like moving it out of harm's way, and the first version of T-30's spec
+said so: an out-of-memory ends the worker, not the host. Driven in the real extension host, that was
+false. Three things a thread is not, all found by review after the green:
+
+- **A heap limit it was not given.** With none, a worker inherits the host's (about 4 GiB), and the
+  real host died reaching it. Set `resourceLimits`. Even then one huge single allocation can take the
+  process down: only a separate process is a real wall.
+- **Stoppable.** `terminate()` cannot interrupt a native call or a blocking child. A promise that waits
+  for the thread hands Cancel to whatever that call feels like doing, so settle on your own timer, and
+  say what is still running. `unref` frees the event loop and not the process, which still waits at exit.
+- **Listened to for free.** Listeners attached per request come off when the request ends, so a thread
+  that dies in the gap is heard by nothing: the next request posts into a dead thread, and an `'error'`
+  with no listener is thrown on the thread every extension shares. Attach them for the thread's life.
+
+**Check what the library does whatever you asked it not to.** `write: false` stops `digest` writing;
+it still reads `<outDir>/inventory.json`, and that followed a symlink committed in the repository being
+read.
+
+## Clean-up that stops at the file leaves the folder it made (T-30, 2026-11-08)
+
+A cancelled build deleted its write-ahead marker, and every check for the marker said the build had
+cleaned up. But writing the marker had created `.repo-tour/build/`, and the start screen refuses any
+folder with something in it. So the most ordinary thing to do after pressing Cancel — press *Build the
+plan* again on the same form — was refused with "not empty", by a build that believed it had left
+nothing behind. The Go-repository refusal had the same hole, and nobody had noticed: nothing failed,
+it just told you to go and find another folder.
+
+**Ask what the code that writes a file had to create first, and delete that too, when it is empty.**
+`rmdir` rather than `rm -r`, so the clean-up can only ever remove what is already empty. This is T-7's
+"leaves nothing behind needs a list of what nothing covers", one level down: the list had the files on
+it and not the directories.
+
 ## Read the screen, not the markup — `webview.html` never changes after a press (T-15, 2026-11-05)
 
 T-15's September fix was reviewed, corrected and merged with its pins green. Re-driven two months
@@ -743,10 +795,11 @@ from the dev host — test it by installing the packaged `.vsix` into a throwawa
 ## A control that silently declines is a broken control (T-3, repo-tour)
 
 Inherited from repo-tour and repeatedly earned since: if something cannot act yet, it says so
-where the eye already is. T-4's alternatives carry a "coming with T-10" label and render no
+where the eye already is. T-4's alternatives carried a "coming with T-10" label and rendered no
 `<button>` or `<input>` at all — nothing in the DOM to click is a straighter answer than
-something greyed out. T-5 deleted the "arrives with T-5" placeholder the moment the real
-thing existed, because by then the placeholder was the lie.
+something greyed out. T-21 gave them real buttons and took the label away in the same change,
+as T-5 had deleted the "arrives with T-5" placeholder the moment the real thing existed: by then
+the placeholder was the lie.
 
 ## A polish audit compares consecutive states, not frames (T-16)
 

@@ -313,6 +313,21 @@ suite('a malformed check verdict is dropped, not drawn as a failure (T-5 code re
     });
   }
 
+  test('the learner\'s choice survives a malformed verdict beside it (T-21) — a divergence is never undone by a load', () => {
+    const target = fixtureTarget();
+    const plan = loadPlan(target);
+    fs.writeFileSync(progressPath(target), '{"schemaVersion":1,"current":"st-4-symbol-render","steps":{"st-4-symbol-render":{"status":"pending","chosen":"stream","check":"garbage"}}}');
+    assert.equal(loadProgress(target, plan).steps['st-4-symbol-render']?.chosen, 'stream');
+  });
+
+  test('a saved choice loads back exactly — the reload drill for T-21', () => {
+    const target = fixtureTarget();
+    const plan = loadPlan(target);
+    const progress = { ...loadProgress(target, plan), steps: { 'st-4-symbol-render': { status: 'pending' as const, chosen: 'template-string' } } };
+    saveProgress(target, progress);
+    assert.equal(loadProgress(target, plan).steps['st-4-symbol-render']?.chosen, 'template-string');
+  });
+
   test('a well-formed verdict survives untouched (discriminates against dropping everything)', () => {
     const target = fixtureTarget();
     const plan = loadPlan(target);

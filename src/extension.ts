@@ -11,10 +11,13 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from './core.js';
 import { runDoctor, formatReport } from './doctor.js';
+import { offThreadCore } from './start/off-thread.js';
 import { StartPanel, type StartPanelDeps } from './start/panel.js';
+import { BUILD_WORKER_RELATIVE } from './start/worker-protocol.js';
 import {
   buildFromRequest, completionMessage, coreFor, readFreshMarker, readMarker, realGit, resumeIfMarked,
   type BuildContext, type BuildOutcome, type ResumeContext,
@@ -113,7 +116,13 @@ function buildContextFor(
 ): BuildContext {
   const { provider, model } = resolveLlmSettings(core);
   return {
-    core: coreFor(core.loaded),
+    // The one place a build's core is made, for a press and for a resume alike: reading the
+    // repository must never run on this thread (T-30, pinned in test/unit/off-thread.test.ts).
+    core: offThreadCore({
+      workerFile: path.join(context.extensionUri.fsPath, BUILD_WORKER_RELATIVE),
+      coreRoot: core.root,
+      inProcess: coreFor(core.loaded),
+    }),
     globalStorageRoot: context.globalStorageUri.fsPath,
     provider,
     model,

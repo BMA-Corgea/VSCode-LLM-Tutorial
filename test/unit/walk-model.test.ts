@@ -28,7 +28,7 @@
 
 import * as assert from 'node:assert/strict';
 import { BUILD_PLAN_SCHEMA, validateBuildPlan, type JsonSchema } from './plan-schema.js';
-import { currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCheck, setCurrent, setDial, statusText, stepDial, treeModel, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
+import { MAX_OPTION_ID, MAX_OPTIONS_RENDERED, currentStep, emptyProgress, isOptionKey, markDone, nextStepId, optionsTable, prevStepId, setCheck, setChosen, setCurrent, setDial, statusText, stepDial, treeModel, withChosen, type OptionLike, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const IDS = ['st-1-shape-src', 'st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render'];
@@ -147,6 +147,136 @@ suite('setCurrent / markDone / setDial — pure updates, never a mutation', () =
       'st-1-shape-src': { status: 'done' },
       'st-2-file-parse': { status: 'pending', dial: 'scaffolded' },
     });
+  });
+});
+
+suite('setChosen / withChosen — the learner\'s road, recorded beside the plan and shown on it (T-21)', () => {
+  const STEP = 'st-4-symbol-render';
+
+  test('setChosen is pure, keeps what the step already had, and latest wins', () => {
+    const before = setDial(fixtureProgress(fixturePlan()), STEP, 'automated');
+    const once = setChosen(before, STEP, 'stream');
+    assert.equal(before.steps[STEP]?.chosen, undefined, 'the input progress was mutated');
+    assert.equal(once.steps[STEP]?.chosen, 'stream');
+    assert.equal(once.steps[STEP]?.dial, 'automated', 'the dial already recorded for the step was lost');
+    assert.equal(setChosen(once, STEP, 'author').steps[STEP]?.chosen, 'author', 'latest wins');
+  });
+
+  test('withChosen shows the learner\'s choice in decision.chosen — on a NEW plan, never the one read from disk', () => {
+    const plan = fixturePlan();
+    const authors = plan.steps.find((s) => s.id === STEP)!.decision.chosen;
+    const shown = withChosen(plan, setChosen(fixtureProgress(fixturePlan()), STEP, 'template-string'));
+    assert.equal(shown.steps.find((s) => s.id === STEP)!.decision.chosen, 'template-string');
+    assert.equal(plan.steps.find((s) => s.id === STEP)!.decision.chosen, authors, 'the plan read from disk was mutated');
+    assert.equal(shown.steps.find((s) => s.id === STEP)!.decision.authorChoice, 'author', 'the author\'s road must stay the author\'s');
+    assert.deepEqual(shown.steps.find((s) => s.id === STEP)!.decision.options.map((o) => o.taken), [true, false, false], '"taken" is the author\'s, never the learner\'s');
+  });
+
+  test('a recorded choice that names no option of its step is ignored, not shown (a rebuilt plan)', () => {
+    const plan = fixturePlan();
+    const shown = withChosen(plan, setChosen(fixtureProgress(fixturePlan()), STEP, 'an-option-that-is-gone'));
+    assert.equal(shown, plan, 'nothing to overlay: the same plan comes back');
+  });
+
+  test('no choice recorded: the very same plan object comes back (discriminates)', () => {
+    const plan = fixturePlan();
+    assert.equal(withChosen(plan, fixtureProgress(fixturePlan())), plan);
+  });
+});
+
+suite('optionsTable — the road a step is on and what the page can show, decided once (T-21: C4, C5, C6, S2, S3, S4)', () => {
+  const STEP = 'st-4-symbol-render';
+  const option = (id: unknown, taken = false): OptionLike => ({ id, label: 'a road', consequence: 'a consequence', taken } as OptionLike);
+
+  function stepWith(options: unknown, decision: Partial<StepLike['decision']> = {}): StepLike {
+    const step = fixturePlan().steps.find((s) => s.id === STEP)!;
+    return { ...step, decision: { ...step.decision, options: options as OptionLike[], authorChoice: 'author', chosen: null, ...decision } };
+  }
+
+  test('on the author\'s road until the learner names a row: `taken` first, `authorChoice` only when nothing is `taken`', () => {
+    const marked = optionsTable(stepWith([option('author', true), option('alt-1'), option('alt-2')]));
+    assert.equal(marked.author, 0);
+    assert.equal(marked.on, 0);
+    assert.equal(marked.diverged, false);
+    assert.deepEqual(marked.choosable, [false, true, true], 'every other road is choosable, the one the step is on is not');
+
+    const fallback = optionsTable(stepWith([option('alt-1'), option('author'), option('alt-2')]));
+    assert.equal(fallback.author, 1, 'no `taken` anywhere: `authorChoice` answers');
+    assert.equal(fallback.on, 1);
+  });
+
+  test('the learner\'s road moves the mark and is called a divergence; the author\'s own road is not', () => {
+    const chosen = optionsTable(stepWith([option('author', true), option('alt-1'), option('alt-2')], { chosen: 'alt-2' }));
+    assert.equal(chosen.on, 2);
+    assert.equal(chosen.author, 0, 'the author\'s road stays the author\'s');
+    assert.equal(chosen.diverged, true);
+    assert.deepEqual(chosen.choosable, [true, true, false], 'the author\'s road is choosable again');
+
+    const back = optionsTable(stepWith([option('author', true), option('alt-1')], { chosen: 'author' }));
+    assert.equal(back.diverged, false, 'repo-tour writes chosen:"author" on every step: nothing diverged there');
+  });
+
+  test('when `taken` and `authorChoice` disagree there is still one answer, `taken`\'s (C4, S3)', () => {
+    const table = optionsTable(stepWith([option('author'), option('stream', true), option('alt')], { authorChoice: 'author' }));
+    assert.equal(table.on, 1, 'the road this step is on is the marked one');
+    assert.deepEqual(table.choosable, [true, false, true], '`author` is offered and must be choosable, not refused');
+  });
+
+  test('a row whose id another row shares has no key and no control, wherever the mark is (C4, S3)', () => {
+    const table = optionsTable(stepWith([option('author', true), option('dup'), option('dup'), option('other')]));
+    assert.deepEqual(table.keys, ['author', null, null, 'other']);
+    assert.deepEqual(table.choosable, [false, false, false, true]);
+    assert.equal(optionsTable(stepWith([option('dup', true), option('dup')], { chosen: 'dup' })).diverged, false, 'a duplicated id names no row: nothing diverged');
+  });
+
+  test('an id the message cannot carry has no control: empty, not a string, one past the limit — the longest it can carry has one (C6, S4)', () => {
+    const long = 'x'.repeat(MAX_OPTION_ID);
+    const table = optionsTable(stepWith([option('author', true), option(''), option(7), option(null), option(`${long}x`), option(long)]));
+    assert.deepEqual(table.keys, ['author', null, null, null, null, long]);
+    assert.deepEqual(table.choosable, [false, false, false, false, false, true]);
+    for (const id of ['', 7, null, undefined, `${long}x`]) assert.equal(isOptionKey(id), false, JSON.stringify(id));
+    assert.equal(isOptionKey(long), true);
+  });
+
+  test('the page shows the first 24, the author\'s option kept in view; nothing past them is a road (C5, S2)', () => {
+    const many = Array.from({ length: 30 }, (_, i) => option(i === 28 ? 'author' : `alt-${i}`, i === 28));
+    const table = optionsTable(stepWith(many, { chosen: 'alt-26' }));
+    assert.equal(table.rows.length, MAX_OPTIONS_RENDERED);
+    assert.equal(table.omitted, 30 - MAX_OPTIONS_RENDERED);
+    assert.equal(table.author, MAX_OPTIONS_RENDERED - 1, 'AC2 outranks the cap: the author\'s option takes the last slot');
+    assert.ok(!table.keys.includes('alt-26'), 'an option the page cannot draw is not on the table');
+    assert.equal(table.on, table.author, 'so a recorded choice past the window leaves the step on the author\'s road');
+    assert.equal(table.diverged, false);
+    assert.ok(!table.keys.includes('alt-23'), 'the row the author\'s option displaced is not on the table either');
+  });
+
+  test('withChosen overlays only what the page can show (C5, S2): the screen and decision.chosen must agree', () => {
+    const plan = fixturePlan();
+    const step = plan.steps.find((s) => s.id === STEP)!;
+    step.decision.options = Array.from({ length: 30 }, (_, i) => option(i === 0 ? 'author' : `alt-${i}`, i === 0));
+    step.decision.chosen = null;
+    const past = withChosen(plan, setChosen(fixtureProgress(fixturePlan()), STEP, 'alt-27'));
+    assert.equal(past, plan, 'a recorded choice the page cannot draw is not overlaid');
+    const within = withChosen(plan, setChosen(fixtureProgress(fixturePlan()), STEP, 'alt-3'));
+    assert.equal(within.steps.find((s) => s.id === STEP)!.decision.chosen, 'alt-3', 'discriminates: one it can draw is');
+  });
+
+  test('a step with one option offers nothing, whether or not that option is the marked road (AC6)', () => {
+    assert.deepEqual(optionsTable(stepWith([option('author', true)])).choosable, [false]);
+    assert.deepEqual(optionsTable(stepWith([option('alt-1')], { authorChoice: '' })).choosable, [false], 'not even an unmarked one');
+  });
+
+  test('a step with no id the page could report offers nothing: every press would be refused', () => {
+    assert.deepEqual(optionsTable({ ...stepWith([option('author', true), option('alt-1')]), id: '' }).choosable, [false, false]);
+    assert.deepEqual(optionsTable({ ...stepWith([option('author', true), option('alt-1')]), id: 7 as unknown as string }).choosable, [false, false]);
+  });
+
+  test('total over a plan whose decision is not the shape its type claims', () => {
+    for (const options of [undefined, null, 'three', { length: 3 }, 7]) {
+      assert.deepEqual(optionsTable(stepWith(options)).rows, [], `options ${JSON.stringify(options)}`);
+    }
+    assert.deepEqual(optionsTable({ id: STEP, decision: undefined as unknown as StepLike['decision'] }).choosable, []);
+    assert.deepEqual(optionsTable(stepWith([null, 7, 'x', option('author', true)])).keys, [null, null, null, 'author']);
   });
 });
 
@@ -326,7 +456,7 @@ suite('the fixture plan itself — a legitimate BuildPlan, not merely a plausibl
       ['docstring', 'interpret', 'none'],
       'all three whySource labels must be renderable from this one plan',
     );
-    assert.ok(plan.steps.some((s) => s.decision.options.length >= 2), 'at least one step needs alternatives for the "coming with T-10" path');
+    assert.ok(plan.steps.some((s) => s.decision.options.length >= 2), 'at least one step needs alternatives, the only steps a learner can choose on');
     assert.ok(plan.steps.some((s) => s.witness.sha !== null), 'at least one witness sentence must be renderable');
     assert.ok(plan.steps.some((s) => s.witness.sha === null), 'and at least one "no history to show"');
     assert.ok(plan.steps.some((s) => s.kind === 'symbol' && s.scaffold.loadBearing.length > 0), 'a symbol step with load-bearing lines to decorate');
