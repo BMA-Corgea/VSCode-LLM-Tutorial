@@ -80,13 +80,55 @@ async function derived(entryCode = MAIN, outline = fixtureOutlineText()) {
   return { ...out, target };
 }
 
-function nodeRun(entry: string, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runIt(command: string, args: string[], cwd: string): Promise<{ code: number | null; stdout: string; stderr: string; missing?: boolean }> {
   return new Promise((resolve) => {
-    execFile(process.execPath, [entry], { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
+    execFile(command, args, { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
       const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
-      resolve({ code, stdout, stderr });
+      resolve({ code, stdout, stderr, missing: (err as { code?: unknown } | null)?.code === 'ENOENT' });
     });
   });
+}
+
+function nodeRun(entry: string, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runIt(process.execPath, [entry], cwd);
+}
+
+const PY_TALLY = 'def total(xs):\n    return sum(xs)\n';
+const PY_MAIN = 'from core.tally import total\n\nprint(f"total: {total([1, 2, 3])}")\n';
+
+/** The fixture idea as a Python plan, derived through the real engine, with `files` as its code. */
+async function derivedPython(files: Record<string, string> = { 'core/tally.py': PY_TALLY, 'cli/main.py': PY_MAIN }, plannedExtra: string[] = []) {
+  const outline = outlineWith((o) => {
+    o['language'] = 'python';
+    o['entry'] = 'cli/main.py';
+    const steps = stepsOf(o);
+    steps[1]!['path'] = 'core/tally.py';
+    steps[3]!['path'] = 'cli/main.py';
+    steps[3]!['dependsOn'] = ['cli', 'core/tally.py'];
+    for (const p of plannedExtra) {
+      const chapter = p.split('/')[0]!;
+      steps.splice(steps.findIndex((st) => st['path'] === chapter) + 1, 0, { ...steps[1]!, chapter, path: p, question: `${p}?`, dependsOn: [chapter] });
+    }
+  });
+  const run: TutorCore['runLlm'] = (prompt) => {
+    const line = prompt.split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
+    const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
+    const text = input['task'] === 'outline' ? outline : JSON.stringify({ content: files[(input['node'] as { path: string }).path] });
+    return Promise.resolve({ text, inputTokens: 0, outputTokens: 0, usd: 0, metered: true });
+  };
+  const ledger = new AskLedger();
+  ledgers.push(ledger);
+  const core: TutorCore = {
+    ...realCore,
+    runLlm: () => Promise.reject(new Error('a test in derive-smoke.test.ts reached the real model')),
+    availability: () => Promise.resolve({ ok: true, detail: 'stubbed provider probe' }),
+  };
+  const target = tempDir('derive-smoke-target-');
+  const out = await derivePlan({ idea: FIXTURE_IDEA }, {
+    ledger, globalStorageRoot: tempDir('derive-smoke-gs-'), target, dialCore,
+    settings: { core, provider: 'claude', model: 'claude-sonnet-5', timeoutMs: 5_000, run },
+  });
+  return { out, target };
 }
 
 suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
@@ -150,4 +192,47 @@ suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
     assert.equal(ran.code, 0, `node ${state.entry} exited ${String(ran.code)}: ${ran.stderr}`);
     assert.equal(ran.stdout, 'total: 6\n');
   });
+
+  test('a Python plan builds and STARTS the way the prompt says: from the top folder, as a module', async function () {
+    const { out, target } = await derivedPython();
+    if (!out.ok) assert.fail(out.reason);
+    for (const step of out.plan.steps.filter((s) => s.kind === 'file')) {
+      const write = planWrite(step, 'automated', out.referenceRoot, target, out.plan, dialCore);
+      assert.ok(write !== null && !isRefusal(write), `${step.target.file}: ${write !== null && isRefusal(write) ? write.refused : 'nothing to write'}`);
+      writeTextAtomic(write.path, write.content, target);
+    }
+    const ran = await runIt('python3', ['-m', 'cli.main'], target);
+    if (ran.missing === true) { this.skip(); return; }
+    assert.equal(ran.code, 0, `python3 -m cli.main exited ${String(ran.code)}: ${ran.stderr}`);
+    assert.equal(ran.stdout, 'total: 6\n');
+  });
+
+  test('scaffolded: a Python file\'s functions are stubbed and the stub still parses', async function () {
+    const { out, target } = await derivedPython();
+    if (!out.ok) assert.fail(out.reason);
+    const tally = out.plan.steps.find((s) => s.target.file === 'core/tally.py')!;
+    const write = planWrite(tally, 'scaffolded', out.referenceRoot, target, out.plan, dialCore);
+    assert.ok(write !== null && !isRefusal(write), write !== null && isRefusal(write) ? write.refused : 'expected a write');
+    assert.ok(write.content.includes('def total(xs):'), 'the signature is kept');
+    assert.ok(!write.content.includes('sum(xs)'), 'the body is hidden');
+    const stub = path.join(tempDir('derive-smoke-stub-'), 'tally.py');
+    fs.writeFileSync(stub, write.content);
+    const ran = await runIt('python3', ['-c', `import ast; ast.parse(open(${JSON.stringify(stub)}).read())`], target);
+    if (ran.missing === true) { this.skip(); return; }
+    assert.equal(ran.code, 0, `the Python stub does not parse: ${ran.stderr}`);
+  });
+
+  for (const [name, planned, main, pattern] of [
+    ['a sibling imported by its bare name, which only works when the file is run directly', ['cli/helper.py'], 'from helper import add\n\nprint(add(1, 2))\n', /only works when this file is run directly/],
+    ['importlib', [], 'import importlib\n\nm = importlib.import_module("core.tally")\nprint(m)\n', /computed import/],
+    ['__import__', [], 'm = __import__("core.tally")\nprint(m)\n', /computed import/],
+    ['an undeclared file of the app, by its full name', ['core/helper.py'], 'from core.helper import add\n\nprint(add(1, 2))\n', /a file it does not depend on/],
+  ] as Array<[string, string[], string, RegExp]>) {
+    test(`a Python entry point with ${name} is refused`, async () => {
+      const helper = 'def add(a, b):\n    return a + b\n';
+      const { out } = await derivedPython({ 'core/tally.py': PY_TALLY, 'cli/main.py': main, 'cli/helper.py': helper, 'core/helper.py': helper }, planned);
+      assert.ok(!out.ok, 'expected the derivation to fail');
+      assert.match(out.reason, pattern);
+    });
+  }
 });

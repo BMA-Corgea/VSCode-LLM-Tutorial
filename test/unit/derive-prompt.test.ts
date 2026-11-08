@@ -206,6 +206,30 @@ suite('parseOutlineReply — a plan is accepted whole, or refused with a sentenc
     }), /more than 6/],
     ['an over-long question', () => outlineWith((o) => { stepsOf(o)[1]!['question'] = 'q'.repeat(DERIVE_LIMITS.maxQuestionChars + 1); }), /more than 300/],
     ['a question that is not text', () => outlineWith((o) => { stepsOf(o)[1]!['question'] = { toString: 'x' }; }), /no "question" \(it is a object\)/],
+    ['a Claude settings file', () => outlineWith((o) => { stepsOf(o)[1]!['path'] = 'core/.claude/settings.mjs'; }), /segment beginning with a dot/],
+    ['an env file', () => outlineWith((o) => { stepsOf(o)[1]!['path'] = 'core/.env.mjs'; }), /segment beginning with a dot/],
+    ['the build folder the walk reads', () => outlineWith((o) => { stepsOf(o)[1]!['path'] = 'core/.repo-tour/build/plan.mjs'; }), /segment beginning with a dot/],
+    ['a path past the length bound', () => outlineWith((o) => { stepsOf(o)[1]!['path'] = `core/${'a'.repeat(DERIVE_LIMITS.maxPathChars)}.mjs`; }), /longer than 120/],
+    ['a chapter key that is not lowercase', () => outlineWith((o) => {
+      (o['chapters'] as Array<Record<string, unknown>>)[0]!['key'] = 'CORE';
+      stepsOf(o)[0]!['chapter'] = 'CORE';
+      stepsOf(o)[0]!['path'] = 'CORE';
+    }), /key "CORE" is not a short lowercase name/],
+    ['two chapters with one key', () => outlineWith((o) => {
+      const chapters = o['chapters'] as Array<Record<string, unknown>>;
+      chapters.push({ ...chapters[0]! });
+    }), /two chapters share the key/],
+    ['an option id that is not a handle', () => outlineWith((o) => { (stepsOf(o)[1]!['options'] as Array<Record<string, unknown>>)[0]!['id'] = 'BAD ID'; }), /not a short lowercase handle/],
+    ['a file that is also another file\'s folder', () => outlineWith((o) => {
+      const steps = stepsOf(o);
+      steps.splice(2, 0, { ...steps[1]!, path: 'core/tally.mjs/inner.mjs', question: 'inner?' });
+    }), /is also a folder/],
+    ['a file in a folder a tool owns', () => outlineWith((o) => { stepsOf(o)[1]!['path'] = 'core/node_modules/x.mjs'; }), /a folder a tool owns/],
+    ['a tool\'s own config file', () => outlineWith((o) => { stepsOf(o)[1]!['path'] = 'core/eslint.config.mjs'; }), /named like a tool's configuration/],
+    ['an entry that is not the last file', () => outlineWith((o) => {
+      const steps = stepsOf(o);
+      steps.push({ ...steps[1]!, chapter: 'cli', path: 'cli/after.mjs', question: 'after?', dependsOn: ['cli'] });
+    }), /not the last file/],
   ];
   for (const [name, reply, pattern] of refusals) {
     test(`refuses ${name}`, () => { mustRefuse(reply(), pattern); });
@@ -255,6 +279,11 @@ suite('parseCodeReply — a file, within its bounds, with one trailing newline',
     ['content past the character bound', JSON.stringify({ content: 'x'.repeat(DERIVE_LIMITS.maxFileChars + 1) }), /more than 12000/],
     ['content past the line bound', JSON.stringify({ content: 'x\n'.repeat(DERIVE_LIMITS.maxFileLines + 5) }), /lines, more than 150/],
     ['a NUL byte', JSON.stringify({ content: 'a\u0000b' }), /NUL byte/],
+    ['a Unicode line separator, which ends a comment in JavaScript and not in the file check', JSON.stringify({ content: `// note${LS}import '/abs/victim.mjs';\n` }), /line separator/],
+    ['a Unicode paragraph separator', JSON.stringify({ content: `a${PS}b` }), /line separator/],
+    ['a carriage return on its own', JSON.stringify({ content: 'a\rb\n' }), /carriage return/],
+    ['a file exactly at the character bound before its final newline', JSON.stringify({ content: 'x'.repeat(DERIVE_LIMITS.maxFileChars) }), /more than 12000/],
+    ['a file one line past the bound with no final newline', JSON.stringify({ content: Array.from({ length: DERIVE_LIMITS.maxFileLines + 1 }, () => 'x').join('\n') }), /151 lines, more than 150/],
   ] as Array<[string, string, RegExp]>) {
     test(`refuses ${name}`, () => {
       const out = parseCodeReply(reply, 'core/x.mjs');
@@ -262,14 +291,58 @@ suite('parseCodeReply — a file, within its bounds, with one trailing newline',
       assert.match(out.refused, pattern);
     });
   }
+
+  test('a file that fills both bounds exactly is accepted: the bounds measure the file as it will be written', () => {
+    const lines = Array.from({ length: DERIVE_LIMITS.maxFileLines }, () => 'x').join('\n');
+    assert.ok(!isDeriveRefusal(parseCodeReply(JSON.stringify({ content: lines }), 'core/x.mjs')), 'exactly 150 lines');
+    const chars = `${'x'.repeat(DERIVE_LIMITS.maxFileChars - 1)}\n`;
+    assert.ok(!isDeriveRefusal(parseCodeReply(JSON.stringify({ content: chars }), 'core/x.mjs')), 'exactly 12000 characters');
+  });
+
+  test('Windows line endings are an ordinary file, not a carriage return on its own', () => {
+    assert.ok(!isDeriveRefusal(parseCodeReply(JSON.stringify({ content: 'a\r\nb\r\n' }), 'core/x.mjs')));
+  });
+});
+
+suite('a Python plan: its own file names', () => {
+  /** The fixture outline as a Python plan. */
+  function pythonOutline(change: (steps: Array<Record<string, unknown>>) => void = () => undefined): string {
+    return outlineWith((o) => {
+      o['language'] = 'python';
+      o['entry'] = 'cli/main.py';
+      const steps = stepsOf(o);
+      steps[1]!['path'] = 'core/tally.py';
+      steps[3]!['path'] = 'cli/main.py';
+      steps[3]!['dependsOn'] = ['cli', 'core/tally.py'];
+      change(steps);
+    });
+  }
+
+  test('a Python outline parses, with its files ending in .py', () => {
+    assert.deepEqual(mustParse(pythonOutline()).nodes.map((n) => n.path), ['core', 'core/tally.py', 'cli', 'cli/main.py']);
+  });
+
+  for (const [name, change, pattern] of [
+    ['conftest.py, which pytest runs in the folder', (s) => { s[1]!['path'] = 'core/conftest.py'; s[3]!['dependsOn'] = ['cli', 'core/conftest.py']; }, /named like a tool's configuration/],
+    ['setup.py, which an install runs', (s) => { s[1]!['path'] = 'core/setup.py'; s[3]!['dependsOn'] = ['cli', 'core/setup.py']; }, /named like a tool's configuration/],
+    ['a file in __pycache__', (s) => { s[1]!['path'] = 'core/__pycache__/x.py'; s[3]!['dependsOn'] = ['cli', 'core/__pycache__/x.py']; }, /a folder a tool owns/],
+  ] as Array<[string, (s: Array<Record<string, unknown>>) => void, RegExp]>) {
+    test(`refuses ${name}`, () => { mustRefuse(pythonOutline(change), pattern); });
+  }
+
+  test('the code prompt says how a Python file imports another and how the app is started', () => {
+    assert.match(DERIVE_INSTRUCTIONS.code, /python3 -m/);
+    assert.match(DERIVE_INSTRUCTIONS.code, /from core\.items import/);
+  });
 });
 
 suite('parseReplanReply — each part checked before the engine merges it', () => {
   test('a reply of new steps parses, with chapter edges added', () => {
-    const steps = (fixtureOutlineReply()['steps'] as unknown[]).slice(3);
+    const steps = (fixtureOutlineReply()['steps'] as Array<Record<string, unknown>>).slice(3).map((s) => ({ ...s, dependsOn: ['core/tally.mjs'] }));
     const out = parseReplanReply(JSON.stringify({ steps }), 'javascript');
     assert.ok(!isDeriveRefusal(out), isDeriveRefusal(out) ? out.refused : '');
     assert.deepEqual(out.nodes.map((n) => n.path), ['cli/main.mjs']);
+    assert.deepEqual(out.nodes[0]?.dependsOn, ['cli', 'core/tally.mjs'], 'the chapter edge is added here too, not trusted to the model');
     assert.equal(out.entry, null);
   });
 

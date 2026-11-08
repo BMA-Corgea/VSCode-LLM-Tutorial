@@ -177,10 +177,11 @@ export interface CodeInput {
 const CODE_INSTRUCTIONS = [
   'You are writing ONE file of a small app that a beginner is building step by step.',
   '',
-  'Write the file at "node.path" so that it carries out the decision "node.question" the way "node.chosen" says, inside the part of the app described by "chapter". It may import ONLY the files listed in "dependencies", each by a relative path from this file with its full file name (for example "./items.mjs" or "../core/items.mjs"), plus the language\'s standard library. Use what those files export exactly as they are written, and export what later files will need.',
+  'Write the file at "node.path" so that it carries out the decision "node.question" the way "node.chosen" says, inside the part of the app described by "chapter". It may import ONLY the files listed in "dependencies" (in JavaScript, each by a relative path from this file with its full file name, for example "./items.mjs" or "../core/items.mjs"), plus the language\'s standard library. Use what those files export exactly as they are written, and export what later files will need.',
   '',
   'Rules:',
-  '- JavaScript: ES module syntax (import and export), and Node\'s standard library through "node:" imports. Python: the standard library only.',
+  '- JavaScript: ES module syntax (import and export), and Node\'s standard library through "node:" imports.',
+  '- Python: the standard library only, and a file of this app is imported by its dotted path from the top folder, for example "from core.items import add" for core/items.py. The app is started from the top folder as a module: "python3 -m cli.main" for cli/main.py.',
   `- At most ${DERIVE_LIMITS.maxFileLines} lines of plain, readable code a beginner can follow, with a short comment where the decision shows.`,
   '- If "node.isEntry" is true, running this file with no arguments must start the app, do something visible, and exit cleanly.',
   '',
@@ -319,7 +320,7 @@ function describe(value: unknown): string {
 
 /** A value quoted in a refusal: short, and never a `toString` a model supplied. Control
  *  characters become spaces (by char code, so no control character appears in a regex here). */
-function quote(value: unknown): string {
+export function quote(value: unknown): string {
   if (typeof value !== 'string') return describe(value);
   let one = '';
   for (const ch of value) {
@@ -434,6 +435,15 @@ function parseOptions(raw: unknown, where: string): DerivedOption[] | DeriveRefu
   return out;
 }
 
+/** Folders a tool owns: nothing in a small app writes into them, and a tool reads them as its own. */
+const TOOL_OWNED_SEGMENTS: ReadonlySet<string> = new Set(['node_modules', '__pycache__']);
+/**
+ * File names a tool runs by itself when it runs in the folder, with no one having started the app
+ * (T-12's rule for files that configure a tool). `.mjs` and `.py` are the only extensions a Mode A
+ * file can have, so these are the ones that matter, and a small app has no reason to carry them.
+ */
+const TOOL_CONFIG_FILE = /^(?:[A-Za-z0-9_-]+\.config\.mjs|conftest\.py|setup\.py|noxfile\.py)$/;
+
 /**
  * Why `p` may not be this file step's path, or `null`. The shared lexical rule first (the
  * detour's attack list), then Mode A's own: inside its chapter's directory, and the language's
@@ -448,6 +458,11 @@ export function unsafeDerivedFileReason(p: unknown, chapter: string, language: D
   });
   if (lexical !== null) return lexical;
   const file = p as string;
+  const segments = file.split('/');
+  if (segments.some((s) => TOOL_OWNED_SEGMENTS.has(s))) return 'is inside a folder a tool owns (node_modules or __pycache__), which no app writes';
+  if (TOOL_CONFIG_FILE.test(segments[segments.length - 1] ?? '')) {
+    return "is named like a tool's configuration, which that tool would run in this folder without anyone starting the app";
+  }
   if (!file.startsWith(`${chapter}/`)) return `is not inside its chapter's directory, "${chapter}"`;
   const extension = LANGUAGE_EXTENSION[language];
   if (!file.endsWith(extension) || file.length === `${chapter}/`.length + extension.length) {
@@ -541,6 +556,11 @@ export function validatePlan(chapters: readonly DerivedChapter[], nodes: readonl
     seenPaths.add(n.path);
     seenFolded.add(folded);
   }
+  const files = nodes.filter((n) => n.kind === 'file').map((n) => n.path);
+  for (const f of files) {
+    const asFolder = `${f.toLowerCase()}/`;
+    if (files.some((other) => other.toLowerCase().startsWith(asFolder))) return refuse(`the file ${quote(f)} is also a folder that holds another file`);
+  }
   for (const key of chapterKeys) {
     if (!shapeSeen.has(key)) return refuse(`chapter ${quote(key)} has no shape step`);
     if ((fileCount.get(key) ?? 0) === 0) return refuse(`chapter ${quote(key)} has no file steps`);
@@ -595,6 +615,8 @@ export function parseOutlineReply(textIn: unknown): Outline | DeriveRefusal {
   const withEdges = withChapterEdges(nodes);
   const problem = validatePlan(chapters, withEdges, entry);
   if (problem !== null) return problem;
+  const lastFile = [...withEdges].reverse().find((n) => n.kind === 'file');
+  if (lastFile?.path !== entry) return refuse(`the outline's entry ${quote(entry)} is not the last file step, and an entry point is built last`);
   return { title, language, entry, chapters, nodes: withEdges };
 }
 
@@ -644,6 +666,12 @@ export function unsoundCodeText(content: unknown, filePath: string): string | nu
     return `the code for ${quote(filePath)} is ${content.length} characters, more than ${DERIVE_LIMITS.maxFileChars}`;
   }
   if (content.includes('\u0000')) return `the code for ${quote(filePath)} contains a NUL byte`;
+  // JavaScript ends a line (and so a `//` comment) at these, and repo-tour's grammar does not: the
+  // file the engine checked would not be the file Node runs.
+  if (content.includes(LINE_SEPARATOR) || content.includes(PARAGRAPH_SEPARATOR)) {
+    return `the code for ${quote(filePath)} contains a Unicode line separator, which ends a line for the language and not for the check that read it`;
+  }
+  if (/\r(?!\n)/.test(content)) return `the code for ${quote(filePath)} contains a carriage return on its own, which ends a line for the language and not for the bound on lines`;
   const lines = content.split('\n').length - (content.endsWith('\n') ? 1 : 0);
   if (lines > DERIVE_LIMITS.maxFileLines) {
     return `the code for ${quote(filePath)} is ${lines} lines, more than ${DERIVE_LIMITS.maxFileLines}`;

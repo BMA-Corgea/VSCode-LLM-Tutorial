@@ -33,7 +33,7 @@
  */
 
 import fs from 'node:fs';
-import { builtinModules } from 'node:module';
+import { isBuiltin } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import type { DialCore, FileRecord } from '../dial/core.js';
@@ -43,7 +43,7 @@ import { askOnce, newTally, type AskTally, type DeriveAskDeps } from './ask.js';
 import { assemblePlan, lineCountOf, stepIdFor, type DeriveCost, type DerivedPlan, type ExtractLike } from './assemble.js';
 import { ancestorsOf, externalDependencies, insertInOrder, keptBy } from './graph.js';
 import {
-  codePrompt, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, replanPrompt, unsoundCodeText, validatePlan, withChapterEdges,
+  codePrompt, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, quote, replanPrompt, unsoundCodeText, validatePlan, withChapterEdges,
   type DecisionForPrompt, type DependencyForPrompt, type ReplanReply, type ShownStep,
 } from './prompt.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
@@ -127,26 +127,68 @@ function shownStepOf(node: DerivedNode, answers: Readonly<Record<string, string>
   };
 }
 
-/** JavaScript's own modules, with and without the `node:` prefix. */
-const NODE_BUILTINS = new Set(builtinModules.flatMap((m) => [m, `node:${m}`]));
-
 /**
  * Why a derived file may not stand, by repo-tour's own reading of it, or `null`. It must parse
  * cleanly. Every relative import must resolve to a file the node declares it depends on: the code
  * prompt showed it only those files, so an import of anything else is a guess at an API it never
  * saw. A JavaScript bare import must be one of Node's own modules (there is nothing to install).
+ *
+ * **This is a correctness check, never a sandbox.** It keeps the plan's graph true and the app
+ * able to start. It does not make the code safe: a Node built-in can run a process or open a
+ * socket, and the file runs as the learner the moment they run it. What the learner is told about
+ * that belongs to the tickets that show it to them (T-61).
  */
-export function unsoundFileReason(extract: ExtractLike, allowedFiles: ReadonlySet<string>, language: DeriveLanguage): string | null {
+export function unsoundFileReason(
+  extract: ExtractLike, allowedFiles: ReadonlySet<string>, language: DeriveLanguage, plannedFiles: ReadonlySet<string> = allowedFiles,
+): string | null {
   if (extract.parseErrors > 0) return `does not parse (${extract.parseErrors} syntax error${extract.parseErrors === 1 ? '' : 's'})`;
+  const importerDir = path.posix.dirname(extract.path);
   for (const imp of extract.imports) {
     if (imp.resolved !== null) {
-      if (!allowedFiles.has(imp.resolved)) return `imports ${JSON.stringify(imp.raw)}, a file it does not depend on`;
+      if (!allowedFiles.has(imp.resolved)) return `imports ${quote(imp.raw)}, a file it does not depend on`;
+      // repo-tour's resolver tries extensions and index files the way a bundler does. Node's ES
+      // module loader does not, and this is the file the learner runs under Node.
+      if (language === 'javascript' && path.posix.normalize(path.posix.join(importerDir, imp.raw)) !== imp.resolved) {
+        return `imports ${quote(imp.raw)}, which Node cannot load: an ES module names a file in full, as ${quote(path.posix.relative(importerDir, imp.resolved))}`;
+      }
       continue;
     }
-    if (imp.raw.startsWith('.')) return `imports ${JSON.stringify(imp.raw)}, which is not one of its dependencies' files`;
-    if (language === 'javascript' && !NODE_BUILTINS.has(imp.raw)) return `imports the package ${JSON.stringify(imp.raw)}, which would need installing`;
+    if (imp.raw.startsWith('.')) return `imports ${quote(imp.raw)}, which is not one of its dependencies' files`;
+    if (language === 'javascript' && !isBuiltin(imp.raw)) return `imports the package ${quote(imp.raw)}, which would need installing`;
+    if (language === 'python') {
+      // A Python name with no dots in front reads like a package. It may be a file of this app.
+      const fromRoot = `${imp.raw.replace(/\./g, '/')}.py`;
+      if (plannedFiles.has(fromRoot)) return `imports ${quote(imp.raw)}, a file it does not depend on`;
+      const sibling = path.posix.join(importerDir, fromRoot);
+      if (plannedFiles.has(sibling)) {
+        return `imports ${quote(imp.raw)}, a name that only works when this file is run directly; this app is run from its top folder, so it must import ${quote(sibling.slice(0, -3).replace(/\//g, '.'))}`;
+      }
+    }
   }
   return null;
+}
+
+/** The file's text without its comments, so a sentence ABOUT an import is not read as one. */
+function codeWithoutComments(content: string, language: DeriveLanguage): string {
+  if (language === 'python') return content.replace(/#.*$/gm, '');
+  return content.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+/** A dynamic import of anything but one plain string, in JavaScript. A plain string is `extract`'s to read. */
+const COMPUTED_JS_IMPORT = /\bimport\s*\(\s*(?!(?:'[^'\n]*'|"[^"\n]*"|`[^`$\n]*`)\s*[,)])/;
+
+/**
+ * Why a file reaches for code nothing here can see, or `null`. `extract` reads plain string
+ * imports only, so a computed one is a dependency the plan's graph cannot know about, and a replan
+ * would then keep a file it should have re-derived. A sentence about an import in a comment is
+ * fine. Lexical on purpose, and part of the correctness check above: not a sandbox.
+ */
+function computedImportReason(content: string, language: DeriveLanguage): string | null {
+  const code = codeWithoutComments(content, language);
+  const computed = language === 'python'
+    ? /\b__import__\s*\(|\bimportlib\b/.test(code)
+    : COMPUTED_JS_IMPORT.test(code) || /\bcreateRequire\b/.test(code);
+  return computed ? 'uses a computed import, which nothing here can follow: a file of this app imports only what it names' : null;
 }
 
 /** Run repo-tour's `extract` over the derived files, from a scratch folder this call made. */
@@ -179,10 +221,12 @@ async function extractAll(core: Pick<DialCore, 'extract'>, files: readonly Deriv
   }
 }
 
-/** Why repo-tour's reading of `node`'s file means the file may not stand, or `null`. */
-function refusalForReading(node: DerivedNode, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, language: DeriveLanguage): DeriveRefusal | null {
+/** Why `node`'s file may not stand, from repo-tour's reading of it and its own text, or `null`. */
+function refusalForFile(
+  node: DerivedNode, content: string, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, plannedFiles: ReadonlySet<string>, language: DeriveLanguage,
+): DeriveRefusal | null {
   if (extract === undefined) return refuse(`repo-tour returned no reading of ${node.path}`);
-  const unsound = unsoundFileReason(extract, allowedFiles, language);
+  const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles) ?? computedImportReason(content, language);
   return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
 }
 
@@ -201,7 +245,8 @@ async function refusalForCode(state: DerivationState, node: DerivedNode, content
   }
   const extracts = await extractAll(deps.dialCore, [...dependencies, { path: node.path, content }]);
   if (typeof extracts === 'string') return refuse(extracts);
-  return refusalForReading(node, extracts.get(node.path), new Set(dependencies.map((d) => d.path)), state.language);
+  const planned = new Set(state.nodes.filter((n) => n.kind === 'file').map((n) => n.path));
+  return refusalForFile(node, content, extracts.get(node.path), new Set(dependencies.map((d) => d.path)), planned, state.language);
 }
 
 /**
@@ -254,9 +299,10 @@ async function checkAndWrite(state: DerivationState, deps: DeriveDeps): Promise<
   const extracts = await extractAll(deps.dialCore, files);
   if (typeof extracts === 'string') return refuse(extracts);
   const kindOf = new Map(state.nodes.map((n) => [n.path, n.kind] as const));
+  const planned = new Set(fileNodes.map((n) => n.path));
   for (const node of fileNodes) {
     const allowed = new Set(node.dependsOn.filter((p) => kindOf.get(p) === 'file'));
-    const refused = refusalForReading(node, extracts.get(node.path), allowed, state.language);
+    const refused = refusalForFile(node, state.files[node.path]!, extracts.get(node.path), allowed, planned, state.language);
     if (refused !== null) return refused;
   }
   const tree = writeReferenceTree(deps.globalStorageRoot, deps.target, state.title, files);

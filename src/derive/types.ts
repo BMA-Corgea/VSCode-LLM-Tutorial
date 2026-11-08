@@ -18,7 +18,7 @@
  * accepts changes**, or a derivation is served an answer to a question that is no longer the one
  * being asked — the detour's `DETOUR_PROMPT_VERSION` rule, for the same reason.
  */
-export const DERIVE_PROMPT_VERSION = 1;
+export const DERIVE_PROMPT_VERSION = 2;
 
 /**
  * Every bound the engine applies, in one place, each with the reason for its number. A test
@@ -124,7 +124,7 @@ export interface DerivedChapter {
 export interface Outline {
   title: string;
   language: DeriveLanguage;
-  /** the path of the file node that starts the app — always the last file in plan order */
+  /** the path of the file node that starts the app — the last file in the outline (a later replan may add steps after it) */
   entry: string;
   chapters: DerivedChapter[];
   nodes: DerivedNode[];

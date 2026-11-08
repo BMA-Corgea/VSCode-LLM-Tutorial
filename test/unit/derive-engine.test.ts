@@ -298,6 +298,45 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     if (!out.ok) assert.fail(out.reason);
   });
 
+  test('a built-in that only exists under node: is one of Node\'s own too, and is allowed', async () => {
+    const tally = "import test from 'node:test';\nexport function total(xs) {\n  void test;\n  return xs.reduce((a, b) => a + b, 0);\n}\n";
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': tally, 'cli/main.mjs': MAIN }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    if (!out.ok) assert.fail(out.reason);
+  });
+
+  for (const [name, code, pattern] of [
+    ['an import with no extension', "import { total } from '../core/tally';\n\nconsole.log(total([1, 2, 3]));\n", /Node cannot load/],
+    ['an import with the wrong extension', "import { total } from '../core/tally.js';\n\nconsole.log(total([1, 2, 3]));\n", /Node cannot load/],
+    ['a computed import', "const where = '../core/' + 'tally.mjs';\nconst { total } = await import(where);\n\nconsole.log(total([1, 2, 3]));\n", /computed import/],
+    ['a computed template import', "const f = 'tally.mjs';\nconst { total } = await import(`../core/${f}`);\n\nconsole.log(total([1, 2, 3]));\n", /computed import/],
+    ['createRequire', "import { createRequire } from 'node:module';\nconst load = createRequire(import.meta.url);\nconsole.log(load(process.argv[2]));\n", /computed import/],
+  ] as Array<[string, string, RegExp]>) {
+    test(`an entry point with ${name} is refused: what starts must be able to start, and the graph must know what it runs`, async () => {
+      const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': TALLY, 'cli/main.mjs': code }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+      assert.ok(!out.ok, 'expected the derivation to fail');
+      assert.match(out.reason, pattern);
+    });
+  }
+
+  test('the same words in a comment are not a computed import', async () => {
+    const code = "// you could use import(where) here, or createRequire, but this app does not\nimport { total } from '../core/tally.mjs';\n\nconsole.log(total([1, 2, 3]));\n";
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': TALLY, 'cli/main.mjs': code }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    if (!out.ok) assert.fail(out.reason);
+  });
+
+  test('a literal dynamic import of a declared file is an ordinary import', async () => {
+    const code = "const { total } = await import('../core/tally.mjs');\n\nconsole.log(total([1, 2, 3]));\n";
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': TALLY, 'cli/main.mjs': code }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    if (!out.ok) assert.fail(out.reason);
+  });
+
+  test('a refusal that quotes a model\'s import is capped, so one sentence cannot carry a page of its text', async () => {
+    const code = `import x from '${'y'.repeat(11_000)}<img src=x onerror=alert(1)>';\nconsole.log(x);\n`;
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': TALLY, 'cli/main.mjs': code }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    assert.ok(!out.ok);
+    assert.ok(out.reason.length < 300, `the reason carried ${out.reason.length} characters of model text`);
+  });
+
   test('an answered derivation asks for the code LAST and once: it never pays for code it would throw away', async () => {
     const seed = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel().run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
     if (!seed.ok) assert.fail(seed.reason);
