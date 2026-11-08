@@ -9,6 +9,57 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A fix moves costs it did not look at, so a fix range needs its own blind read (T-17, 2026-11-08)
+
+Two reviews found the engine's defects, the fixes landed with pins, and every pin had been seen to
+fail. A third blind read, of the fixes alone, then found a regression and a defect closed only for
+its reproductions. Both came from the fixes.
+
+- **A bound protects what runs after it.** "Measure the file as it will really be written" moved a
+  file-size bound behind a trailing-whitespace regex. The bound was what had kept that regex's input
+  at 12,000 characters; without it, `\s+$` on a runaway reply of blanks held the extension host's
+  only thread for 26 seconds. Nothing that checked the fix was looking at time. When you move a
+  check, ask what it was protecting downstream, not only what it was checking.
+- **A check after the cache is a second door, and it can lock.** The first fix for "a refused reply
+  is cached forever" moved most checks in front of the cache and left a last whole-tree check behind
+  it. On Python, that last check could still refuse what the first had accepted, and every later
+  press replayed the refusal for free. The fix that held was structural: judge a reply once, where
+  it comes in, against exactly what the finished tree will hold, so nothing later has a verdict to
+  give.
+
+> **"Closed for its reproduction" is not closed.** Ask what else reaches the same state, and have
+> someone who did not write the fix read the fix.
+
+## A defence that makes a defect harmless also makes it invisible to the tests (T-17)
+
+Twice in one build, a test passed against the exact defect it was named for. Both were caught
+only because each new pin was broken by hand and the failures counted
+(`.autodev/evidence/T-17/red-checks.md`):
+
+- **A refactor "kept the tests green".** The detour's path rule was hoisted into a shared function
+  that takes the folder's name as an argument. Passing the WRONG name left all 271 detour tests
+  green, because they match refusals loosely (`/deep/i`, `/longer than/i`). "Green after a
+  refactor" proved only what those tests pinned, and the wording was not among it.
+- **A cache that kept garbage looked identical to one that did not.** The rule is "only a reply
+  that parsed is cached". The mutant cached every reply before parsing it, and **nothing failed**:
+  every cached reply is re-parsed on the way back in, so a cached bad reply is refused there and
+  the next call happens anyway. The defence (re-parse every cached read) made the defect harmless,
+  and harmless is exactly what a behaviour test cannot see. The claim had to be pinned where it
+  lives, by asserting that nothing is on disk after a refused reply.
+
+> **When one safeguard covers for another, a test of the behaviour cannot tell whether the second
+> safeguard exists. Pin each claim at the place it is true.**
+
+The trap is that the first green is honest. Nothing about reading the test says it would miss the
+defect: it only misses it because something else catches the defect first. Stacked defences are
+right — two halves of containment, a parser behind a cache. But each half needs its own pin, or
+the day the covering half is loosened, both go at once and the suite notices neither.
+
+Tooling note from the same build: the file-writing tool turned the escapes `\u2028` and `\u2029`
+into the raw characters, and a raw U+2028 ends a JavaScript line. It broke a regex mid-literal.
+`String.fromCharCode(0x2028)` writes the same value with no escape for a tool to "helpfully"
+decode. Check new files with `grep -cP "\x{2028}|\x{2029}"`.
+
 ## The mechanism a ticket names is a hypothesis: measure every phase, not the one it blames (T-30, 2026-11-08)
 
 T-30 was filed against `core.digest()`, with the source read and the fix shape written out: move the
