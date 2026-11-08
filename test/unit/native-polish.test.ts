@@ -206,6 +206,23 @@ suite('T-43 — the tutor box looks like an input, and Forget is away from Ask',
     assert.ok(log >= 0 && log < forget && forget < ask, 'after the conversation, before the box');
   });
 
+  test('F-08: the placeholder, the only place the Enter rule is written, is the theme\'s own colour', () => {
+    assert.match(declarationsFor(cssOf(page()), ':root:not([data-theme]) .tutor-input::placeholder'), /color:var\(--vscode-input-placeholderForeground,var\(--muted\)\)/);
+  });
+
+  test('F-09: a failed question keeps its reason beside it; Forget comes after that line', () => {
+    const html = page({ transcript: [turn], tutor: { thinking: false, note: 'the tutor did not answer' } });
+    const reason = html.indexOf('the tutor did not answer');
+    const forget = html.indexOf('id="btn-tutor-clear"');
+    assert.ok(reason > html.indexOf('</ul>', html.indexOf('class="tutor-log"')), 'discriminates: the reason follows the log');
+    assert.ok(reason < forget, 'the reason, then Forget');
+    assert.ok(forget < html.indexOf('id="outcome-tutor"'), 'and Forget still comes before the box');
+  });
+
+  test('the detour row sits clear of Ask', () => {
+    assert.match(declarationsFor(cssOf(page()), '.detour'), /margin-top:8px/);
+  });
+
   test('F-09: Forget is still there only when there is a conversation, and never mid-ask', () => {
     assert.ok(!page().includes('id="btn-tutor-clear"'), 'no conversation, no control');
     assert.ok(!page({ transcript: [turn], tutor: { thinking: true } }).includes('id="btn-tutor-clear"'), 'never while an answer is landing');

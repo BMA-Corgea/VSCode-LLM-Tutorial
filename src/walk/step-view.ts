@@ -762,8 +762,13 @@ main, section, .option { min-width:0; }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
 /* T-43 (F-08): the input background is the theme's, so its text is too. A named skin keeps its own ink. */
 :root:not([data-theme]) .tutor-input { color:var(--vscode-input-foreground, var(--ink)); }
+/* The placeholder is the only place the Enter / Shift+Enter rule is written, and the browser's own
+   grey measured 2.82:1 on Dark Modern's input background (T-43's visual review). */
+:root:not([data-theme]) .tutor-input::placeholder { color:var(--vscode-input-placeholderForeground, var(--muted)); }
 /* T-43 (F-09): the foot of the conversation, away from Ask. */
 .tutor-foot { margin:0 0 12px; }
+/* With Forget gone from the row, the detour button sat flush against Ask. */
+.detour { margin-top:8px; }
 /* F-11: where in the plan this step sits. */
 .step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
 /* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
@@ -1256,10 +1261,11 @@ function tutorHtml(state: StepViewState): string {
 
   return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
     + transcriptHtml(state.transcript)
-    + (thinking ? '' : clearButtonHtml(state))
     + note
     + unreachable
     + elsewhereHtml(state)
+    // After the lines about the conversation, so a failed question's reason stays next to it.
+    + (thinking ? '' : clearButtonHtml(state))
     + `<div class="tutor-ask" id="outcome-tutor">${input}<div class="tutor-controls">${controls}</div></div>`
     + spendHtml(tutor?.spend)
     + detourHtml(state)
