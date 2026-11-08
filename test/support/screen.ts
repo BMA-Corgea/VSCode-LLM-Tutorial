@@ -263,7 +263,7 @@ function flatten(node: FrameNode): Array<{ id: string; url: string }> {
 }
 
 /** The two ways a DevTools handle goes stale: its session detached, or its isolated world went with the frame. */
-function stale(err: unknown): boolean {
+export function stale(err: unknown): boolean {
   return err instanceof Error && /Session with given id not found|Cannot find context with specified id|No frame with given id/.test(err.message);
 }
 
