@@ -33,10 +33,11 @@ export const DERIVE_LIMITS = {
    */
   maxIdeaChars: 4000,
   /**
-   * The largest reply any of the three calls may return. An outline of 30 nodes at its widest
-   * field budgets is under 40,000 characters, and a file is at most `maxFileChars` JSON-escaped
-   * (at worst six characters per character), so 200,000 is generous to every honest reply and a
-   * hard stop on a runaway one — the bound the detour learned it needed (T-7 security review).
+   * The largest reply any of the three calls may return. A file is at most `maxFileChars`
+   * JSON-escaped (at worst six characters per character). An outline at every field's budget at
+   * once can come to more than this, but no honest plan is near it: a real outline of six steps is a
+   * few thousand characters. So 200,000 is generous to every honest reply and a hard stop on a
+   * runaway one — the bound the detour learned it needed (T-7 security review).
    */
   maxReplyChars: 200_000,
   /**

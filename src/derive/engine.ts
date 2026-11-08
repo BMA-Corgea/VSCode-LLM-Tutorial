@@ -16,10 +16,13 @@
  *     reach VERBATIM, decisions and code alike. It re-plans the rest of the decision's downstream,
  *     rewrites the code for the decision and the new steps, and writes a NEW tree. The state it was
  *     handed is never modified, which is the substrate plan versions stand on (T-22, T-14).
- *   - `derivePlan(idea, answers)` outlines the idea, writes every file for the recommendations,
- *     then folds the SAME internal step over the answers in plan order, with the steps before
- *     each one as its prefix — exactly what a learner answering in order does. So one call to
- *     `derivePlan` equals a walk of `replanPlan` calls by construction, and the suite pins it.
+ *   - `derivePlan(idea, answers)` outlines the idea, folds the SAME internal step over the answers
+ *     in plan order, with the steps before each one as its prefix — exactly what a learner
+ *     answering in order does — and then writes each file once, for the decisions that stand. So
+ *     when every step of that walk would have succeeded, one call to `derivePlan` equals a walk of
+ *     `replanPlan` calls, byte for byte, and the suite pins it. (A walk can be refused at a step
+ *     `derivePlan` never writes code for, because it writes code at each step; the reverse cannot
+ *     happen.)
  *
  * ── The honesty rule ──────────────────────────────────────────────────────────────────────────
  *
@@ -345,7 +348,7 @@ function mergeReplan(
   const fresh = reply.nodes.map((n) => ({ ...n, dependsOn: [...new Set([...owed, ...n.dependsOn])] }));
   const keptFolded = new Set(prev.nodes.filter((n) => kept.has(n.path)).map((n) => n.path.toLowerCase()));
   for (const n of fresh) {
-    if (keptFolded.has(n.path.toLowerCase())) return refuse(`the replan returned a step at ${JSON.stringify(n.path)}, which is a step it was told to keep`);
+    if (keptFolded.has(n.path.toLowerCase())) return refuse(`the replan returned a step at ${JSON.stringify(n.path)}, which is a step this plan keeps`);
   }
   const nodes = insertInOrder(prev.nodes.filter((n) => kept.has(n.path)), fresh);
   // The entry moves only if the step that held it was replaced: a replan that re-creates it at the

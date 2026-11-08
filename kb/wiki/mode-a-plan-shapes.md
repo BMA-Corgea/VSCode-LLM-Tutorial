@@ -33,6 +33,12 @@ unchanged in a real dev host (`test/derive.test.ts`).
 - **Languages:** JavaScript as `.mjs` (ES modules, which Node runs with no `package.json`) and
   Python as `.py`, standard library only. A JavaScript bare import must be a Node built-in. A
   derived app needs no install to start (`derive-smoke.test.ts`).
+  - **Starting one:** JavaScript is `node cli/main.mjs`. Python is started from the top folder as a
+    module, `python3 -m cli.main`, and imports a file of the app by its dotted path from there. The
+    plan does not carry the command, so T-20 has to know this.
+  - **The import check is a correctness check, never a sandbox.** It keeps the plan's graph true
+    and the app able to start. A Node built-in can still run a process, and the file runs as the
+    learner. What the learner is told about that is T-61.
 
 ## The code lives outside the learner's folder
 
@@ -46,7 +52,9 @@ unchanged in a real dev host (`test/derive.test.ts`).
   names a directory.
 - **The cache:** `<globalStorage>/derive-cache/<sha256>.json` holds the model's RAW reply, keyed
   by `DERIVE_PROMPT_VERSION` plus the full prompt.
-  - It is re-parsed by the same parser on every read, and only a reply that parsed is ever written.
+  - It is re-judged by the same checks on every read, and only a reply that passed all of them is
+    ever written: a code reply that fails repo-tour's parser, or a replan that cannot be merged, is
+    asked again on the next press (`derive-engine.test.ts`).
   - It is what makes the engine deterministic: the second derivation of the same idea and answers
     makes **zero calls** (`derive-engine.test.ts`).
 
@@ -62,11 +70,17 @@ unchanged in a real dev host (`test/derive.test.ts`).
 - `DerivationState` (idea, title, language, entry, chapters, nodes, files, answers) is plain data.
   It is what T-22's plan versions should keep on disk beside each `plan.json`.
 - **A stored state is a second door, and is re-checked.** `replanPlan` runs `unsoundStateReason`
-  on the state it is handed: the whole-plan rules, the file-path rule for every file step, and no
-  code filed under a path the plan does not have. A tampered version on disk is refused in a
-  sentence before anything is asked or written (`derive-engine.test.ts`, the two tampered-state
-  tests). T-22 should still treat a version file it reads as untrusted, and never skip this check
-  by building a state by hand.
+  on the state it is handed. Every chapter and step goes back through the parser and has to come
+  out exactly as it went in, then the whole-plan rules, then the code. A tampered version on disk
+  is refused in a sentence before anything is asked or written (`derive-engine.test.ts`'s table of
+  tampered states). T-22 should still treat a version file it reads as untrusted, and never skip
+  this check by building a state by hand.
+- **What one press can cost is bounded twice:** one question is at most `MAX_DERIVE_PROMPT_CHARS`,
+  and a press sends at most `DERIVE_LIMITS.maxCallsPerPress` questions. Past the second it stops and
+  says so, and what was answered stays cached, so pressing again carries on (`derive-ask.test.ts`).
+- **Pass the model already resolved.** An empty model is refused, but an unrecognised one becomes
+  the provider's strongest in `resolveTutorChoice`, so T-20 should resolve it as
+  `src/extension.ts`'s `resolveLlmSettings` does.
 
 ## Driving it in a test without spending a token
 

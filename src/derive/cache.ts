@@ -23,8 +23,8 @@
  * rules would need a key nobody else on the machine can read, and a process that can rewrite
  * this folder can rewrite the extension's own code. So no such key is kept, on purpose.
  *
- * Only replies that parsed are ever WRITTEN (the engine's rule): a bad reply is asked again on
- * the next press rather than served forever.
+ * Only replies that passed every check are ever WRITTEN (`./ask.ts`'s `parse` is all of them): a
+ * bad reply is asked again on the next press rather than served forever.
  *
  * No `vscode` import — see `./types.ts`.
  */
@@ -37,9 +37,9 @@ import { DERIVE_CACHE_DIR, lstatOrNull, provenStorageDir } from './storage.js';
 import { DERIVE_LIMITS, DERIVE_PROMPT_VERSION } from './types.js';
 
 /**
- * How many replies are kept, and how many bytes in all. A derivation of a 30-step plan asks at
- * most 31 questions; 2,000 entries is dozens of derivations and their replans. 64 MB bounds the
- * folder whatever the replies weigh (each is at most `maxReplyChars`).
+ * How many replies are kept, and how many bytes in all. One press sends at most
+ * `DERIVE_LIMITS.maxCallsPerPress` questions, so 2,000 entries is dozens of derivations and their
+ * replans. 64 MB bounds the folder whatever the replies weigh (each is at most `maxReplyChars`).
  */
 export const MAX_DERIVE_CACHE_ENTRIES = 2000;
 export const MAX_DERIVE_CACHE_BYTES = 64 * 1024 * 1024;

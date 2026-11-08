@@ -758,7 +758,7 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     });
     const refused = await replanPlan(b.first.state, tallyId, 'object', [], deps(clashing.run, b.gs, b.target));
     assert.ok(!refused.ok);
-    assert.match(refused.reason, /a step it was told to keep/);
+    assert.match(refused.reason, /a step this plan keeps/);
     const good = fakeModel();
     const again = await replanPlan(b.first.state, tallyId, 'object', [], deps(good.run, b.gs, b.target));
     if (!again.ok) assert.fail(`a good model was given no chance, because the refused replan was served again: ${again.reason}`);
@@ -795,6 +795,6 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     });
     const out = await replanPlan(b.first.state, idOf(b.first.state, 'core/tally.mjs'), 'object', [], deps(clash.run, b.gs, b.target));
     assert.ok(!out.ok);
-    assert.match(out.reason, /a step it was told to keep/);
+    assert.match(out.reason, /a step this plan keeps/);
   });
 });
