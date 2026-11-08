@@ -9,6 +9,27 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A fix moves costs it did not look at, so a fix range needs its own blind read (T-17, 2026-11-08)
+
+Two reviews found the engine's defects, the fixes landed with pins, and every pin had been seen to
+fail. A third blind read, of the fixes alone, then found a regression and a defect closed only for
+its reproductions. Both came from the fixes.
+
+- **A bound protects what runs after it.** "Measure the file as it will really be written" moved a
+  file-size bound behind a trailing-whitespace regex. The bound was what had kept that regex's input
+  at 12,000 characters; without it, `\s+$` on a runaway reply of blanks held the extension host's
+  only thread for 26 seconds. Nothing that checked the fix was looking at time. When you move a
+  check, ask what it was protecting downstream, not only what it was checking.
+- **A check after the cache is a second door, and it can lock.** The first fix for "a refused reply
+  is cached forever" moved most checks in front of the cache and left a last whole-tree check behind
+  it. On Python, that last check could still refuse what the first had accepted, and every later
+  press replayed the refusal for free. The fix that held was structural: judge a reply once, where
+  it comes in, against exactly what the finished tree will hold, so nothing later has a verdict to
+  give.
+
+> **"Closed for its reproduction" is not closed.** Ask what else reaches the same state, and have
+> someone who did not write the fix read the fix.
+
 ## A defence that makes a defect harmless also makes it invisible to the tests (T-17)
 
 Twice in one build, a test passed against the exact defect it was named for. Both were caught
