@@ -7,14 +7,16 @@ here and found via the reference table below.
 
 ## Live edge
 
+> **The overnight foreman run of 2026-11-05 has ended: read [`kb/RESUME.md`](RESUME.md) first.**
+> It is that run's handoff and supersedes "Where that stands" and "Waiting on" below, which still
+> describe September.
+
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live.
      NOTE: the tracker regenerates the terse `- **T-N** (type) — title — stage`
      lines below on every stage change. Do NOT hand-write prose onto those lines;
      it gets clobbered mid-sentence. Narrative goes under "Where that stands". -->
 
-- **T-9** (direction) — Mode A — idea-first: a Socratic plan from first principles and simple shapes — dir-route
-- **T-10** (direction) — Divergence — follow the author or diverge, and replan the remainder — dir-route
 
 ### Where that stands
 
@@ -47,7 +49,19 @@ that undo and the deferred replan diff need the same substrate.
 **Test baseline on `main`: 1248 unit + 75 vscode-test.** It was 479 + 50 when T-6 began.
 
 - **T-14** (feature) — Undo a divergence — return to the pre-divergence plan — intake
-- **T-15** (bug) — Pressing 'Build the plan' with a blocking problem changes nothing on screen — t… — intake
+- **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — intake
+- **T-23** (feature) — The walked prefix and the learner's disk — a replan never touches either — intake
+- **T-18** (feature) — Asking before showing — the decision comes before its code in a Mode A walk — intake
+- **T-19** (feature) — Determinism and the responsiveness test — AC-A1 made runnable — intake
+- **T-20** (feature) — The idea path — the start screen's idea box builds a Mode A plan — intake
+- **T-17** (feature) — The derivation engine — an idea becomes a plan the walk already renders — build
+- **T-30** (bug) — Building the plan freezes the extension host while the repository is read — eve… — intake
+- **T-40** (feature) — Codicons in the webviews, and waiting states that move — intake
+- **T-41** (feature) — Move the Skin picker out of the title row, on every webview at once — intake
+- **T-42** (feature) — Drive the Current Step view in a real Extension Development Host and read back … — intake
+- **T-43** (feature) — T-16's ride-alongs: the tutor box on input tokens, Forget out of the ask row, S… — intake
+- **T-21** (feature) — Choosing the road not taken — the author's alternatives become choosable — auto-review
+- **T-44** (feature) — The owner's call: mark the author's chosen option with a selection colour inste… — intake
 
 ## Waiting on
 
@@ -84,6 +98,10 @@ that undo and the deferred replan diff need the same substrate.
 
 <!-- One line per completed item, WITH the why. Newest first. Prune from the
      bottom; the permanent record lives in tickets, events.jsonl, and wiki. -->
+- 2026-11-05 **T-16 COMPLETE** — Native polish — the four webviews and the commands look right in every theme an…
+- 2026-11-05 **T-15 COMPLETE** — Pressing 'Build the plan' with a blocking problem changes nothing on screen — t…
+- 2026-11-05 **T-10 COMPLETE** — Divergence — follow the author or diverge, and replan the remainder
+- 2026-11-05 **T-9 COMPLETE** — Mode A — idea-first: a Socratic plan from first principles and simple shapes
 - 2026-09-08 **T-8 COMPLETE** — Package and publish — .vsix, Marketplace and Open VSX
 - 2026-09-07 **T-13 COMPLETE** — realGit spawns git with no timeout — the last unbounded member of the cost-and-…
 - 2026-09-07 **T-12 COMPLETE** — reproduceFiles copies a reference repo's agent config and secrets into the lear…
