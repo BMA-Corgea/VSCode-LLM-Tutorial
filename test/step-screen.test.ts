@@ -17,7 +17,7 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import type { PlanLike, Progress } from '../src/walk/model.js';
-import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, type Replanner } from '../src/walk/session.js';
+import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, REPLAN_NOTHING_FOLLOWS, type Replanner } from '../src/walk/session.js';
 import { CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE } from '../src/walk/step-view.js';
 import { Screen, sleep, stale, type Frame } from './support/screen.js';
 import { repoTourShapedPlan, writeFixtureTarget } from './unit/walk-fixtures.js';
@@ -230,7 +230,7 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     // The positive path is still there, and the refusal does not outlive it.
     await pressNow(`document.querySelector(${JSON.stringify(choose('alt-1'))}).click()`);
     const chosen = await until(read, (o) => (o?.on[0] ?? '') === 'alt-1', 'a press from the page for this step is recorded here');
-    assert.equal(chosen?.refused, '', 'the sentence that says nothing was recorded goes when something is');
+    assert.equal(chosen?.refused, REPLAN_NOTHING_FOLLOWS, 'the sentence that says nothing was recorded goes when something is, and the page says what became of the press');
     assert.equal(progress().steps[NOW]?.chosen, 'alt-1');
   }, repoTourShapedPlan()));
 
