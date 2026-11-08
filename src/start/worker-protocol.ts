@@ -14,7 +14,7 @@ export interface BuildWorkerData {
 }
 
 export type WorkerRequest =
-  | { id: number; kind: 'digest'; root: string; opts: { write?: boolean } }
+  | { id: number; kind: 'digest'; root: string; opts: { write?: boolean; outDir?: string } }
   /** `digest` is present only when the caller passed a digest other than the one the worker holds. */
   | { id: number; kind: 'plan'; digest?: unknown; opts: { root: string; witness?: boolean } };
 

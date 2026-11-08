@@ -161,6 +161,26 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     return listed;
   }
 
+  /**
+   * Presses the real Cancel on the build's progress notification, as a toast or, when VS Code did
+   * not draw one, in the notification centre (T-30 review F1: driven, the notification was there
+   * with its button and no toast appeared). Returns when the press was made: the moment to measure from.
+   */
+  async function pressCancel(ms = 10_000): Promise<number> {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const attempted = Date.now();
+      if (await screen.pressNotificationButton('Build Tutorials', 'Cancel')) return attempted;
+      await vscode.commands.executeCommand('notifications.showList');
+      await sleep(100);
+      const pressed = await screen.pressNotificationButton('Build Tutorials', 'Cancel', 'centre');
+      await vscode.commands.executeCommand('notifications.hideList');
+      if (pressed) return attempted;
+      await sleep(100);
+    }
+    return assert.fail(`no Cancel button on the progress notification (saw ${JSON.stringify(await screen.notifications())})`);
+  }
+
   async function until(read: () => Promise<Snap>, ok: (s: Snap) => boolean, what: string, ms = 10_000): Promise<Snap> {
     const deadline = Date.now() + ms;
     let now = await read();
@@ -235,14 +255,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       const building = await until(read, (s) => s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
 
       // The real button, the moment it can be pressed: the read has only just begun.
-      const deadline = Date.now() + 10_000;
-      let pressed = false;
-      while (!pressed && Date.now() < deadline) {
-        pressed = await screen.pressNotificationButton('Build Tutorials', 'Cancel');
-        if (!pressed) await sleep(50);
-      }
-      assert.ok(pressed, `no Cancel button on the progress notification (saw ${JSON.stringify(await screen.notifications())})`);
-      const pressedAt = Date.now();
+      const pressedAt = await pressCancel();
       const cancelled = await until(read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back', 60_000);
       const tookMs = Date.now() - pressedAt;
       console.log(`T-30 AC3 measured: Cancel to the button back ${tookMs} ms`);
@@ -251,7 +264,9 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       assert.notDeepEqual(cancelled, building, 'the press has to change what is on screen');
       assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
       assert.equal(outcomes[0]?.reason, 'build cancelled while reading the repository');
-      assert.ok((await centre()).some((n) => n.includes('build cancelled while reading the repository')), 'the notification says it was cancelled, and when');
+      const listed = await centre();
+      assert.ok(listed.some((n) => n.includes('build cancelled while reading the repository')), 'the notification says it was cancelled, and when');
+      assert.deepEqual(listed.filter((n) => n.includes('Cancel')), [], 'the progress notification and its Cancel button should be gone');
       assert.equal(fs.existsSync(path.join(repo, '.repo-tour')), false, 'a cancelled read left a digest cache in the reference folder');
       assert.equal(fs.existsSync(markerPath(target)), false);
       assert.deepEqual(fs.readdirSync(target), [], 'a cancelled build has to leave the folder it was given empty, or the next press is refused');
@@ -294,13 +309,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await until(second.read, filled, 'valid form');
     await press(second.page);
     await until(second.read, (s) => s.note === SUBMIT_NOTES.building, 'building');
-    const deadline = Date.now() + 10_000;
-    let pressed = false;
-    while (!pressed && Date.now() < deadline) {
-      pressed = await screen.pressNotificationButton('Build Tutorials', 'Cancel');
-      if (!pressed) await sleep(100);
-    }
-    assert.ok(pressed, `no Cancel button on the progress notification (saw ${JSON.stringify(await screen.notifications())})`);
+    await pressCancel();
     const cancelled = await until(second.read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back');
     assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
 

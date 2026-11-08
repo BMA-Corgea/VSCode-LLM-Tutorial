@@ -16,9 +16,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
-import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../src/core.js';
+import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from '../src/core.js';
 import { runBuild, type ExtensionApi } from '../src/extension.js';
-import { buildFromRequest, coreFor, type BuildOutcome } from '../src/start/build.js';
+import { buildDir, buildFromRequest, coreFor, type BuildOutcome } from '../src/start/build.js';
 import { offThreadCore } from '../src/start/off-thread.js';
 import { emptyRequest, type BuildRequest } from '../src/start/request.js';
 import { BUILD_WORKER_RELATIVE } from '../src/start/worker-protocol.js';
@@ -128,7 +128,7 @@ suite('the build off the host thread, in the real extension host (T-30)', functi
 
   suiteSetup(async () => {
     ctx = await context();
-    core = await loadCore(resolveCoreRoot('../repo-tour', ctx.extensionUri.fsPath));
+    core = await loadCore(resolveCoreRoot(DEFAULT_REPO_TOUR_PATH, ctx.extensionUri.fsPath));
     assert.equal(core.found, true, core.reason ?? 'core');
   });
 
@@ -193,6 +193,8 @@ suite('the build off the host thread, in the real extension host (T-30)', functi
       assert.ok(watched.longestRpcMs <= STALL_BOUND_MS, `a real RPC round trip took ${watched.longestRpcMs} ms across digest and buildPlan (bound ${STALL_BOUND_MS} ms)`);
       assert.equal(outcome.ok, true, outcome.reason);
       assert.ok((outcome.plan?.steps.length ?? 0) > 0, 'a plan has to have arrived');
+      const written = JSON.parse(fs.readFileSync(path.join(buildDir(target), 'plan.json'), 'utf8')) as { steps: unknown[] };
+      assert.equal(written.steps.length, outcome.plan?.steps.length, 'and to have been written whole');
     } finally {
       fs.rmSync(repo, { recursive: true, force: true });
       fs.rmSync(target, { recursive: true, force: true });

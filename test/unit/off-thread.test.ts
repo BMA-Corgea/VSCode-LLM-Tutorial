@@ -14,17 +14,17 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
+import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import {
   BuildPhaseCancelled, buildFromRequest, coreFor, markerPath, phaseCancelled, readMarker,
   type BuildContext, type BuildCore, type BuildOutcome, type BuildPhase, type DigestResultLike,
 } from '../../src/start/build.js';
-import { offThreadCore, type OffThreadDeps } from '../../src/start/off-thread.js';
+import { BUILD_WORKER_HEAP_MB, offThreadCore, type OffThreadDeps } from '../../src/start/off-thread.js';
 import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
 import { BUILD_WORKER_RELATIVE } from '../../src/start/worker-protocol.js';
 import { STALL_BOUND_MS } from '../support/stall-bound.js';
 
-const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
+const CORE_ROOT = resolveCoreRoot(DEFAULT_REPO_TOUR_PATH, process.cwd()); // the root the shipped default resolves to
 const WORKER = path.join(process.cwd(), BUILD_WORKER_RELATIVE);
 
 let loaded: CoreLoadResult;
@@ -315,6 +315,37 @@ suite('a worker that cannot answer is a sentence, never a hang (T-30 AC8)', func
     }), /^reading the repository stopped unexpectedly/, { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
   });
 
+  /** A digest that answers, and then its thread dies a moment later: the gap between two phases. */
+  const ANSWERS_THEN = (death: string): string => `export async function digest() {\n  setTimeout(() => { ${death} }, 30);\n  return { manifest: {}, inventory: { files: [] } };\n}\n`;
+
+  test('a worker that exits between two phases: the next phase says so, and does not wait for ever (review F2)', async () => {
+    const repo = mixedFixture();
+    const core = offThreadCore(harness({ coreRoot: stubCore({ 'digest.js': ANSWERS_THEN('process.exit(7);') }) }).deps);
+    const digest = await core.digest(repo, { write: false });
+    await new Promise((resolve) => setTimeout(resolve, 200)); // the thread has now died, with no phase running
+    await assert.rejects(core.buildPlan(digest, { root: repo }), /^Error: deriving the build order stopped unexpectedly \(the build worker exited with code 7\)/);
+  });
+
+  test('a worker that throws between two phases: nothing is thrown on this thread, and the next phase says so (review F2)', async () => {
+    // Mocha fails a test on an uncaught exception, which is exactly what an 'error' with no listener is.
+    const repo = mixedFixture();
+    const core = offThreadCore(harness({ coreRoot: stubCore({ 'digest.js': ANSWERS_THEN("throw new Error('boom after the reply');") }) }).deps);
+    const digest = await core.digest(repo, { write: false });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await assert.rejects(core.buildPlan(digest, { root: repo }), /^Error: deriving the build order stopped unexpectedly \(boom after the reply\)/);
+  });
+
+  test('the worker runs under the shipped heap limit, not the host\'s own (security review 2)', async () => {
+    // The limit's effect is the out-of-memory test above, with a small limit; this is that the limit
+    // that ships is the one the thread gets.
+    const stub = stubCore({ 'digest.js': `import { resourceLimits } from 'node:worker_threads';\nexport async function digest() { return { manifest: {}, inventory: { files: [] }, resourceLimits }; }\n` });
+    const core = offThreadCore(harness({ coreRoot: stub }).deps);
+    const digest = await core.digest(mixedFixture(), { write: false }) as unknown as { resourceLimits: { maxOldGenerationSizeMb: number } };
+    core.release?.();
+    assert.equal(digest.resourceLimits.maxOldGenerationSizeMb, BUILD_WORKER_HEAP_MB);
+    assert.ok(BUILD_WORKER_HEAP_MB < 4_000, 'at the host\'s own limit the real host crashed: the limit has to be below it');
+  });
+
   test('a digest that cannot be sent to the worker is a failure, and the poll stops with it', async () => {
     const repo = mixedFixture();
     const core = offThreadCore(harness().deps);
@@ -467,6 +498,37 @@ suite('Cancel while a phase is running (T-30 AC4, AC5, AC6)', function () {
     const outcome = await buildFromRequest(requestFor(repo, target), contextFor(offThreadCore({ ...h.deps, inProcess })));
     assert.equal(outcome.ok, true, outcome.reason);
     assert.equal(codeSeenDuringInterpret, 1, 'the worker was still holding a whole digest while the model calls ran');
+  });
+
+  test('the digest never reads a cache committed in the reference: not even a file it would follow out of the tree (security review 1, 4)', async () => {
+    const repo = mixedFixture();
+    const outside = tmp('t30-outside-');
+    fs.writeFileSync(path.join(outside, 'inventory.json'), JSON.stringify([{ path: 'FROM-OUTSIDE-THE-REPOSITORY', sha256: 'x' }]));
+    fs.mkdirSync(path.join(repo, '.repo-tour'));
+    fs.symlinkSync(path.join(outside, 'inventory.json'), path.join(repo, '.repo-tour', 'inventory.json'));
+    // The positive control: without being told otherwise, repo-tour does read it.
+    const unprotected = await realCore.digest(repo, { write: false }) as unknown as { manifest: { incremental: unknown }; plan: { deleted: string[] } };
+    assert.ok(unprotected.manifest.incremental, 'the planted file was not read at all: this test proves nothing');
+    assert.deepEqual(unprotected.plan.deleted, ['FROM-OUTSIDE-THE-REPOSITORY']);
+
+    let seen: DigestResultLike | undefined;
+    const inWorker = offThreadCore(harness().deps);
+    const spying: BuildCore = { ...inWorker, digest: async (...args) => { seen = await inWorker.digest(...args); return seen; } };
+    const target = tmp('t30-target-');
+    const outcome = await buildFromRequest(requestFor(repo, target), contextFor(spying));
+    assert.equal(outcome.ok, true, outcome.reason);
+    assert.equal((seen as unknown as { manifest: { incremental: unknown } }).manifest.incremental, null);
+  });
+
+  test('a .repo-tour that is a symlink: the clean-up does not remove a folder through it (security review 5)', async () => {
+    const repo = mixedFixture();
+    const target = tmp('t30-target-');
+    const outside = tmp('t30-outside-');
+    fs.mkdirSync(path.join(outside, 'build'));
+    fs.symlinkSync(outside, path.join(target, '.repo-tour'));
+    const outcome = await buildFromRequest(requestFor(repo, target), contextFor(offThreadCore(harness().deps), { isCancelled: () => true }));
+    assert.equal(outcome.cancelled, true);
+    assert.equal(fs.existsSync(path.join(outside, 'build')), true, 'an empty folder outside the target was removed through the link');
   });
 
   test('a Cancel polled after the phase finished cannot reach a phase that is over', async () => {

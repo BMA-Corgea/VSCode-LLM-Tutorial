@@ -59,7 +59,7 @@ export interface PhaseControl {
 }
 
 export interface BuildCore {
-  digest(root: string, opts?: { write?: boolean }, control?: PhaseControl): Promise<DigestResultLike>;
+  digest(root: string, opts?: { write?: boolean; outDir?: string }, control?: PhaseControl): Promise<DigestResultLike>;
   buildPlan(digestResult: DigestResultLike, opts: { root: string; witness?: boolean }, control?: PhaseControl): Promise<BuildPlanLike>;
   interpretPlan(plan: BuildPlanLike, digestResult: DigestResultLike, opts: Record<string, unknown>): Promise<InterpretPlanResultLike>;
   defaultCacheDir(): string;
@@ -517,14 +517,30 @@ function deleteMarker(target: string): void {
   // And the folders the marker needed, when nothing else is in them (T-30). `validateTarget` refuses
   // a folder with anything in it, so an empty `.repo-tour/build/` left by a cancel or a refusal
   // turned the next press on the very same form into "not empty — pick an empty or new folder".
-  // `rmdir`, not `rm -r`: it can only ever remove a directory that is already empty.
-  for (const dir of [buildDir(target), path.dirname(buildDir(target))]) {
-    try {
-      fs.rmdirSync(dir);
-    } catch {
-      return; // not empty (a finished plan is in there), or already gone
-    }
+  // `rmdir`, not `rm -r`: it can only ever remove a directory that is already empty. And only real
+  // directories: `rmdir` refuses a link at the end of a path but walks through one in the middle,
+  // so a `.repo-tour` that is a symlink would have this removing `build` wherever it points
+  // (T-30 security review, finding 5).
+  const build = buildDir(target);
+  const parent = path.dirname(build);
+  try {
+    if (!fs.lstatSync(parent).isDirectory() || !fs.lstatSync(build).isDirectory()) return;
+    fs.rmdirSync(build);
+    fs.rmdirSync(parent);
+  } catch {
+    /* not empty (a finished plan is in there), or already gone */
   }
+}
+
+/**
+ * Where `digest` is told its cache lives: a path nothing creates. `digest` reads
+ * `<outDir>/inventory.json` whether or not it writes, and by default that is
+ * `<reference>/.repo-tour/inventory.json`, a file inside the repository being read: a symlink
+ * committed there is followed out of the tree, or to `/dev/zero` (T-30 security review, findings 1
+ * and 4). Nothing here uses what that read produces, so it is pointed at nothing.
+ */
+function noDigestCache(target: string): string {
+  return path.join(buildDir(target), 'no-digest-cache');
 }
 
 // ── the build itself ─────────────────────────────────────────────────────────────────────────
@@ -619,7 +635,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
     // leaves a set of files from two runs. Nothing in this extension reads that cache (every path
     // it reads is under `<target>/.repo-tour/build/`), so the promise "Cancel leaves nothing
     // half-written" is true here by there being nothing written.
-    digestResult = await ctx.core.digest(repoRoot, { write: false }, { isCancelled: ctx.isCancelled });
+    digestResult = await ctx.core.digest(repoRoot, { write: false, outDir: noDigestCache(target) }, { isCancelled: ctx.isCancelled });
   } catch (err) {
     if (phaseCancelled(err)) return cancel(target, 'while reading the repository');
     return fail(err);

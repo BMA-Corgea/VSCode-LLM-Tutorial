@@ -32,8 +32,20 @@
  * `terminate()` is two milliseconds on JavaScript, but it cannot interrupt a blocking child: while
  * repo-tour waits synchronously on `git`, the thread cannot be stopped until that call returns
  * (driven: 3,700 ms for a child that had 3,700 ms left to run). So the promise settles on our own
- * timer and `terminate()` is never awaited, for the reason `gitRunnerWith` gives: not waiting for
- * something is not the same as being free of it, which is why the thread is also `unref`'d.
+ * timer and `terminate()` is never awaited. What that does not buy: the abandoned thread finishes
+ * the call it is in, and if the process then exits it waits for that thread (driven, T-30 review
+ * F4: 8 s for an 8 s child). `unref` keeps the event loop from waiting for it, and that is all
+ * it keeps. Cancel ends the BUILD at once; it cannot end a native read or a child already running.
+ *
+ * ## What a worker does not contain
+ *
+ * Running out of memory ends the worker only if there is a limit to run out of: with none, a
+ * worker's limit is the host's own (4 GiB), and driven in the real host reaching it killed the
+ * whole extension host (T-30 security review, finding 2). `BUILD_WORKER_HEAP_MB` is that limit. It
+ * does not make it certain: one single enormous allocation can still take the host down, driven at
+ * a limit, and only a separate process would prevent that. Nor is a read that never ends contained:
+ * repo-tour follows a `.gitattributes` symlink, and a native read of `/dev/zero` is neither stopped
+ * by `terminate()` nor counted against a heap limit (T-72).
  */
 
 import fs from 'node:fs';
@@ -46,6 +58,15 @@ import type { BuildWorkerData, WorkerReply, WorkerRequest } from './worker-proto
 
 /** How often a running phase looks for a Cancel. A press lands within this, plus a `terminate()`. */
 const CANCEL_POLL_MS = 100;
+
+/**
+ * The worker's own heap limit, in megabytes (see "What a worker does not contain", above). Without
+ * one it inherits about 4 GiB, which the real host could not survive. Reading and planning 20,000
+ * TypeScript files measured about 74 MB of heap at the end, so this is roughly 25 times a
+ * very large repository and leaves the host its own memory. A worker that reaches it ends with a
+ * sentence and the window goes on.
+ */
+export const BUILD_WORKER_HEAP_MB = 2_048;
 
 export interface OffThreadDeps {
   /** Absolute path of the bundled worker: `<extensionRoot>/dist/build-worker.js`. */
@@ -73,14 +94,35 @@ export function offThreadCore(deps: OffThreadDeps): BuildCore {
   let nextId = 1;
   /** The digest the worker holds, so a `buildPlan` given that same one need not send it back. */
   let heldDigest: DigestResultLike | undefined;
+  /** Why the thread died between two phases, if it did. The next phase answers with this. */
+  let diedBecause: string | undefined;
 
   function startWorker(): Worker {
     const workerData: BuildWorkerData = { coreRoot: deps.coreRoot };
     // `execArgv: []`: the host's own flags (`--experimental-network-inspection`, a debugger's port)
     // are not a worker's to inherit.
-    const started = new Worker(deps.workerFile, { workerData, execArgv: [], ...deps.workerOptions });
+    const started = new Worker(deps.workerFile, {
+      workerData,
+      execArgv: [],
+      resourceLimits: { maxOldGenerationSizeMb: BUILD_WORKER_HEAP_MB },
+      ...deps.workerOptions,
+    });
     deps.observe?.started?.(started.threadId);
-    started.once('exit', (code) => deps.observe?.exited?.(code));
+    // For the thread's whole life, not per phase (T-30 review F2). Each phase takes its own listeners
+    // off when it finishes, so a thread that dies straight after answering would be heard by nothing:
+    // the next phase would post into a dead thread and wait for ever, and an 'error' with no listener
+    // is thrown on this thread, which every extension in the window shares.
+    const died = (why: string): void => {
+      if (worker !== started) return; // we stopped it ourselves, or a running phase has this already
+      worker = undefined;
+      heldDigest = undefined;
+      diedBecause = why;
+    };
+    started.on('error', (err: Error) => { died(err.message); });
+    started.once('exit', (code) => {
+      died(`the build worker exited with code ${code}`);
+      deps.observe?.exited?.(code);
+    });
     return started;
   }
 
@@ -101,6 +143,10 @@ export function offThreadCore(deps: OffThreadDeps): BuildCore {
       // with a file missing, and the person reading the sentence can do something about that.
       if (!fs.existsSync(deps.workerFile)) {
         reject(new Error(`could not start the build: the build worker is missing from this install (${deps.workerFile}); reinstalling the extension should restore it`));
+        return;
+      }
+      if (diedBecause !== undefined) {
+        reject(new Error(`${phase} stopped unexpectedly (${diedBecause})`));
         return;
       }
       const running = worker ??= startWorker();

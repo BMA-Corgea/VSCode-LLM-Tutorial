@@ -237,11 +237,16 @@ export class Screen {
   /**
    * Presses the button labelled `label` on the notification whose text contains `containing` —
    * the real button, the way a person would. Returns false when there is no such button.
+   *
+   * `where` is `'centre'` for the notification centre's list, which is only rendered while it is
+   * open: a caller opens it first. Corner toasts are not a reliable witness (driven, T-30 review F1):
+   * a progress notification with its Cancel button can be in the centre and never be drawn as a toast.
    */
-  async pressNotificationButton(containing: string, label: string): Promise<boolean> {
+  async pressNotificationButton(containing: string, label: string, where: 'toast' | 'centre' = 'toast'): Promise<boolean> {
     const bench = await this.workbench();
+    const list = where === 'toast' ? '.notification-toast-container' : '.notifications-center';
     return this.evaluate<boolean>(bench, `(() => {
-      const items = Array.from(document.querySelectorAll('.notification-toast-container .notification-list-item'));
+      const items = Array.from(document.querySelectorAll('${list} .notification-list-item'));
       const item = items.find((el) => el.innerText.includes(${JSON.stringify(containing)}));
       if (!item) return false;
       const button = Array.from(item.querySelectorAll('.monaco-button, a.action-label, [role=button]'))

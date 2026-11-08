@@ -4,7 +4,7 @@
  * `src/core.ts` — because it must stay loadable via dynamic `import()` for its
  * `import.meta.url` asset lookups (skins, grammar paths) to keep resolving correctly.
  *
- * Twelve entry points (eleven fixed, plus one per `test/unit/*.test.ts` file), all CJS /
+ * Thirteen entry points (twelve fixed, plus one per `test/unit/*.test.ts` file), all CJS /
  * platform:node, so a plain `require()` or dynamic `import()` of the output works the same
  * inside the extension host and outside it:
  *   - src/extension.ts        -> dist/extension.js            (external: vscode, repo-tour) — the extension

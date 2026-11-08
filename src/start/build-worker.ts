@@ -23,7 +23,7 @@ const { coreRoot } = workerData as BuildWorkerData;
 /** What this build has read: held here so `buildPlan` does not make the host send it all back. */
 let held: unknown;
 
-interface DigestModule { digest: (root: string, opts: { write?: boolean }) => Promise<unknown> }
+interface DigestModule { digest: (root: string, opts: { write?: boolean; outDir?: string }) => Promise<unknown> }
 interface BuildModule { buildPlan: (digest: unknown, opts: { root: string; witness?: boolean }) => Promise<unknown> }
 
 async function perform(request: WorkerRequest): Promise<unknown> {
