@@ -242,6 +242,22 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.deepEqual(cost.failures, []);
   });
 
+  test('AC10: a derivation served wholly from the cache does not name a model that never ran', async () => {
+    const gs = tempDir('derive-engine-gs-');
+    const target = tempDir('derive-engine-target-');
+    const first = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel().run, gs, target));
+    if (!first.ok) assert.fail(first.reason);
+    assert.equal(first.plan.cost.model, 'claude-sonnet-5', 'a run that asked names the model it asked');
+    const d = deps(POISONED, gs, target);
+    d.settings = { ...d.settings, model: 'some-other-model' };
+    const again = await derivePlan({ idea: FIXTURE_IDEA }, d);
+    if (!again.ok) assert.fail(again.reason);
+    assert.equal(again.plan.cost.calls, 0);
+    assert.notEqual(again.plan.cost.model, 'some-other-model', 'that model answered nothing');
+    assert.match(again.plan.cost.model, /cache/, 'the cost says where the answers came from');
+    assert.deepEqual(validateBuildPlan(BUILD_PLAN_SCHEMA, again.plan), [], 'and the plan is still the shape repo-tour reads');
+  });
+
   test('a derivation that fails partway keeps what parsed: pressing again pays only for the question that failed', async () => {
     const gs = tempDir('derive-engine-gs-');
     const target = tempDir('derive-engine-target-');

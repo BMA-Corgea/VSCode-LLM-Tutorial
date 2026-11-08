@@ -69,11 +69,12 @@ const NODE_TEXT_BUDGET =
   + DERIVE_LIMITS.maxOptions * (DERIVE_LIMITS.maxOptionIdChars + DERIVE_LIMITS.maxLabelChars + DERIVE_LIMITS.maxConsequenceChars);
 
 /**
- * What one derivation call can put in front of a model, worst case. **Not a cap** — nothing
- * consults it at runtime; it is the sum of the budgets, the way `MAX_CONTEXT_CHARS` and
- * `MAX_DETOUR_PROMPT_CHARS` are. The largest of the three calls is a replan or a code call over
- * a full plan: the idea, every node's decision, the app's title and chapters, and every file's
- * content — at JSON's worst-case escape — plus the instructions.
+ * What one derivation call can put in front of a model, worst case: the sum of the budgets, the
+ * way `MAX_CONTEXT_CHARS` and `MAX_DETOUR_PROMPT_CHARS` are, and also a hard stop at the one door
+ * (`askOnce`), so a prompt built from something the budgets missed still cannot leave. The largest
+ * of the three calls is a replan or a code call over a full plan: the idea, every node's decision,
+ * the app's title and chapters, and every file's content — at JSON's worst-case escape — plus the
+ * instructions.
  */
 export const MAX_DERIVE_PROMPT_CHARS =
   JSON_ESCAPE_WORST_CASE * (
@@ -209,7 +210,7 @@ export function codePrompt(input: CodeInput): string {
     language: input.language,
     chapter: decisionForPrompt(input.chapter),
     node: { ...decisionForPrompt(input.node), isEntry: input.node.isEntry },
-    dependencies: input.dependencies.map((d) => ({
+    dependencies: input.dependencies.slice(0, DERIVE_LIMITS.maxSteps).map((d) => ({
       ...decisionForPrompt(d),
       ...(d.content === undefined ? {} : { content: Outbound.text(d.content, DERIVE_LIMITS.maxFileChars) }),
     })),
@@ -258,7 +259,7 @@ const REPLAN_INSTRUCTIONS = [
 
 function shownForPrompt(s: ShownStep): ShownStep {
   return {
-    kind: s.kind,
+    kind: s.kind === 'shape' ? 'shape' : 'file',
     chapter: Outbound.text(s.chapter, DERIVE_LIMITS.maxPathChars),
     path: Outbound.text(s.path, DERIVE_LIMITS.maxPathChars),
     question: Outbound.text(s.question, DERIVE_LIMITS.maxQuestionChars),

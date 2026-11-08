@@ -39,6 +39,13 @@ export const DERIVE_LIMITS = {
    * hard stop on a runaway one — the bound the detour learned it needed (T-7 security review).
    */
   maxReplyChars: 200_000,
+  /**
+   * How many questions one press may send. An outline and all its files is at most 31, and a
+   * walk's one answer re-derives at most what it reaches, so twice a whole plan is the honest
+   * ceiling. Past it the press stops and says so. What was answered stays cached, so pressing again
+   * carries on from there: the bound can cost a second press, and never the work.
+   */
+  maxCallsPerPress: 64,
   /** "Simple shapes": a small app has a handful of parts. Six is room to spare. */
   maxChapters: 6,
   /** Steps in the whole plan, after every replan. Thirty is a long evening's tutorial. */

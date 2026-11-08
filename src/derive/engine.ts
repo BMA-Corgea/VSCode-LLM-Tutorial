@@ -88,10 +88,13 @@ export type DeriveOutcome =
   | { ok: true; plan: DerivedPlan; referenceRoot: string; files: DerivedFile[]; state: DerivationState }
   | { ok: false; reason: string; cost: DeriveCost };
 
+/** What the plan's `cost.model` says when no model ran: the cache holds answers, not who gave them. */
+const ALL_FROM_CACHE = 'none: every answer came from the cache';
+
 function costOf(tally: AskTally, deps: DeriveDeps): DeriveCost {
   return {
     provider: deps.settings.provider,
-    model: deps.settings.model,
+    model: tally.calls === 0 && tally.cachedStops > 0 ? ALL_FROM_CACHE : deps.settings.model,
     metered: tally.unmetered === 0,
     calls: tally.calls,
     cachedStops: tally.cachedStops,

@@ -15,8 +15,9 @@ import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import { askOnce, newTally, type DeriveAskDeps } from '../../src/derive/ask.js';
 import { deriveCacheKey, readCachedReply } from '../../src/derive/cache.js';
-import { parseCodeReply } from '../../src/derive/prompt.js';
+import { MAX_DERIVE_PROMPT_CHARS, parseCodeReply } from '../../src/derive/prompt.js';
 import { DERIVE_CACHE_DIR } from '../../src/derive/storage.js';
+import { DERIVE_LIMITS } from '../../src/derive/types.js';
 import { AskLedger } from '../../src/tutor/ask.js';
 import { tutorCoreFor, type LlmReply, type TutorCore } from '../../src/tutor/core.js';
 
@@ -137,6 +138,70 @@ suite('askOnce — the cache, then the ledger, then the same parser for both', (
     const c = await askOnce(depsWith(fetchy.run), 'derive:outline', 'p', parse, tally);
     assert.ok('refused' in c && /request failed/.test(c.refused));
     assert.equal(tally.usd, 0.5, 'a billed reply that was discarded still cost money');
+  });
+
+  test('a prompt past the worst case is refused at the door: nothing is sent and the cache is not consulted', async () => {
+    const runner = scripted([]);
+    const deps = depsWith(runner.run);
+    const out = await askOnce(deps, 'derive:code:x', 'p'.repeat(MAX_DERIVE_PROMPT_CHARS + 1), parse, newTally());
+    assert.ok('refused' in out && /more than the \d+ one question may send/.test(out.refused), JSON.stringify(out).slice(0, 200));
+    assert.equal(runner.prompts.length, 0, 'nothing left the machine');
+    assert.equal(deps.ledger.spend().replies, 0);
+  });
+
+  test('one press stops at its budget of calls, says so, and keeps what it has', async () => {
+    const runner = scripted([]);
+    const tally = newTally();
+    tally.calls = DERIVE_LIMITS.maxCallsPerPress;
+    const out = await askOnce(depsWith(runner.run), 'derive:code:x', 'p', parse, tally);
+    assert.ok('refused' in out && /stopped after \d+ questions/.test(out.refused), JSON.stringify(out));
+    assert.equal(runner.prompts.length, 0, 'the question past the budget was not sent');
+  });
+
+  test('the budget counts questions SENT: what the cache answers is still served past it', async () => {
+    const first = scripted([{ text: GOOD }]);
+    const deps = depsWith(first.run);
+    await askOnce(deps, 'derive:code:x', 'p', parse, newTally());
+    const tally = newTally();
+    tally.calls = DERIVE_LIMITS.maxCallsPerPress;
+    assert.deepEqual(await askOnce(deps, 'derive:code:x', 'p', parse, tally), { content: 'export const x = 1;\n' });
+  });
+
+  test('a call that ended with no reported cost leaves the totals a floor, and only a call that was sent counts (AC10)', async () => {
+    const reachable = { availability: () => Promise.resolve({ ok: false, detail: 'not found on PATH' }) };
+    const unreachable = depsWith(scripted([]).run);
+    unreachable.settings = { ...unreachable.settings, core: { ...unreachable.settings.core, ...reachable } };
+    const never = newTally();
+    await askOnce(unreachable, 'derive:outline', 'p', parse, never);
+    assert.deepEqual({ calls: never.calls, unmetered: never.unmetered }, { calls: 0, unmetered: 0 }, 'unreachable: nothing was sent, so nothing can have cost anything');
+
+    const slow = depsWith(() => new Promise<LlmReply>(() => undefined));
+    slow.settings = { ...slow.settings, timeoutMs: 30 };
+    const timedOut = newTally();
+    await askOnce(slow, 'derive:outline', 'p', parse, timedOut);
+    assert.deepEqual({ calls: timedOut.calls, unmetered: timedOut.unmetered }, { calls: 1, unmetered: 1 }, 'timed out: it was sent, and what it cost is unknown');
+
+    const failing = depsWith(() => Promise.reject(new Error('the provider fell over')));
+    const failed = newTally();
+    await askOnce(failing, 'derive:outline', 'p', parse, failed);
+    assert.deepEqual({ calls: failed.calls, unmetered: failed.unmetered }, { calls: 1, unmetered: 1 }, 'a failure with no cost is an unknown, not a zero');
+
+    const closed = depsWith(scripted([]).run);
+    closed.ledger.close();
+    const notSent = newTally();
+    await askOnce(closed, 'derive:outline', 'p', parse, notSent);
+    assert.deepEqual({ calls: notSent.calls, unmetered: notSent.unmetered }, { calls: 0, unmetered: 0 }, 'a closed ledger sends nothing');
+
+    let release: (r: LlmReply) => void = () => undefined;
+    const held = depsWith(() => new Promise<LlmReply>((resolve) => { release = resolve; }));
+    const abandoned = newTally();
+    const pending = askOnce(held, 'derive:outline', 'p', parse, abandoned);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    held.ledger.abandonAll();
+    await pending;
+    assert.deepEqual({ calls: abandoned.calls, unmetered: abandoned.unmetered }, { calls: 1, unmetered: 1 }, 'abandoned while sending: it is still billing, for an amount nobody will report');
+    release({ text: GOOD, inputTokens: 0, outputTokens: 0, usd: 0, metered: true });
   });
 
   test('an unmetered reply makes the totals a floor, never a figure (AC10)', async () => {

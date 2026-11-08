@@ -92,10 +92,15 @@ suite('derive prompts — one door out, and a value cannot become structure (AC6
       idea: huge, title: huge, language: 'javascript',
       chapter: decision,
       node: { ...decision, isEntry: true },
-      dependencies: Array.from({ length: DERIVE_LIMITS.maxSteps }, () => ({ ...decision, content: '\u0001'.repeat(500_000) })),
+      // Past the plan's own step limit on purpose: the bound has to hold for what is handed in,
+      // not only for the length the parser would have allowed.
+      dependencies: Array.from({ length: DERIVE_LIMITS.maxSteps * 4 }, () => ({ ...decision, content: '\u0001'.repeat(500_000) })),
     };
     const prompt = codePrompt(input);
     assert.ok(prompt.length <= MAX_DERIVE_PROMPT_CHARS, `${prompt.length} > ${MAX_DERIVE_PROMPT_CHARS}`);
+    const sent = inputOf(prompt);
+    assert.ok((sent['dependencies'] as unknown[]).length <= DERIVE_LIMITS.maxSteps, 'no more dependencies than a plan can have');
+    assert.ok((sent['idea'] as string).length <= DERIVE_LIMITS.maxIdeaChars, 'the idea is held to its own budget here too');
   });
 
   test('a replan prompt over hostile, oversized inputs is held to MAX_DERIVE_PROMPT_CHARS', () => {
@@ -114,6 +119,20 @@ suite('derive prompts — one door out, and a value cannot become structure (AC6
     };
     const prompt = replanPrompt(input);
     assert.ok(prompt.length <= MAX_DERIVE_PROMPT_CHARS, `${prompt.length} > ${MAX_DERIVE_PROMPT_CHARS}`);
+    assert.ok((inputOf(prompt)['chapters'] as unknown[]).length <= DERIVE_LIMITS.maxChapters, 'no more chapters than a plan can have');
+  });
+
+  test('a step\'s kind is written as the literal it is, so a stored state cannot smuggle text through it', () => {
+    const step = {
+      kind: 'x'.repeat(4_000_000) as unknown as 'file', chapter: 'core', path: 'core/a.mjs', question: 'q', chosen: 'a', why: 'w',
+      options: [{ id: 'a', label: 'l', consequence: 'c' }], dependsOn: [],
+    };
+    const prompt = replanPrompt({
+      idea: 'i', title: 't', language: 'javascript', entry: 'core/a.mjs', chapters: [],
+      decision: { ...step, recommended: 'a' }, shown: [step], replacing: [step],
+    });
+    assert.ok(prompt.length < 10_000, `the kind was carried raw: ${prompt.length} characters`);
+    assert.equal((inputOf(prompt)['decision'] as Record<string, unknown>)['kind'], 'file');
   });
 });
 

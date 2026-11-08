@@ -36,7 +36,8 @@
 
 import type { AskLedger, AskOutcome, AskSettings } from '../tutor/ask.js';
 import { deriveCacheKey, readCachedReply, writeCachedReply } from './cache.js';
-import { isDeriveRefusal, type DeriveRefusal } from './types.js';
+import { MAX_DERIVE_PROMPT_CHARS } from './prompt.js';
+import { DERIVE_LIMITS, isDeriveRefusal, type DeriveRefusal } from './types.js';
 
 export interface DeriveAskDeps {
   /** the one owner of a paid request's lifetime — see the header */
@@ -74,9 +75,21 @@ function countable(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-function countCost(tally: AskTally, outcome: AskOutcome): void {
-  const cost = outcome.kind === 'reply' || outcome.kind === 'failed' ? outcome.cost : undefined;
-  if (cost === undefined) return;
+/**
+ * Add what a finished question cost to the tally. `began` is whether the request really started.
+ *
+ * Only something that was sent counts as a call. A call that was sent and reported no cost (timed
+ * out, failed, abandoned while it ran) is an UNKNOWN: it stays in `unmetered`, so the totals read
+ * as a floor. Counted as nothing, it would say `metered: true, usd: 0` about a request that billed.
+ */
+function countCost(tally: AskTally, outcome: AskOutcome | null, began: boolean): void {
+  if (outcome === null ? !began : outcome.kind === 'unreachable') return;
+  tally.calls += 1;
+  const cost = outcome !== null && (outcome.kind === 'reply' || outcome.kind === 'failed') ? outcome.cost : undefined;
+  if (cost === undefined) {
+    tally.unmetered += 1;
+    return;
+  }
   tally.inputTokens += Math.round(countable(cost.inputTokens));
   tally.outputTokens += Math.round(countable(cost.outputTokens));
   tally.usd += countable(cost.usd);
@@ -96,6 +109,10 @@ export async function askOnce<T>(
   tally: AskTally,
 ): Promise<T | DeriveRefusal> {
   if (deps.isCancelled?.() === true) return { refused: 'the derivation was cancelled before this question was asked' };
+  // The bound's own door: whatever a prompt was built from, this is the most that can leave.
+  if (prompt.length > MAX_DERIVE_PROMPT_CHARS) {
+    return { refused: `this question came to ${prompt.length} characters, more than the ${MAX_DERIVE_PROMPT_CHARS} one question may send, so nothing was sent` };
+  }
 
   const key = deriveCacheKey(prompt);
   const cached = readCachedReply(deps.globalStorageRoot, key);
@@ -108,14 +125,19 @@ export async function askOnce<T>(
     // A cached reply the parser now refuses is a miss: asked again, never served.
   }
 
+  // A press may not buy more than this, and the cache above is free, so it counts what is sent.
+  if (tally.calls >= DERIVE_LIMITS.maxCallsPerPress) {
+    return { refused: `this stopped after ${tally.calls} questions, the most one press may ask; what was answered is kept, so pressing again carries on from here` };
+  }
+
   const ticket = deps.ledger.open(ticketId);
   ticket.sendPrompt(deps.settings, prompt);
-  tally.calls += 1;
+  const began = ticket.phase === 'sending';
   const outcome = await ticket.delivered;
+  countCost(tally, outcome, began);
   if (outcome === null) {
     return { refused: 'the request was stopped before it answered; if it had already been sent it is still finishing, and still billed' };
   }
-  countCost(tally, outcome);
   switch (outcome.kind) {
     case 'unreachable':
       return { refused: `the model could not be reached: ${outcome.detail}` };
