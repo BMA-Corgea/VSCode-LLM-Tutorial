@@ -26,10 +26,11 @@
  *
  * ── Every outcome is a value ─────────────────────────────────────────────────────────────────
  *
- * `askOnce` never throws and never rejects: an unreachable provider, a timeout, a failure, an
+ * `askOnce` does not throw on its own account: an unreachable provider, a timeout, a failure, an
  * abandoned request and an unusable reply each come back as a `DeriveRefusal` sentence, and the
  * cost of anything that was billed is counted in the tally either way — a request that was paid
- * for and then discarded still cost money (`src/tutor/ask.ts`'s own rule).
+ * for and then discarded still cost money (`src/tutor/ask.ts`'s own rule). The one thing it does
+ * not catch is a `parse` that rejects; the engine's outer `try` turns that into a sentence.
  *
  * No `vscode` import — see `./types.ts`.
  */
@@ -50,6 +51,9 @@ export interface DeriveAskDeps {
   isCancelled?: () => boolean;
 }
 
+/** The most of a provider's failure text a refusal sentence carries. */
+const MAX_DETAIL_CHARS = 300;
+
 /**
  * What a derivation's questions cost so far, summed across them — the figures the plan's `cost`
  * reports. `unmetered` counts live replies whose provider could not say what they cost: one of
@@ -68,6 +72,11 @@ export interface AskTally {
 
 export function newTally(): AskTally {
   return { calls: 0, cachedStops: 0, interpretedStops: 0, inputTokens: 0, outputTokens: 0, usd: 0, unmetered: 0, failures: [] };
+}
+
+/** A provider's own words, at a length one sentence can carry. */
+function capped(detail: string): string {
+  return detail.length <= MAX_DETAIL_CHARS ? detail : `${detail.slice(0, MAX_DETAIL_CHARS - 1)}…`;
 }
 
 /** A provider may report anything; a total must not become `NaN` because it did. */
@@ -140,11 +149,11 @@ export async function askOnce<T>(
   }
   switch (outcome.kind) {
     case 'unreachable':
-      return { refused: `the model could not be reached: ${outcome.detail}` };
+      return { refused: `the model could not be reached: ${capped(outcome.detail)}` };
     case 'timedOut':
       return { refused: `the model did not answer within ${Math.max(1, Math.round(outcome.afterMs / 1000))} seconds, and nothing was kept` };
     case 'failed':
-      return { refused: `the request failed: ${outcome.detail}` };
+      return { refused: `the request failed: ${capped(outcome.detail)}` };
     case 'reply': {
       const parsed = await parse(outcome.text);
       if (isDeriveRefusal(parsed)) {

@@ -269,6 +269,7 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.equal(again.plan.cost.calls, 0);
     assert.notEqual(again.plan.cost.model, 'some-other-model', 'that model answered nothing');
     assert.match(again.plan.cost.model, /cache/, 'the cost says where the answers came from');
+    assert.equal(again.plan.cost.provider, 'none', 'no provider answered either');
     assert.deepEqual(validateBuildPlan(BUILD_PLAN_SCHEMA, again.plan), [], 'and the plan is still the shape repo-tour reads');
   });
 
@@ -316,6 +317,19 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.equal(typeof out, 'string', 'it says why');
   });
 
+  test('when the scratch folder cannot be made, extractAll says why rather than rejecting', async () => {
+    const real = fs.mkdtempSync;
+    (fs as unknown as { mkdtempSync: unknown }).mkdtempSync = () => { throw new Error('ENOSPC: no space left on device'); };
+    let out: Awaited<ReturnType<typeof extractAll>>;
+    try {
+      out = await extractAll(dialCore, [{ path: 'core/x.mjs', content: 'export {};\n' }]);
+    } finally {
+      (fs as unknown as { mkdtempSync: unknown }).mkdtempSync = real;
+    }
+    assert.equal(typeof out, 'string');
+    assert.match(out as string, /ENOSPC/);
+  });
+
   test('a node: import is one of Node\'s own modules, and is allowed', async () => {
     const tally = "import { strict as assert } from 'node:assert';\nexport function total(xs) {\n  assert.ok(Array.isArray(xs));\n  return xs.reduce((a, b) => a + b, 0);\n}\n";
     const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': tally, 'cli/main.mjs': MAIN }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
@@ -334,6 +348,10 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     ['a computed import', "const where = '../core/' + 'tally.mjs';\nconst { total } = await import(where);\n\nconsole.log(total([1, 2, 3]));\n", /computed import/],
     ['a computed template import', "const f = 'tally.mjs';\nconst { total } = await import(`../core/${f}`);\n\nconsole.log(total([1, 2, 3]));\n", /computed import/],
     ['createRequire', "import { createRequire } from 'node:module';\nconst load = createRequire(import.meta.url);\nconsole.log(load(process.argv[2]));\n", /computed import/],
+    ['a template-literal import, which the file reader cannot see', "const { total } = await import(`../core/tally.mjs`);\n\nconsole.log(total([1, 2, 3]));\n", /computed import/],
+    ['a computed import behind a string that looks like a comment', "const a = \"//\"; const { total } = await import('../core/' + 'tally.mjs');\nconsole.log(a, total([1, 2, 3]));\n", /computed import/],
+    ['a computed import between strings that look like a block comment', "const a = \"/*\"; const { total } = await import('../core/' + 'tally.mjs'); const b = \"*/\";\nconsole.log(a, b, total([1, 2, 3]));\n", /computed import/],
+    ['require, which an ES module does not have', "const fs = require('node:fs');\nconsole.log(fs.existsSync('x'));\n", /require/],
   ] as Array<[string, string, RegExp]>) {
     test(`an entry point with ${name} is refused: what starts must be able to start, and the graph must know what it runs`, async () => {
       const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': TALLY, 'cli/main.mjs': code }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
@@ -341,6 +359,25 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
       assert.match(out.reason, pattern);
     });
   }
+
+  for (const [name, code] of [
+    ['a dynamic import with a space before its string', "const { total } = await import( '../core/tally.mjs');\n\nconsole.log(total([1, 2, 3]));\n"],
+    ['a dynamic import with its string on its own line', "const { total } = await import(\n  '../core/tally.mjs'\n);\n\nconsole.log(total([1, 2, 3]));\n"],
+    ['the word import inside a string', "import { total } from '../core/tally.mjs';\n\nconsole.log('commands: add, list, import (file)', total([1, 2, 3]));\n"],
+    ['a method called import', "import { total } from '../core/tally.mjs';\n\nconst db = { ['import']: (x) => x };\nconsole.log(db.import(1), total([1, 2, 3]));\n"],
+  ] as Array<[string, string]>) {
+    test(`${name} is not a computed import`, async () => {
+      const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': TALLY, 'cli/main.mjs': code }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+      if (!out.ok) assert.fail(out.reason);
+    });
+  }
+
+  test('an import of a planned file that is not written yet is judged as the finished tree will judge it', async () => {
+    const early = "import { x } from '../cli/main.mjs';\nexport function total(xs) { return xs.length + x; }\n";
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, deps(fakeModel({ 'core/tally.mjs': early, 'cli/main.mjs': MAIN }).run, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-')));
+    assert.ok(!out.ok, 'expected the derivation to fail');
+    assert.match(out.reason, /imports "\.\.\/cli\/main\.mjs", a file it does not depend on/);
+  });
 
   test('the same words in a comment are not a computed import', async () => {
     const code = "// you could use import(where) here, or createRequire, but this app does not\nimport { total } from '../core/tally.mjs';\n\nconsole.log(total([1, 2, 3]));\n";
@@ -715,6 +752,36 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     assert.deepEqual(out.plan.chapters.map((c) => c.key), ['core', 'cli']);
   });
 
+  for (const moduleName of ['json', 'yaml']) test(`a replan that adds ${moduleName}.py beside a kept file importing ${moduleName} does not refuse the plan, now or on the next replan`, async () => {
+    const gs = tempDir('derive-engine-gs-');
+    const target = tempDir('derive-engine-target-');
+    const options = [{ id: 'a', label: 'A', consequence: 'x' }, { id: 'b', label: 'B', consequence: 'y' }];
+    const step = (kind: string, chapter: string, p: string, dependsOn: string[]) => ({ kind, chapter, path: p, question: `${p}?`, options, recommended: 'a', why: 'w', dependsOn });
+    const outline = JSON.stringify({
+      title: 'Store', language: 'python', entry: 'cli/main.py',
+      chapters: [{ key: 'core', title: 'Core', subtitle: 's' }, { key: 'cli', title: 'CLI', subtitle: 's' }],
+      steps: [step('shape', 'core', 'core', []), step('file', 'core', 'core/store.py', ['core']), step('shape', 'cli', 'cli', []), step('file', 'cli', 'cli/main.py', ['cli', 'core/store.py'])],
+    });
+    const code = {
+      'core/store.py': `import ${moduleName}\n\ndef load():\n    return ${moduleName}\n`,
+      'cli/main.py': 'from core.store import load\n\nprint(load())\n',
+      [`core/${moduleName}.py`]: 'def helper():\n    return 1\n',
+    };
+    const addsJson = (input: Record<string, unknown>): unknown => {
+      const out = followTheAnswer(input) as { steps: Array<Record<string, unknown>> };
+      const added = `core/${moduleName}.py`;
+      const has = out.steps.some((st) => st['path'] === added);
+      return { steps: has ? out.steps : [step('file', 'core', added, ['core']), ...out.steps] };
+    };
+    const model = fakeModel(code, addsJson, outline);
+    const first = await derivePlan({ idea: FIXTURE_IDEA }, deps(model.run, gs, target));
+    if (!first.ok) assert.fail(first.reason);
+    const second = await replanPlan(first.state, idOf(first.state, 'cli'), 'b', [], deps(model.run, gs, target));
+    if (!second.ok) assert.fail(`a kept file's own import was held against the replan's new file: ${second.reason}`);
+    const third = await replanPlan(second.state, idOf(second.state, 'cli'), 'a', [], deps(model.run, gs, target));
+    if (!third.ok) assert.fail(`a state the engine made itself must be a state the engine accepts: ${third.reason}`);
+  });
+
   const bigText = 'x'.repeat(5_000_000);
   const tampers: Array<[string, (s: Record<string, unknown>, nodes: Array<Record<string, unknown>>) => void, RegExp?]> = [
     ['nodes holding a null', (s) => { s['nodes'] = [null]; }],
@@ -742,6 +809,12 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     ['a 1 MB file', (s) => { (s['files'] as Record<string, unknown>)['core/tally.mjs'] = bigText.slice(0, 1_000_000); }],
     ['a file that is not text', (s) => { (s['files'] as Record<string, unknown>)['core/tally.mjs'] = 7; }],
     ['a file step with no code', (s) => { delete (s['files'] as Record<string, unknown>)['core/tally.mjs']; }],
+    ['a title that is not text', (s) => { s['title'] = 7; }],
+    ['a chapter title holding a line break', (s) => { (s['chapters'] as Array<Record<string, unknown>>)[0]!['title'] = 'one\ntwo'; }],
+    ['an answer that is not text', (s) => { s['answers'] = { somewhere: 7 }; }],
+    ['stored code that does not parse', (s) => { (s['files'] as Record<string, unknown>)['core/tally.mjs'] = 'export function total(xs {\n'; }],
+    ['stored code that imports a package', (s) => { (s['files'] as Record<string, unknown>)['core/tally.mjs'] = "import _ from 'lodash';\nexport const x = _;\n"; }],
+    ['stored code that imports a file it does not depend on', (s) => { (s['files'] as Record<string, unknown>)['core/tally.mjs'] = "import '../cli/main.mjs';\nexport const x = 1;\n"; }],
   ];
   for (const [name, tamper] of tampers) {
     test(`a stored state with ${name} is refused in a sentence, before anything is asked or written`, async () => {

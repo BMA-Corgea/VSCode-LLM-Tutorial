@@ -204,6 +204,13 @@ suite('askOnce — the cache, then the ledger, then the same parser for both', (
     release({ text: GOOD, inputTokens: 0, outputTokens: 0, usd: 0, metered: true });
   });
 
+  test('a provider\'s long failure text is capped, so one sentence cannot carry a page of it', async () => {
+    const failing = depsWith(() => Promise.reject(new Error('z'.repeat(11_000))));
+    const out = await askOnce(failing, 'derive:outline', 'p', parse, newTally());
+    assert.ok('refused' in out && /request failed/.test(out.refused), JSON.stringify(out).slice(0, 120));
+    assert.ok(out.refused.length < 500, `the sentence carried ${out.refused.length} characters`);
+  });
+
   test('an unmetered reply makes the totals a floor, never a figure (AC10)', async () => {
     const runner = scripted([{ text: GOOD, metered: false }]);
     const tally = newTally();

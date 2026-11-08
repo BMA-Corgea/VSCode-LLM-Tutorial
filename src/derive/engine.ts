@@ -49,6 +49,8 @@ import {
   codePrompt, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, quote, replanPrompt, unsoundCodeText, validatePlan, withChapterEdges,
   type DecisionForPrompt, type DependencyForPrompt, type ReplanReply, type ShownStep,
 } from './prompt.js';
+import { PYTHON_STDLIB_MODULES } from './python-stdlib.js';
+import { codeOnly } from './source-scan.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
 import { DERIVE_LIMITS, isDeriveRefusal, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
 
@@ -95,9 +97,10 @@ export type DeriveOutcome =
 const ALL_FROM_CACHE = 'none: every answer came from the cache';
 
 function costOf(tally: AskTally, deps: DeriveDeps): DeriveCost {
+  const fromCacheOnly = tally.calls === 0 && tally.cachedStops > 0;
   return {
-    provider: deps.settings.provider,
-    model: tally.calls === 0 && tally.cachedStops > 0 ? ALL_FROM_CACHE : deps.settings.model,
+    provider: fromCacheOnly ? 'none' : deps.settings.provider,
+    model: fromCacheOnly ? ALL_FROM_CACHE : deps.settings.model,
     metered: tally.unmetered === 0,
     calls: tally.calls,
     cachedStops: tally.cachedStops,
@@ -147,6 +150,13 @@ export function unsoundFileReason(
   if (extract.parseErrors > 0) return `does not parse (${extract.parseErrors} syntax error${extract.parseErrors === 1 ? '' : 's'})`;
   const importerDir = path.posix.dirname(extract.path);
   for (const imp of extract.imports) {
+    if (language === 'python') {
+      // `python3 -m cli.main` makes `cli` the top package: one dot is `cli`, and a second climbs out.
+      const dots = leadingDots(imp.raw);
+      if (dots > importerDir.split('/').length) return `imports ${quote(imp.raw)}, which climbs above the top of the app, so Python refuses it at startup`;
+      // `from . import x`: the names after `import` are the real imports (`undeclaredPythonImport`).
+      if (dots > 0 && dots === imp.raw.length && imp.resolved === null) continue;
+    }
     if (imp.resolved !== null) {
       if (!allowedFiles.has(imp.resolved)) return `imports ${quote(imp.raw)}, a file it does not depend on`;
       // repo-tour's resolver tries extensions and index files the way a bundler does. Node's ES
@@ -159,11 +169,11 @@ export function unsoundFileReason(
     if (imp.raw.startsWith('.')) return `imports ${quote(imp.raw)}, which is not one of its dependencies' files`;
     if (language === 'javascript' && !isBuiltin(imp.raw)) return `imports the package ${quote(imp.raw)}, which would need installing`;
     if (language === 'python') {
-      // A Python name with no dots in front reads like a package. It may be a file of this app.
-      const fromRoot = `${imp.raw.replace(/\./g, '/')}.py`;
-      if (plannedFiles.has(fromRoot)) return `imports ${quote(imp.raw)}, a file it does not depend on`;
-      const sibling = path.posix.join(importerDir, fromRoot);
-      if (plannedFiles.has(sibling)) {
+      // A Python name with no dots in front reads like a package. It may be a file beside this one.
+      const sibling = path.posix.join(importerDir, `${imp.raw.replace(/\./g, '/')}.py`);
+      // A standard-library name beside a file of the same name is still the standard library: the
+      // app starts from its top folder, so the file beside it does not shadow it.
+      if (plannedFiles.has(sibling) && !PYTHON_STDLIB_MODULES.has(imp.raw.split('.')[0] ?? '')) {
         return `imports ${quote(imp.raw)}, a name that only works when this file is run directly; this app is run from its top folder, so it must import ${quote(sibling.slice(0, -3).replace(/\//g, '.'))}`;
       }
     }
@@ -171,33 +181,89 @@ export function unsoundFileReason(
   return null;
 }
 
-/** The file's text without its comments, so a sentence ABOUT an import is not read as one. */
-function codeWithoutComments(content: string, language: DeriveLanguage): string {
-  if (language === 'python') return content.replace(/#.*$/gm, '');
-  return content.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+function leadingDots(raw: string): number {
+  return /^\.*/.exec(raw)?.[0].length ?? 0;
 }
 
-/** A dynamic import of anything but one plain string, in JavaScript. A plain string is `extract`'s to read. */
-const COMPUTED_JS_IMPORT = /\bimport\s*\(\s*(?!(?:'[^'\n]*'|"[^"\n]*"|`[^`$\n]*`)\s*[,)])/;
+/**
+ * A dynamic import of anything but one plain quoted string, in JavaScript (`codeOnly` has blanked
+ * the string, so a plain one reads as `''`). A plain string is `extract`'s to read. A backtick is
+ * not: repo-tour reads only ordinary strings, so it is as invisible as an expression. A method
+ * written `db.import(x)` is not an import; one defined as `{ import(x) {…} }` is refused, a limit
+ * of reading this lexically.
+ */
+const COMPUTED_JS_IMPORT = /(?<![.\w$])import\s*\((?!\s*(?:''|"")\s*[,)])/;
+const JS_REQUIRE = /(?<![.\w$])require\s*\(/;
+const COMPUTED_IMPORT = 'uses a computed import, which nothing here can follow: a file of this app imports only what it names';
 
 /**
- * Why a file reaches for code nothing here can see, or `null`. `extract` reads plain string
- * imports only, so a computed one is a dependency the plan's graph cannot know about, and a replan
- * would then keep a file it should have re-derived. A sentence about an import in a comment is
- * fine. Lexical on purpose, and part of the correctness check above: not a sandbox.
+ * Why a file reaches for code nothing here can see, or cannot run, or `null`. `extract` reads
+ * plain string imports only, so a computed one is a dependency the plan's graph cannot know about,
+ * and a replan would then keep a file it should have re-derived. Takes `codeOnly`'s text, so a
+ * sentence about an import is fine. Lexical on purpose, and part of the correctness check above:
+ * not a sandbox.
  */
-function computedImportReason(content: string, language: DeriveLanguage): string | null {
-  const code = codeWithoutComments(content, language);
-  const computed = language === 'python'
-    ? /\b__import__\s*\(|\bimportlib\b/.test(code)
-    : COMPUTED_JS_IMPORT.test(code) || /\bcreateRequire\b/.test(code);
-  return computed ? 'uses a computed import, which nothing here can follow: a file of this app imports only what it names' : null;
+function computedImportReason(code: string, language: DeriveLanguage): string | null {
+  if (language === 'python') return /\b__import__\s*\(|\bimportlib\b/.test(code) ? COMPUTED_IMPORT : null;
+  if (COMPUTED_JS_IMPORT.test(code) || /\bcreateRequire\b/.test(code)) return COMPUTED_IMPORT;
+  return JS_REQUIRE.test(code) ? 'uses require, which an ES module does not have, so the file would fail as soon as it runs' : null;
+}
+
+const PY_FROM_IMPORT = /^[ \t]*from[ \t]+(\.*[A-Za-z_][\w.]*|\.+)[ \t]+import[ \t]+(\([^)]*\)|[^\n]*)/gm;
+const PY_IMPORT = /^[ \t]*import[ \t]+([^\n]+)/gm;
+
+/** The path a Python module name stands for from the top folder, or `null` if it climbs out. */
+function pythonModulePath(name: string, importerDir: string): string | null {
+  const dots = leadingDots(name);
+  const rest = name.slice(dots).replace(/\./g, '/');
+  if (dots === 0) return rest;
+  let base = importerDir;
+  for (let i = 1; i < dots; i += 1) {
+    if (base === '.') return null;
+    base = path.posix.dirname(base);
+  }
+  return rest.length === 0 ? base : path.posix.join(base, rest);
+}
+
+/**
+ * A Python import of a file of this plan that the step does not declare. `extract` keeps only the
+ * module part of `from core import tally`, and does not look far inside nested code, so the names
+ * are read here from the file's own text. Takes `codeOnly`'s text.
+ */
+function undeclaredPythonImport(code: string, importer: string, allowed: ReadonlySet<string>, planned: ReadonlySet<string>): string | null {
+  const dir = path.posix.dirname(importer);
+  const undeclared = (file: string): boolean => planned.has(file) && !allowed.has(file) && file !== importer;
+  const said = (name: string): string => `imports ${quote(name)}, a file it does not depend on`;
+  for (const match of code.matchAll(PY_FROM_IMPORT)) {
+    const module = match[1]!;
+    const base = pythonModulePath(module, dir);
+    if (base === null) continue; // a climb out is `unsoundFileReason`'s to say
+    const names = match[2]!.replace(/[()]/g, ' ').split(',').map((n) => n.trim().split(/\s+/)[0] ?? '').filter((n) => n.length > 0 && n !== '*');
+    const onlyDots = /^\.+$/.test(module);
+    if (!onlyDots && [`${base}.py`, `${base}/__init__.py`].some(undeclared)) return said(module);
+    const init = path.posix.join(base, '__init__.py');
+    for (const name of names) {
+      const file = path.posix.join(base, `${name}.py`);
+      if (undeclared(file)) return said(name);
+      if (onlyDots && !allowed.has(file) && !allowed.has(init)) return `imports ${quote(name)} from ${quote(module)}, which is not one of its dependencies' files`;
+    }
+  }
+  for (const match of code.matchAll(PY_IMPORT)) {
+    for (const part of match[1]!.split(',')) {
+      const name = part.trim().split(/\s+/)[0] ?? '';
+      if (name.length === 0) continue;
+      const base = name.replace(/\./g, '/');
+      if ([`${base}.py`, `${base}/__init__.py`].some(undeclared)) return said(name);
+    }
+  }
+  return null;
 }
 
 /** Run repo-tour's `extract` over the derived files, from a scratch folder this call made. */
 export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonly DerivedFile[]): Promise<Map<string, ExtractLike> | string> {
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'derive-extract-'));
+  let scratch: string | undefined;
   try {
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'derive-extract-'));
     const records: FileRecord[] = [];
     for (const f of files) {
       // Contained, lexically and on disk: `writeTextAtomic` proves the destination is really
@@ -220,7 +286,7 @@ export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonl
   } catch (err) {
     return `repo-tour could not read the derived files: ${err instanceof Error ? err.message.slice(0, 200) : 'unknown error'}`;
   } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
+    if (scratch !== undefined) fs.rmSync(scratch, { recursive: true, force: true });
   }
 }
 
@@ -229,27 +295,30 @@ function refusalForFile(
   node: DerivedNode, content: string, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, plannedFiles: ReadonlySet<string>, language: DeriveLanguage,
 ): DeriveRefusal | null {
   if (extract === undefined) return refuse(`repo-tour returned no reading of ${node.path}`);
-  const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles) ?? computedImportReason(content, language);
+  const code = codeOnly(content, language);
+  const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles)
+    ?? computedImportReason(code, language)
+    ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null);
   return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
 }
 
 /**
- * The deeper half of judging a code reply: repo-tour's own parser over the real file, with the
- * files it depends on beside it so its imports resolve. It runs inside the door (`askOnce`'s
- * `parse`), so a reply that parses as JSON and fails here is never cached: the next press asks
- * again instead of being handed the same refusal for free, forever.
+ * The deeper half of judging a code reply: repo-tour's own parser over the real file. It runs
+ * inside the door (`askOnce`'s `parse`), so a reply that fails here is never cached, and the next
+ * press asks again instead of being handed the same refusal for free, forever.
+ *
+ * It reads every file the plan names, with a file not written yet as an empty placeholder, because
+ * that is exactly what the finished tree will hold: an import resolves here as it will there, so
+ * nothing later can refuse a reply this accepted. This is the only place a new file is judged.
  */
 async function refusalForCode(state: DerivationState, node: DerivedNode, content: string, deps: DeriveDeps): Promise<DeriveRefusal | null> {
-  const kindOf = new Map(state.nodes.map((n) => [n.path, n.kind] as const));
-  const dependencies: DerivedFile[] = [];
-  for (const p of new Set(node.dependsOn)) {
-    const code = kindOf.get(p) === 'file' ? state.files[p] : undefined;
-    if (code !== undefined) dependencies.push({ path: p, content: code });
-  }
-  const extracts = await extractAll(deps.dialCore, [...dependencies, { path: node.path, content }]);
+  const fileNodes = state.nodes.filter((n) => n.kind === 'file');
+  const tree = fileNodes.map((n) => ({ path: n.path, content: n.path === node.path ? content : state.files[n.path] ?? '' }));
+  const extracts = await extractAll(deps.dialCore, tree);
   if (typeof extracts === 'string') return refuse(extracts);
-  const planned = new Set(state.nodes.filter((n) => n.kind === 'file').map((n) => n.path));
-  return refusalForFile(node, content, extracts.get(node.path), new Set(dependencies.map((d) => d.path)), planned, state.language);
+  const planned = new Set(fileNodes.map((n) => n.path));
+  const allowed = new Set(node.dependsOn.filter((p) => planned.has(p)));
+  return refusalForFile(node, content, extracts.get(node.path), allowed, planned, state.language);
 }
 
 /**
@@ -290,27 +359,41 @@ async function writeCode(state: DerivationState, paths: ReadonlySet<string>, dep
   return null;
 }
 
-/** Read every file with repo-tour's own parser, refuse an unsound one, then write the tree. */
-async function checkAndWrite(state: DerivationState, deps: DeriveDeps): Promise<{ extracts: Map<string, ExtractLike>; root: string } | DeriveRefusal> {
-  const fileNodes = state.nodes.filter((n) => n.kind === 'file');
+/**
+ * Read every file with repo-tour's own parser (the plan's scaffold ranges come from that reading),
+ * then write the tree. It judges nothing: every new file was judged where it came in (`writeCode`),
+ * and a kept one at the state door. A refusal this late would land after those replies were cached.
+ */
+async function readAndWriteTree(state: DerivationState, deps: DeriveDeps): Promise<{ extracts: Map<string, ExtractLike>; root: string } | DeriveRefusal> {
   const files: DerivedFile[] = [];
-  for (const n of fileNodes) {
+  for (const n of state.nodes.filter((node) => node.kind === 'file')) {
     const content = state.files[n.path];
     if (content === undefined) return refuse(`${n.path} has no code`);
     files.push({ path: n.path, content });
   }
   const extracts = await extractAll(deps.dialCore, files);
   if (typeof extracts === 'string') return refuse(extracts);
-  const kindOf = new Map(state.nodes.map((n) => [n.path, n.kind] as const));
-  const planned = new Set(fileNodes.map((n) => n.path));
-  for (const node of fileNodes) {
-    const allowed = new Set(node.dependsOn.filter((p) => kindOf.get(p) === 'file'));
-    const refused = refusalForFile(node, state.files[node.path]!, extracts.get(node.path), allowed, planned, state.language);
-    if (refused !== null) return refused;
-  }
   const tree = writeReferenceTree(deps.globalStorageRoot, deps.target, state.title, files);
   if (isDeriveRefusal(tree)) return tree;
   return { extracts, root: tree.root };
+}
+
+/**
+ * Why the code a stored state holds may not stand, or `null`: the second half of the state door,
+ * asked before anything is spent. A kept file is judged against what it declares, not against the
+ * plan's file list, which a replan may have added to since the file was written and accepted.
+ */
+async function unsoundStoredCode(state: DerivationState, deps: DeriveDeps): Promise<string | null> {
+  const fileNodes = state.nodes.filter((n) => n.kind === 'file');
+  const extracts = await extractAll(deps.dialCore, fileNodes.map((n) => ({ path: n.path, content: state.files[n.path]! })));
+  if (typeof extracts === 'string') return extracts;
+  const planned = new Set(fileNodes.map((n) => n.path));
+  for (const node of fileNodes) {
+    const allowed = new Set(node.dependsOn.filter((p) => planned.has(p)));
+    const refused = refusalForFile(node, state.files[node.path]!, extracts.get(node.path), allowed, allowed, state.language);
+    if (refused !== null) return refused.refused;
+  }
+  return null;
 }
 
 function finish(state: DerivationState, checked: { extracts: Map<string, ExtractLike>; root: string }, tally: AskTally, deps: DeriveDeps): DeriveOutcome {
@@ -521,7 +604,7 @@ export async function replanPlan(
   try {
     const refused = startRefusal(deps);
     if (refused !== null) return fail(refused);
-    const unsound = unsoundStateReason(prev);
+    const unsound = unsoundStateReason(prev) ?? await unsoundStoredCode(prev, deps);
     if (unsound !== null) return fail(`the plan handed in cannot be replanned: ${unsound}`);
     const byId = new Map(prev.nodes.map((n) => [stepIdFor(n), n] as const));
     const node = byId.get(stepId);
@@ -533,7 +616,7 @@ export async function replanPlan(
     }
     const next = await replanCore(prev, node.path, answer, prefix, deps, tally, true);
     if (isDeriveRefusal(next)) return fail(next.refused);
-    const checked = await checkAndWrite(next, deps);
+    const checked = await readAndWriteTree(next, deps);
     if (isDeriveRefusal(checked)) return fail(checked.refused);
     return finish(next, checked, tally, deps);
   } catch (err) {
@@ -584,7 +667,7 @@ export async function derivePlan(request: DeriveRequest, deps: DeriveDeps): Prom
     const wrote = await writeCode(state, new Set(state.nodes.map((n) => n.path)), deps, tally);
     if (wrote !== null) return fail(wrote.refused);
 
-    const checked = await checkAndWrite(state, deps);
+    const checked = await readAndWriteTree(state, deps);
     if (isDeriveRefusal(checked)) return fail(checked.refused);
     return finish(state, checked, tally, deps);
   } catch (err) {

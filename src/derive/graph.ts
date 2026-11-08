@@ -83,6 +83,10 @@ export function externalDependencies(nodes: readonly DerivedNode[], decision: st
  * The kept nodes in their own order, with each fresh node at the earliest position after all of
  * its dependencies. Fresh nodes keep their own relative order. Deterministic: the same inputs
  * always give the same plan order, which is what lets a fold of replans equal a derivation.
+ *
+ * A replan's fresh steps can therefore interleave chapters: the tree groups steps by chapter while
+ * the walk's Next follows plan order, so Next can step back into an earlier chapter's group. The
+ * walk still runs, in plan order. Whether that is acceptable is T-22's to rule on.
  */
 export function insertInOrder(kept: readonly DerivedNode[], fresh: readonly DerivedNode[]): DerivedNode[] {
   const out = [...kept];

@@ -24,8 +24,9 @@ unchanged in a real dev host (`test/derive.test.ts`).
 - `whySource: 'interpret'` always: a model's `why` is never passed off as the author's own words.
   `witness` is all `null`.
 - **Step ids hash the decision** (kind, path, question and option labels), not the answer and not
-  the code. Answering keeps a step's id; a replanned decision gets a new one
-  (`derive-assemble.test.ts`).
+  the code. Answering keeps a step's id; a replanned decision that changes those words gets a new
+  one (`derive-assemble.test.ts`). A replan that keeps the words keeps the id even when the code
+  changes, so the step's tutor transcript and progress follow it. T-22 should rule on that.
 - **Scaffold ranges** come from the derived file's own exported symbols: at most five,
   non-overlapping, widest through a clash. A file that exports nothing (usually the entry point)
   takes its own functions and multi-line variables instead, or scaffolded mode would hand over the
@@ -38,7 +39,9 @@ unchanged in a real dev host (`test/derive.test.ts`).
     plan does not carry the command, so T-20 has to know this.
   - **The import check is a correctness check, never a sandbox.** It keeps the plan's graph true
     and the app able to start. A Node built-in can still run a process, and the file runs as the
-    learner. What the learner is told about that is T-61.
+    learner. What the learner is told about that is T-61. It reads text, so a form it cannot see
+    is a limit, not a guarantee, and whether a built-in exists is asked of the editor's Node, which
+    may not be the Node the learner runs.
 
 ## The code lives outside the learner's folder
 
@@ -54,7 +57,9 @@ unchanged in a real dev host (`test/derive.test.ts`).
   by `DERIVE_PROMPT_VERSION` plus the full prompt.
   - It is re-judged by the same checks on every read, and only a reply that passed all of them is
     ever written: a code reply that fails repo-tour's parser, or a replan that cannot be merged, is
-    asked again on the next press (`derive-engine.test.ts`).
+    asked again on the next press (`derive-engine.test.ts`). A new file is judged only where it
+    comes in, against every file the finished tree will hold, so nothing later can refuse a reply
+    that was accepted.
   - It is what makes the engine deterministic: the second derivation of the same idea and answers
     makes **zero calls** (`derive-engine.test.ts`).
 
@@ -71,10 +76,15 @@ unchanged in a real dev host (`test/derive.test.ts`).
   It is what T-22's plan versions should keep on disk beside each `plan.json`.
 - **A stored state is a second door, and is re-checked.** `replanPlan` runs `unsoundStateReason`
   on the state it is handed. Every chapter and step goes back through the parser and has to come
-  out exactly as it went in, then the whole-plan rules, then the code. A tampered version on disk
-  is refused in a sentence before anything is asked or written (`derive-engine.test.ts`'s table of
-  tampered states). T-22 should still treat a version file it reads as untrusted, and never skip
-  this check by building a state by hand.
+  out exactly as it went in, then the whole-plan rules, then the code's bounds, then repo-tour's
+  reading of the stored files. A tampered version on disk is refused in a sentence before anything
+  is asked or written (`derive-engine.test.ts`'s table of tampered states). A kept file is judged
+  against what it declares, so a state the engine made is never refused for a file a later replan
+  added. T-22 should still treat a version file it reads as untrusted, and never skip this check by
+  building a state by hand.
+- **For T-22 to rule on:** a walked step kept against a rewritten decision can leave an app that
+  does not start while the plan says `ok`, and a replan's new steps can interleave chapters, so
+  Next can step back into an earlier chapter's group (`graph.ts`).
 - **What one press can cost is bounded twice:** one question is at most `MAX_DERIVE_PROMPT_CHARS`,
   and a press sends at most `DERIVE_LIMITS.maxCallsPerPress` questions. Past the second it stops and
   says so, and what was answered stays cached, so pressing again carries on (`derive-ask.test.ts`).

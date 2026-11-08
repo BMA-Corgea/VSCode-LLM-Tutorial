@@ -41,10 +41,11 @@ export const DERIVE_LIMITS = {
    */
   maxReplyChars: 200_000,
   /**
-   * How many questions one press may send. An outline and all its files is at most 31, and a
-   * walk's one answer re-derives at most what it reaches, so twice a whole plan is the honest
-   * ceiling. Past it the press stops and says so. What was answered stays cached, so pressing again
-   * carries on from there: the bound can cost a second press, and never the work.
+   * How many questions one press may send. The worst press a plan inside these limits can make is
+   * 59 (one outline, 29 replans, 29 files), so today this is a backstop no legal plan reaches, there
+   * for the day a limit moves. Past it the press stops and says so, and what was answered stays
+   * cached, so pressing again carries on from there. Characters are bounded only by arithmetic:
+   * this many questions at `MAX_DERIVE_PROMPT_CHARS` each. No press has its own character budget.
    */
   maxCallsPerPress: 64,
   /** "Simple shapes": a small app has a handful of parts. Six is room to spare. */

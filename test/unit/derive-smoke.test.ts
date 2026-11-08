@@ -97,22 +97,28 @@ const PY_TALLY = 'def total(xs):\n    return sum(xs)\n';
 const PY_MAIN = 'from core.tally import total\n\nprint(f"total: {total([1, 2, 3])}")\n';
 
 /** The fixture idea as a Python plan, derived through the real engine, with `files` as its code. */
-async function derivedPython(files: Record<string, string> = { 'core/tally.py': PY_TALLY, 'cli/main.py': PY_MAIN }, plannedExtra: string[] = []) {
+async function derivedPython(
+  files: Record<string, string> = { 'core/tally.py': PY_TALLY, 'cli/main.py': PY_MAIN },
+  plannedExtra: string[] = [],
+  options: { gs?: string; mainDependsOn?: string[] } = {},
+) {
   const outline = outlineWith((o) => {
     o['language'] = 'python';
     o['entry'] = 'cli/main.py';
     const steps = stepsOf(o);
     steps[1]!['path'] = 'core/tally.py';
     steps[3]!['path'] = 'cli/main.py';
-    steps[3]!['dependsOn'] = ['cli', 'core/tally.py'];
+    steps[3]!['dependsOn'] = options.mainDependsOn ?? ['cli', 'core/tally.py'];
     for (const p of plannedExtra) {
       const chapter = p.split('/')[0]!;
       steps.splice(steps.findIndex((st) => st['path'] === chapter) + 1, 0, { ...steps[1]!, chapter, path: p, question: `${p}?`, dependsOn: [chapter] });
     }
   });
+  const asked: string[] = [];
   const run: TutorCore['runLlm'] = (prompt) => {
     const line = prompt.split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
     const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
+    asked.push(input['task'] === 'outline' ? 'outline' : (input['node'] as { path: string }).path);
     const text = input['task'] === 'outline' ? outline : JSON.stringify({ content: files[(input['node'] as { path: string }).path] });
     return Promise.resolve({ text, inputTokens: 0, outputTokens: 0, usd: 0, metered: true });
   };
@@ -124,11 +130,21 @@ async function derivedPython(files: Record<string, string> = { 'core/tally.py': 
     availability: () => Promise.resolve({ ok: true, detail: 'stubbed provider probe' }),
   };
   const target = tempDir('derive-smoke-target-');
+  const gs = options.gs ?? tempDir('derive-smoke-gs-');
   const out = await derivePlan({ idea: FIXTURE_IDEA }, {
-    ledger, globalStorageRoot: tempDir('derive-smoke-gs-'), target, dialCore,
+    ledger, globalStorageRoot: gs, target, dialCore,
     settings: { core, provider: 'claude', model: 'claude-sonnet-5', timeoutMs: 5_000, run },
   });
-  return { out, target };
+  return { out, target, gs, asked };
+}
+
+/** Automated mode over every file step, as the walk does it. */
+function walked(out: Extract<Awaited<ReturnType<typeof derivePlan>>, { ok: true }>, target: string): void {
+  for (const step of out.plan.steps.filter((s) => s.kind === 'file')) {
+    const write = planWrite(step, 'automated', out.referenceRoot, target, out.plan, dialCore);
+    assert.ok(write !== null && !isRefusal(write), `${step.target.file}: ${write !== null && isRefusal(write) ? write.refused : 'nothing to write'}`);
+    writeTextAtomic(write.path, write.content, target);
+  }
 }
 
 suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
@@ -193,6 +209,44 @@ suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
     assert.equal(ran.stdout, 'total: 6\n');
   });
 
+  test('a Python reply refused for an import nothing else could see is not kept: the next press asks again and can succeed', async () => {
+    const bad = 'from core import tally\n\nprint(tally.total([1, 2, 3]))\n';
+    const init = '';
+    const first = await derivedPython({ 'core/tally.py': PY_TALLY, 'core/__init__.py': `${init}X = 1\n`, 'cli/main.py': bad }, ['core/__init__.py']);
+    assert.ok(!first.out.ok, 'the undeclared core/__init__.py must be refused');
+    assert.match(first.out.reason, /a file it does not depend on/);
+    const again = await derivedPython({ 'core/tally.py': PY_TALLY, 'core/__init__.py': `${init}X = 1\n`, 'cli/main.py': PY_MAIN }, ['core/__init__.py'], { gs: first.gs });
+    if (!again.out.ok) assert.fail(`a good model was given no chance, because the refused reply was served again: ${again.out.reason}`);
+    assert.ok(again.asked.includes('cli/main.py'), 'the refused file was asked again');
+  });
+
+  for (const [name, code, planned, mainDependsOn, extra] of [
+    ['`from folder import file`, declared', 'from core import tally\n\nprint(f"total: {tally.total([1, 2, 3])}")\n', [], undefined, {}],
+    ['`from . import file`, declared', 'from . import helper\n\nprint(f"total: {helper.add(1, 5)}")\n', ['cli/helper.py'], ['cli', 'core/tally.py', 'cli/helper.py'], { 'cli/helper.py': 'def add(a, b):\n    return a + b\n' }],
+    ['the word importlib in a string', 'print("this app does not use importlib")\nprint("total: 6")\n', [], undefined, {}],
+  ] as Array<[string, string, string[], string[] | undefined, Record<string, string>]>) {
+    test(`a Python entry point with ${name} is accepted, and starts`, async function () {
+      const { out, target } = await derivedPython({ 'core/tally.py': PY_TALLY, 'cli/main.py': code, ...extra }, planned, mainDependsOn === undefined ? {} : { mainDependsOn });
+      if (!out.ok) assert.fail(out.reason);
+      walked(out, target);
+      const ran = await runIt('python3', ['-m', 'cli.main'], target);
+      if (ran.missing === true) { this.skip(); return; }
+      assert.equal(ran.code, 0, `python3 -m cli.main exited ${String(ran.code)}: ${ran.stderr}`);
+      assert.match(ran.stdout, /total: 6/);
+    });
+  }
+
+  test('a file named like a standard-library module does not make `import json` beside it a wrong import', async function () {
+    const store = 'import json\n\ndef total(xs):\n    return json.loads(str(sum(xs)))\n';
+    const { out, target } = await derivedPython({ 'core/tally.py': store, 'core/json.py': 'def helper():\n    return 1\n', 'cli/main.py': PY_MAIN }, ['core/json.py']);
+    if (!out.ok) assert.fail(out.reason);
+    walked(out, target);
+    const ran = await runIt('python3', ['-m', 'cli.main'], target);
+    if (ran.missing === true) { this.skip(); return; }
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.equal(ran.stdout, 'total: 6\n');
+  });
+
   test('a Python plan builds and STARTS the way the prompt says: from the top folder, as a module', async function () {
     const { out, target } = await derivedPython();
     if (!out.ok) assert.fail(out.reason);
@@ -227,6 +281,13 @@ suite('the one walk takes a derived plan as it stands (AC2, AC-A2 a)', () => {
     ['importlib', [], 'import importlib\n\nm = importlib.import_module("core.tally")\nprint(m)\n', /computed import/],
     ['__import__', [], 'm = __import__("core.tally")\nprint(m)\n', /computed import/],
     ['an undeclared file of the app, by its full name', ['core/helper.py'], 'from core.helper import add\n\nprint(add(1, 2))\n', /a file it does not depend on/],
+    ['an undeclared file named as `from folder import file`', ['core/helper.py'], 'from core import helper\n\nprint(helper.add(1, 2))\n', /a file it does not depend on/],
+    ['an undeclared sibling named as `from folder import file`', ['cli/helper.py'], 'from cli import helper\n\nprint(helper.add(1, 2))\n', /a file it does not depend on/],
+    ['an undeclared file imported deeper than the file reader looks', ['core/helper.py'], 'def go():\n    if True:\n        try:\n            if True:\n                from core.helper import add\n                print(add(1, 2))\n        except ImportError:\n            pass\n\ngo()\n', /a file it does not depend on/],
+    ['a plain `import` of an undeclared file, deeper than the file reader looks', ['core/helper.py'], 'def go():\n    if True:\n        try:\n            if True:\n                import core.helper\n                print(core.helper.add(1, 2))\n        except ImportError:\n            pass\n\ngo()\n', /a file it does not depend on/],
+    ['a relative import that climbs above the top of the app', [], 'from ..core.tally import total\n\nprint(total([1, 2, 3]))\n', /climbs above/],
+    ['`from . import` of something that is not a file it depends on', [], 'from . import ghost\n\nprint(ghost)\n', /not one of its dependencies' files/],
+    ['__import__ behind a string that looks like a comment', [], 'print("#"); total = __import__("core.tally", fromlist=["total"]).total\nprint(total([1, 2]))\n', /computed import/],
   ] as Array<[string, string[], string, RegExp]>) {
     test(`a Python entry point with ${name} is refused`, async () => {
       const helper = 'def add(a, b):\n    return a + b\n';

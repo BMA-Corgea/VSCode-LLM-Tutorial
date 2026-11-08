@@ -311,6 +311,16 @@ suite('parseCodeReply — a file, within its bounds, with one trailing newline',
     });
   }
 
+  test('a runaway reply of blanks is refused at once: reading it must not stall the editor', function () {
+    this.timeout(120_000);
+    const reply = JSON.stringify({ content: `x${' '.repeat(199_900)}y` });
+    const started = Date.now();
+    const out = parseCodeReply(reply, 'core/x.mjs');
+    const took = Date.now() - started;
+    assert.ok(isDeriveRefusal(out), 'it is far past the file bound');
+    assert.ok(took < 3_000, `reading it took ${took} ms on the extension host's only thread`);
+  });
+
   test('a file that fills both bounds exactly is accepted: the bounds measure the file as it will be written', () => {
     const lines = Array.from({ length: DERIVE_LIMITS.maxFileLines }, () => 'x').join('\n');
     assert.ok(!isDeriveRefusal(parseCodeReply(JSON.stringify({ content: lines }), 'core/x.mjs')), 'exactly 150 lines');

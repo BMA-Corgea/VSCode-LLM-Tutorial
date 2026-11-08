@@ -692,7 +692,9 @@ export function parseCodeReply(textIn: unknown, filePath: string): { content: st
   // One trailing newline, always: two derivations of the same file must be the same bytes, and a
   // model that sometimes ends with "\n" and sometimes does not would otherwise differ by one. The
   // bounds are measured after this, on the file that will really be written.
-  const content = raw.trim().length === 0 ? raw : `${raw.replace(/\s+$/, '')}\n`;
+  // `trimEnd`, never a `\s+$` regex: that is quadratic on a long run of blanks not at the end, and
+  // this runs on the host's only thread before the file bound has been applied.
+  const content = raw.trim().length === 0 ? raw : `${raw.trimEnd()}\n`;
   const unsound = unsoundCodeText(content, filePath);
   return unsound === null ? { content } : refuse(unsound);
 }
