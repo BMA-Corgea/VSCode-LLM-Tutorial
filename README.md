@@ -80,6 +80,14 @@ plan lands at `<target>/.repo-tour/build/plan.json`, and a notification reports 
 step counts plus the cost: a real dollar amount and token count where the provider reports
 usage, or an honest *"this provider does not report usage"* where it does not.
 
+Reading the repository and working out the build order happen on a thread of their own, so the
+rest of the window keeps working however large the repository is. *Cancel* ends the build at once
+and leaves the folder you chose empty, so you can press *Build the plan* again; a `git` command
+or a read already running finishes on its own, unwatched. Nothing is written into the reference
+repository. Once the build is asking the model about each decision,
+*Cancel* takes effect only when that phase ends, so the model calls in that phase are still made
+and paid for.
+
 ---
 
 ## The walk

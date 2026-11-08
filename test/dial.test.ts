@@ -141,9 +141,10 @@ const SEED_BIN = Buffer.from([0x00, 0xff, 0xfe, 0x41, 0x0a]);
  *  `plan.reproduce` and never as a step (AC6's second half). */
 const NEVER_TAUGHT = ['data/seed.bin', 'data/seed.json', 'src/generated.ts'];
 
-/** `.repo-tour/` is on BOTH sides — the digest writes its own cache into the reference, the
- *  build writes plan/request/progress into the target — and `.git/` is the target's own
- *  history. Neither is the project, so neither is compared. */
+/** `.repo-tour/` can be on BOTH sides — a reference may carry repo-tour's own cache from its CLI
+ *  (a build no longer writes one there, T-30), and the build writes plan/request/progress into
+ *  the target — and `.git/` is the target's own history. Neither is the project, so neither is
+ *  compared. */
 const NOT_THE_PROJECT = new Set(['.repo-tour', '.git']);
 
 // ── the harness ────────────────────────────────────────────────────────────────────────────

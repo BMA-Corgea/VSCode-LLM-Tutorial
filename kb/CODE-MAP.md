@@ -116,9 +116,19 @@ will be overwritten.
 - Exports: BRIDGE_TOKEN_MAP, bridgeCss, pickerHtml, readSkin, writeSkin
 - Imports: (none)
 
+## src/start/build-worker.ts
+
+- Exports: (none)
+- Imports: (none)
+
 ## src/start/build.ts
 
-- Exports: GIT_KILL_GRACE_MS, GIT_TIMEOUT_MS, GitTimeoutError, buildDir, buildFromRequest, completionMessage, coreFor, costLine, detectUnsupportedLanguages, gitRunnerWith, gitTimedOut, gitTimeoutMs, languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, realGit, resolveRepo, resumeIfMarked, writeJsonAtomic
+- Exports: BuildPhaseCancelled, GIT_KILL_GRACE_MS, GIT_TIMEOUT_MS, GitTimeoutError, buildDir, buildFromRequest, completionMessage, coreFor, costLine, detectUnsupportedLanguages, gitRunnerWith, gitTimedOut, gitTimeoutMs, languageRefusalMessage, markerPath, phaseCancelled, readFreshMarker, readMarker, realFsWriteOps, realGit, resolveRepo, resumeIfMarked, writeJsonAtomic
+- Imports: (none)
+
+## src/start/off-thread.ts
+
+- Exports: BUILD_WORKER_HEAP_MB, offThreadCore
 - Imports: (none)
 
 ## src/start/panel.ts
@@ -139,6 +149,11 @@ will be overwritten.
 ## src/start/view.ts
 
 - Exports: SUBMIT_NOTES, renderStartHtml, startScript
+- Imports: (none)
+
+## src/start/worker-protocol.ts
+
+- Exports: BUILD_WORKER_RELATIVE
 - Imports: (none)
 
 ## src/tutor/ask.ts
