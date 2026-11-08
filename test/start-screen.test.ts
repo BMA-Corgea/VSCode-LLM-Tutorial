@@ -9,9 +9,10 @@
  * (`test/support/screen.ts`), in an Extension Development Host under xvfb.
  *
  * What is real: the page and its script, the host's message handling, `runBuild`,
- * `reportOutcome`, the progress notification and its Cancel button. What is not: the build's
- * BODY, which a test holds open, fails or lets be cancelled — the real one either finishes in
- * milliseconds or spends a model call, and tests never spend tokens.
+ * `reportOutcome`, the progress notification and its Cancel button. What is not, except in the
+ * one T-30 test that says so: the build's BODY, which a test holds open, fails or lets be cancelled
+ * — the real one either finishes in milliseconds or spends a model call, and tests never spend
+ * tokens. (T-30's real body ends at the language refusal, before any model.)
  */
 
 import * as assert from 'node:assert/strict';
@@ -21,11 +22,12 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../src/core.js';
 import { runBuild, type ExtensionApi } from '../src/extension.js';
-import type { BuildContext, BuildOutcome } from '../src/start/build.js';
+import { buildFromRequest, markerPath, type BuildContext, type BuildOutcome } from '../src/start/build.js';
 import { StartPanel, type StartPanelDeps } from '../src/start/panel.js';
 import type { BuildRequest } from '../src/start/request.js';
 import { SUBMIT_NOTES } from '../src/start/view.js';
 import { Screen, nextFrame, sleep, type Frame } from './support/screen.js';
+import { STALL_BOUND_MS } from './support/stall-bound.js';
 
 const TITLE = 'Build Tutorials: Start';
 const BOOKMARK = 'buildTutorials.currentBuild';
@@ -159,6 +161,26 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     return listed;
   }
 
+  /**
+   * Presses the real Cancel on the build's progress notification, as a toast or, when VS Code did
+   * not draw one, in the notification centre (T-30 review F1: driven, the notification was there
+   * with its button and no toast appeared). Returns when the press was made: the moment to measure from.
+   */
+  async function pressCancel(ms = 10_000): Promise<number> {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const attempted = Date.now();
+      if (await screen.pressNotificationButton('Build Tutorials', 'Cancel')) return attempted;
+      await vscode.commands.executeCommand('notifications.showList');
+      await sleep(100);
+      const pressed = await screen.pressNotificationButton('Build Tutorials', 'Cancel', 'centre');
+      await vscode.commands.executeCommand('notifications.hideList');
+      if (pressed) return attempted;
+      await sleep(100);
+    }
+    return assert.fail(`no Cancel button on the progress notification (saw ${JSON.stringify(await screen.notifications())})`);
+  }
+
   async function until(read: () => Promise<Snap>, ok: (s: Snap) => boolean, what: string, ms = 10_000): Promise<Snap> {
     const deadline = Date.now() + ms;
     let now = await read();
@@ -207,6 +229,63 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     assert.equal(builds, 1, 'one double-click started more than one build');
   });
 
+  test('T-30 AC3 + AC6: the real Cancel during a real read stops it within the bound, and the next press builds again', async () => {
+    // T-15's shape: Go only, 20,000 small files, so the real build ends at the language refusal and
+    // never reaches a model. The real build body here, unlike the tests below: the read is the point.
+    const repo = tmpDir('screen-t30-go-');
+    for (let d = 0; d < 200; d++) {
+      const dir = path.join(repo, `pkg${d}`);
+      fs.mkdirSync(dir);
+      for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(dir, `f${i}.go`), `package pkg${d}\n\nfunc F${i}() int { return ${i} }\n`);
+    }
+    const target = tmpDir('screen-t30-target-');
+    const outcomes: BuildOutcome[] = [];
+    try {
+      const request: BuildRequest = { idea: '', recreate: true, repo, target, dial: 'manual' };
+      const { page, read } = await open((r) => {
+        void runBuild(context, core, r, async (rr, ctx) => {
+          const outcome = await buildFromRequest(rr, ctx);
+          outcomes.push(outcome);
+          return outcome;
+        });
+      });
+      await fill(page, request);
+      await until(read, filled, 'the valid form shows no problems');
+      await press(page);
+      const building = await until(read, (s) => s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
+
+      // The real button, the moment it can be pressed: the read has only just begun.
+      const pressedAt = await pressCancel();
+      const cancelled = await until(read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back', 60_000);
+      const tookMs = Date.now() - pressedAt;
+      console.log(`T-30 AC3 measured: Cancel to the button back ${tookMs} ms`);
+
+      assert.ok(tookMs <= STALL_BOUND_MS, `the Cancel took ${tookMs} ms to land, past the bound of ${STALL_BOUND_MS} ms`);
+      assert.notDeepEqual(cancelled, building, 'the press has to change what is on screen');
+      assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
+      assert.equal(outcomes[0]?.reason, 'build cancelled while reading the repository');
+      const listed = await centre();
+      assert.ok(listed.some((n) => n.includes('build cancelled while reading the repository')), 'the notification says it was cancelled, and when');
+      assert.deepEqual(listed.filter((n) => n.includes('Cancel')), [], 'the progress notification and its Cancel button should be gone');
+      assert.equal(fs.existsSync(path.join(repo, '.repo-tour')), false, 'a cancelled read left a digest cache in the reference folder');
+      assert.equal(fs.existsSync(markerPath(target)), false);
+      assert.deepEqual(fs.readdirSync(target), [], 'a cancelled build has to leave the folder it was given empty, or the next press is refused');
+
+      // AC6: the repeat. Nothing edited, the same form, and a build that runs to its normal ending.
+      await press(page);
+      await until(read, (s) => s.note === SUBMIT_NOTES.building, 'the second press was accepted: a cancelled build must not block the next');
+      const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== SUBMIT_NOTES.building, 'the repeat ran to its ending', 60_000);
+      assert.equal(ended.note, SUBMIT_NOTES.failed);
+      assert.match(ended.problems[1] ?? '', /is go; the grammars repo-tour ships cover/);
+      assert.notDeepEqual(ended, cancelled, 'the two endings have to look different');
+      assert.equal(outcomes.length, 2);
+      assert.equal(outcomes[1]?.cancelled, undefined);
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+  });
+
   test('AC4: each way a build can END gives the button back and says how — through the real runBuild', async () => {
     // failed
     const failing = heldBuild();
@@ -230,13 +309,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await until(second.read, filled, 'valid form');
     await press(second.page);
     await until(second.read, (s) => s.note === SUBMIT_NOTES.building, 'building');
-    const deadline = Date.now() + 10_000;
-    let pressed = false;
-    while (!pressed && Date.now() < deadline) {
-      pressed = await screen.pressNotificationButton('Build Tutorials', 'Cancel');
-      if (!pressed) await sleep(100);
-    }
-    assert.ok(pressed, `no Cancel button on the progress notification (saw ${JSON.stringify(await screen.notifications())})`);
+    await pressCancel();
     const cancelled = await until(second.read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back');
     assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
 

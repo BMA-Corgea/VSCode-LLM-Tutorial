@@ -9,6 +9,9 @@
  * by `src/extension.ts`. That means the write-ahead marker, the language refusal, and the
  * full end-to-end build against a fixture repo (AC3, AC4, AC5) all run under PLAIN MOCHA —
  * no extension host needed to prove any of it, only real `fs`/`child_process`.
+ *
+ * In the extension itself, `digest` and `buildPlan` run on a worker thread (`off-thread.ts`, T-30),
+ * behind the same `BuildCore`. Everything in this file still runs on the host.
  */
 
 import { execFile } from 'node:child_process';
@@ -46,11 +49,42 @@ export interface InterpretPlanResultLike {
   cost: InterpretCostLike;
 }
 
+/**
+ * What a phase that runs somewhere else needs in order to be stopped while it runs (T-30). A core
+ * that runs its phases on the calling thread ignores it: nothing can run there until the phase
+ * returns, so there is nothing to poll with.
+ */
+export interface PhaseControl {
+  isCancelled?: () => boolean;
+}
+
 export interface BuildCore {
-  digest(root: string, opts?: { write?: boolean }): Promise<DigestResultLike>;
-  buildPlan(digestResult: DigestResultLike, opts: { root: string; witness?: boolean }): Promise<BuildPlanLike>;
+  digest(root: string, opts?: { write?: boolean; outDir?: string }, control?: PhaseControl): Promise<DigestResultLike>;
+  buildPlan(digestResult: DigestResultLike, opts: { root: string; witness?: boolean }, control?: PhaseControl): Promise<BuildPlanLike>;
   interpretPlan(plan: BuildPlanLike, digestResult: DigestResultLike, opts: Record<string, unknown>): Promise<InterpretPlanResultLike>;
   defaultCacheDir(): string;
+  /** Lets go of anything this core holds for the build that just ended. Absent on a core that
+   *  holds nothing. Called on every path out of `buildFromRequest`; must not throw. */
+  release?(): void;
+}
+
+/**
+ * What a phase rejects with when Cancel stopped it while it was running (T-30). Recognised by an own
+ * property and never by its words, for the reasons `gitTimedOut` gives: class identity does not
+ * survive esbuild's separate bundles, and a sentence can carry text from a repository.
+ */
+export class BuildPhaseCancelled extends Error {
+  readonly buildPhaseCancelled = true;
+  constructor() {
+    super('the build was cancelled while this phase was running');
+    this.name = 'BuildPhaseCancelled';
+  }
+}
+
+/** Whether a phase's rejection is Cancel having stopped it, rather than the phase failing. */
+export function phaseCancelled(err: unknown): boolean {
+  return typeof err === 'object' && err !== null
+    && (err as { buildPhaseCancelled?: unknown }).buildPhaseCancelled === true;
 }
 
 /** Builds a `BuildCore` from `CoreLoadResult.loaded` (src/core.ts) — the one cast site. */
@@ -480,6 +514,33 @@ function deleteMarker(target: string): void {
   } catch {
     /* already gone — fine */
   }
+  // And the folders the marker needed, when nothing else is in them (T-30). `validateTarget` refuses
+  // a folder with anything in it, so an empty `.repo-tour/build/` left by a cancel or a refusal
+  // turned the next press on the very same form into "not empty — pick an empty or new folder".
+  // `rmdir`, not `rm -r`: it can only ever remove a directory that is already empty. And only real
+  // directories: `rmdir` refuses a link at the end of a path but walks through one in the middle,
+  // so a `.repo-tour` that is a symlink would have this removing `build` wherever it points
+  // (T-30 security review, finding 5).
+  const build = buildDir(target);
+  const parent = path.dirname(build);
+  try {
+    if (!fs.lstatSync(parent).isDirectory() || !fs.lstatSync(build).isDirectory()) return;
+    fs.rmdirSync(build);
+    fs.rmdirSync(parent);
+  } catch {
+    /* not empty (a finished plan is in there), or already gone */
+  }
+}
+
+/**
+ * Where `digest` is told its cache lives: a path nothing creates. `digest` reads
+ * `<outDir>/inventory.json` whether or not it writes, and by default that is
+ * `<reference>/.repo-tour/inventory.json`, a file inside the repository being read: a symlink
+ * committed there is followed out of the tree, or to `/dev/zero` (T-30 security review, findings 1
+ * and 4). Nothing here uses what that read produces, so it is pointed at nothing.
+ */
+function noDigestCache(target: string): string {
+  return path.join(buildDir(target), 'no-digest-cache');
 }
 
 // ── the build itself ─────────────────────────────────────────────────────────────────────────
@@ -495,7 +556,9 @@ export interface BuildContext {
   onProgress?: (msg: string) => void;
   /** Fires once per phase transition, right after the marker is durably written — a test hook. */
   onPhase?: (phase: BuildPhase) => void;
-  /** Polled between phases; returning true stops the build (cancelled from the progress notification). */
+  /** Polled between phases, and while `digest` and `buildPlan` run on a worker (T-30); returning
+   *  true stops the build (cancelled from the progress notification). `interpretPlan` is not
+   *  stopped by it, only followed by it: see T-70. */
   isCancelled?: () => boolean;
   /** Swappable filesystem writes — a test makes `renameSync` fail exactly where a crash
    *  would hurt most and asserts what is left on disk. Defaults to `realFsWriteOps`. */
@@ -519,6 +582,14 @@ function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: B
 }
 
 export async function buildFromRequest(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
+  try {
+    return await runThePhases(request, ctx);
+  } finally {
+    ctx.core.release?.(); // a refusal after the digest, a failure, a cancel: nothing may keep a worker alive
+  }
+}
+
+async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
   const target = request.target;
   const git = ctx.git ?? realGit;
   const marker: BuildMarker = { startedAt: new Date().toISOString(), phase: 'digest', request };
@@ -559,8 +630,14 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
   let digestResult: DigestResultLike;
   try {
     ctx.onProgress?.('reading the repository…');
-    digestResult = await ctx.core.digest(repoRoot, { write: true });
+    // `write: false` (T-30). With `true`, repo-tour ends the digest by writing some 20,000 files of
+    // cache into the REFERENCE repository, one `writeFileSync` at a time; a Cancel landing there
+    // leaves a set of files from two runs. Nothing in this extension reads that cache (every path
+    // it reads is under `<target>/.repo-tour/build/`), so the promise "Cancel leaves nothing
+    // half-written" is true here by there being nothing written.
+    digestResult = await ctx.core.digest(repoRoot, { write: false, outDir: noDigestCache(target) }, { isCancelled: ctx.isCancelled });
   } catch (err) {
+    if (phaseCancelled(err)) return cancel(target, 'while reading the repository');
     return fail(err);
   }
 
@@ -577,8 +654,9 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
   let plan: BuildPlanLike;
   try {
     ctx.onProgress?.('deriving the build order…');
-    plan = await ctx.core.buildPlan(digestResult, { root: repoRoot, witness: true });
+    plan = await ctx.core.buildPlan(digestResult, { root: repoRoot, witness: true }, { isCancelled: ctx.isCancelled });
   } catch (err) {
+    if (phaseCancelled(err)) return cancel(target, 'while deriving the build order');
     return fail(err);
   }
 
