@@ -7,10 +7,10 @@
  *   1. **The SERVER-rendered markup.** Does the page put the right source label under `why`,
  *      the verbatim "no history to show" line where a witness is missing, and an honest
  *      reason beside a disabled *Open the file* rather than a bare `disabled` — and does it
- *      escape every last plan-sourced string on the way. The one this ticket is most
- *      particular about is asserted STRUCTURALLY: the options list holds no `<button>` and
- *      no `<input>` at all, so "the alternatives are not selectable" is a fact about what
- *      exists rather than about an attribute one accident could remove.
+ *      escape every last plan-sourced string on the way. The options list is asserted
+ *      STRUCTURALLY: exactly one `<button>` per choosable road and none on the road the step
+ *      is on (T-21), so "this row cannot be pressed" is a fact about what exists rather than
+ *      about an attribute one accident could remove.
  *   2. **The REAL client script, executed** against a minimal hand-built fake DOM — no
  *      jsdom, just enough `document`/`window`/`acquireVsCodeApi` for this one script. Does
  *      the SHIPPED code actually post anything when a button is clicked, and actually write
@@ -40,11 +40,13 @@
  */
 
 import * as assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { DIALS } from '../../src/start/request.js';
 import { type SkinsModule } from '../../src/start/view.js';
 import type { CheckReport } from '../../src/dial/core.js';
 import { FALLBACK_DIAL, stepDial, type OptionLike, type PlanLike, type StepLike } from '../../src/walk/model.js';
-import {
+import { MAX_OPTION_ID,
   MAX_ASK_TEXT, NOTHING_TO_ASK_MESSAGE, handleStepMessage, parseStepMessage,
   type StepEffects, type StepViewState,
 } from '../../src/walk/step-protocol.js';
@@ -56,7 +58,7 @@ import {
   MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT,
   MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE,
   NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE,
-  SHAPE_NOTE_MESSAGE, T10_BADGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
+  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, PREPARING_MESSAGE,
@@ -206,6 +208,8 @@ function recordingEffects(): { effects: StepEffects; asked: string[] } {
     regenerateDetour: () => undefined,
     returnFromDetour: () => undefined,
     persistDial: () => undefined,
+    choose: () => undefined,
+    refuseStaleChoice: () => undefined,
     persistSkin: () => undefined,
     ask: (text) => { asked.push(text); },
     cancelAsk: () => undefined,
@@ -308,7 +312,7 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     assert.ok(!html.includes(FILE_MISSING_MESSAGE), 'and it does not claim a missing file');
   });
 
-  test('the alternatives are not selectable — nothing in the options list to select at all', () => {
+  test('every alternative is choosable — and the road the step is already on is not a control (T-21)', () => {
     const state = stateAt('st-4-symbol-render'); // three options: one taken, two alternatives
     const html = renderStepHtml(state, FAKE_SKINS);
     const list = optionsList(html);
@@ -319,48 +323,47 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
       assert.ok(list.includes(alt.label), `the alternative "${alt.label}" is still SHOWN`);
       assert.ok(list.includes(alt.consequence), 'with its consequence');
     }
-    assert.equal(occurrences(list, new RegExp(T10_BADGE, 'g')), alternatives.length, 'every alternative is badged, where the eye is');
-
-    // The guarantee itself: not a `disabled` attribute, which a later edit could drop by
-    // accident, but the absence of anything to click.
-    assert.ok(!/<button/i.test(list), 'no <button> anywhere inside the options list');
+    // T-21: one real control per alternative, carrying that alternative's own id — and NONE on the
+    // author's option, the road this step is on (a control that changes nothing is a dead one).
+    assert.equal(occurrences(list, /<button/g), alternatives.length, 'one control per alternative, and no more');
+    for (const alt of alternatives) assert.ok(list.includes(`data-option-id="${alt.id}">${CHOOSE_LABEL}</button>`), `"${alt.label}" is choosable`);
     assert.ok(!/<input/i.test(list), 'no <input> anywhere inside the options list');
 
     // …and page-wide, so a control cannot hide just outside the <ul>. The count is the point:
-    // it is what turns "the alternatives are not selectable" from a claim about one element
-    // into a claim about the whole document, and every ticket that adds a control has to come
-    // back here and say which one it added. T-6's is the tutor's *Ask*; T-7's is the detour's
+    // it is what turns "the only controls are these" from a claim about one element into a
+    // claim about the whole document, and every ticket that adds a control has to come back
+    // here and say which one it added. T-6's is the tutor's *Ask*; T-7's is the detour's
     // *Show me an unrelated example*, which is on EVERY step by design (the spec's "visible
     // always") and so is on this one.
     assert.equal(
       occurrences(html, /<button/g),
-      6,
-      'Previous, Open the file, Check my work, Next, Ask, Show me an unrelated example — and nothing else',
+      8,
+      'Previous, Open the file, Check my work, Next, Ask, Show me an unrelated example, and the two Choose this instead (T-21) — nothing else',
     );
     assert.equal(occurrences(html, /<input/g), 3, 'the three dial radios — and nothing else');
     assert.equal(occurrences(html, /<textarea/g), 1, 'the tutor\'s box, and only it');
 
     // T-5's reproduce offer, T-6's tutor and T-7's detour are the only things that add to that
-    // count, and none of them adds anything to the options list — the alternatives stay
-    // unselectable whatever else the page grows.
+    // count, and none of them adds anything to the options list — its only controls are the
+    // alternatives' own, whatever else the page grows.
     const withOffer = renderStepHtml(stateAt('st-4-symbol-render', { reproduce: { count: 3, done: false } }), FAKE_SKINS);
-    assert.equal(occurrences(withOffer, /<button/g), 7, 'the four actions, Copy them in, Ask, and the detour');
+    assert.equal(occurrences(withOffer, /<button/g), 9, 'the four actions, Copy them in, Ask, the detour, and the two choices');
     assert.equal(occurrences(withOffer, /<input/g), 3, 'and still only the dial radios');
-    assert.ok(!/<button/i.test(optionsList(withOffer)), 'and nothing selectable moved into the options list');
+    assert.equal(occurrences(optionsList(withOffer), /<button/g), 2, 'and nothing else moved into the options list');
 
     // While an ask is in flight the tutor SWAPS its control rather than adding one: *Ask* is
     // gone from the markup entirely and *Cancel* stands in its place, so the count does not
     // move and there is no pressable *Ask* on a page that already has a question with the
     // model (the same "never rendered beats disabled" argument the options list makes).
     const thinking = renderStepHtml(stateAt('st-4-symbol-render', { tutor: { thinking: true } }), FAKE_SKINS);
-    assert.equal(occurrences(thinking, /<button/g), 6, 'still six: Cancel took Ask\'s place, and the detour button is untouched');
+    assert.equal(occurrences(thinking, /<button/g), 8, 'still eight: Cancel took Ask\'s place, and the detour button is untouched');
 
     // T-7 swaps the same way, and the two swaps are independent: an example being written
     // takes the detour's own button away and puts its *Cancel* there, while *Ask* stays
     // exactly where it was. Six either way, which is the property — a page that grew a
     // control while another was in flight would be a page with two ways to spend money on it.
     const writing = renderStepHtml(stateAt('st-4-symbol-render', { detour: { generating: true } }), FAKE_SKINS);
-    assert.equal(occurrences(writing, /<button/g), 6, 'still six: the detour\'s Cancel took its own button\'s place');
+    assert.equal(occurrences(writing, /<button/g), 8, 'still eight: the detour\'s Cancel took its own button\'s place');
     const inDetour = renderStepHtml(
       stateAt('st-4-symbol-render', { detour: { generating: false, open: { stepId: 'st-4-symbol-render', title: 'Vending machine' } } }),
       FAKE_SKINS,
@@ -371,7 +374,7 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     // is the one state where a learner has an example in front of them and needs a way to ask
     // for a different one; without it the cache had no escape hatch at all. It says what it
     // costs, in `DETOUR_REGENERATE_HINT`, right under itself.
-    assert.equal(occurrences(inDetour, /<button/g), 7, 'Back to my build took the detour button\'s place, and Write a new example joined it');
+    assert.equal(occurrences(inDetour, /<button/g), 9, 'Back to my build took the detour button\'s place, and Write a new example joined it');
     assert.ok(inDetour.includes('id="btn-detour-regenerate"'), 'the regenerate control is really there');
     assert.ok(inDetour.includes(DETOUR_REGENERATE_HINT), 'and it says that it is not free');
 
@@ -381,10 +384,99 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
       stateAt('st-4-symbol-render', { detour: { generating: false, open: { stepId: 'st-2-file-parse', title: 'Vending machine' } } }),
       FAKE_SKINS,
     );
-    assert.equal(occurrences(elsewhere, /<button/g), 6, 'a detour open elsewhere offers the way out and nothing more');
+    assert.equal(occurrences(elsewhere, /<button/g), 8, 'a detour open elsewhere offers the way out and nothing more');
     assert.ok(!elsewhere.includes('id="btn-detour-regenerate"'));
     assert.ok(!thinking.includes('id="btn-tutor-ask"'), 'no Ask button anywhere while a question is in flight');
     assert.ok(thinking.includes('id="btn-tutor-cancel"'), 'and a Cancel that really exists');
+  });
+
+  test('the learner\'s road is the highlighted row, marked as theirs, with the line that says nothing else moved (T-21)', () => {
+    const state = stateAt('st-4-symbol-render');
+    const before = optionsList(renderStepHtml(state, FAKE_SKINS));
+    assert.ok(!before.includes(DIVERGED_NOTE), 'no divergence yet, no line');
+    state.step.decision.chosen = 'stream';
+    const list = optionsList(renderStepHtml(state, FAKE_SKINS) );
+    const rows = optionRows(renderStepHtml(state, FAKE_SKINS));
+    assert.deepEqual(rows.filter((r) => r.cls === 'option option-taken').map((r) => r.id), ['stream'], 'his choice is where the author\'s was');
+    assert.ok(list.includes(`<span class="badge badge-chosen">${CHOSEN_BADGE}</span>`), 'marked as his');
+    assert.ok(list.includes('data-option-id="author">'), 'the author\'s option is still there');
+    assert.ok(list.includes(`data-option-id="author">${CHOOSE_LABEL}</button>`), 'and choosable again — latest wins');
+    assert.ok(!list.includes(`data-option-id="stream">${CHOOSE_LABEL}</button>`), 'his own road is not a control');
+    assert.ok(renderStepHtml(state, FAKE_SKINS).includes(DIVERGED_NOTE), 'and the line says the rest of the walk has not changed');
+  });
+
+  test('a choice moves the repaint key — or the panel would never redraw it, and the press would be silent (T-15)', () => {
+    const state = stateAt('st-4-symbol-render');
+    const before = stepRenderKey(state, FAKE_SKINS);
+    state.step.decision.chosen = 'stream';
+    assert.notEqual(stepRenderKey(state, FAKE_SKINS), before);
+  });
+
+  test('a step with one option offers nothing to choose (AC6) — every real provider:none plan', () => {
+    const state = stateAt('st-1-shape-src');
+    assert.equal(state.step.decision.options.length, 1, 'the fixture step this test needs');
+    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), /<button/g), 0);
+  });
+
+  test('…even when that one option is NOT the marked road: a dead control is still a dead control (AC6, C10)', () => {
+    const state = stateAt('st-1-shape-src');
+    const { decision } = state.step;
+    decision.options = decision.options.map((o) => ({ ...o, taken: false }));
+    decision.authorChoice = '';
+    decision.chosen = null;
+    assert.deepEqual(optionRows(renderStepHtml(state, FAKE_SKINS)).map((r) => r.cls), ['option option-alt'], 'discriminates: the one option really is unmarked');
+    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), /<button/g), 0);
+  });
+
+  test('the words about the last press sit in the options section, above the rows — not under the dial (AC5, C8)', () => {
+    const html = renderStepHtml(stateAt('st-4-symbol-render', { choiceNote: 'That press was refused.' }), FAKE_SKINS);
+    const heading = html.indexOf('<h2>Options</h2>');
+    const note = html.indexOf('id="choice-note"');
+    const rows = html.indexOf('<ul class="options">');
+    assert.ok(heading >= 0 && heading < note && note < rows, 'between the Options heading and the first row');
+    assert.ok(/<div class="options-outcome" id="outcome-choice"><p class="options-refused" id="choice-note" role="note">That press was refused\.<\/p><\/div>/.test(html), 'inside the one region the page reveals');
+    assert.ok(!/<p class="write-note"/.test(html), 'not drawn a screen away, under the dial');
+  });
+
+  test('the words are escaped, and the region is absent when there is nothing to say', () => {
+    const hostile = renderStepHtml(stateAt('st-4-symbol-render', { choiceNote: '<img src=x onerror=alert(1)>' }), FAKE_SKINS);
+    assert.ok(!hostile.includes('<img src=x'), 'a note is text');
+    assert.ok(hostile.includes('&lt;img src=x'));
+    const quiet = renderStepHtml(stateAt('st-4-symbol-render'), FAKE_SKINS);
+    assert.ok(!quiet.includes('id="outcome-choice"'), 'nothing to say, no empty region to reserve room for');
+    assert.ok(!quiet.includes('id="choice-note"'));
+  });
+
+  test('the line about a divergence and the refusal share that region, so a press brings both into view (C8)', () => {
+    const state = stateAt('st-4-symbol-render', { choiceNote: 'Refused.' });
+    state.step.decision.chosen = 'stream';
+    const html = renderStepHtml(state, FAKE_SKINS);
+    const region = /<div class="options-outcome" id="outcome-choice">([\s\S]*?)<\/div><ul class="options">/.exec(html);
+    assert.ok(region, 'the region directly precedes the rows');
+    assert.ok(region[1]!.includes('Refused.'));
+    assert.ok(region[1]!.includes(escapeForHtml(DIVERGED_NOTE)));
+  });
+
+  test('a row whose id another row shares, or that a press could not carry, offers no control (C4, C6, S4)', () => {
+    const state = stateAt('st-4-symbol-render');
+    const long = 'x'.repeat(MAX_OPTION_ID);
+    const row = (id: unknown): OptionLike => ({ id, label: `road ${String(id).slice(0, 8)}`, consequence: 'c', taken: false } as OptionLike);
+    state.step.decision.options = [{ ...row('author'), taken: true }, row('dup'), row('dup'), row(`${long}x`), row(long), row('alt-1')];
+    const list = optionsList(renderStepHtml(state, FAKE_SKINS));
+    assert.equal(occurrences(list, /<button/g), 2, 'the row at the limit and the ordinary row, and no others');
+    assert.ok(list.includes(`data-option-id="${long}">${CHOOSE_LABEL}</button>`));
+    assert.ok(list.includes(`data-option-id="alt-1">${CHOOSE_LABEL}</button>`));
+  });
+
+  test('when `taken` and `authorChoice` disagree the page offers exactly what the session would take (C4, S3)', () => {
+    const state = stateAt('st-4-symbol-render');
+    const { decision } = state.step;
+    decision.options = decision.options.map((o) => ({ ...o, taken: o.id === 'stream' }));
+    decision.chosen = null; // `authorChoice` still names `author`
+    assert.deepEqual(optionRows(renderStepHtml(state, FAKE_SKINS)).filter((r) => r.cls === 'option option-taken').map((r) => r.id), ['stream']);
+    const list = optionsList(renderStepHtml(state, FAKE_SKINS));
+    assert.ok(list.includes(`data-option-id="author">${CHOOSE_LABEL}</button>`), 'the unmarked row is a real control');
+    assert.ok(!list.includes(`data-option-id="stream">${CHOOSE_LABEL}</button>`), 'the marked row is not');
   });
 
   test('the dial renders exactly three radios with the step\'s own override checked', () => {
@@ -478,7 +570,7 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     const list = optionsList(renderStepHtml(state, FAKE_SKINS));
     assert.ok(list.includes(`<span class="badge badge-taken">${AUTHOR_BADGE}</span>`), 'the badge comes back');
     assert.ok(list.includes('Split the tokenizer into its own module'), 'beside the plan\'s own label');
-    assert.equal(occurrences(list, new RegExp(T10_BADGE, 'g')), 1, 'and the one alternative is still badged for T-10');
+    assert.equal(occurrences(list, new RegExp(CHOOSE_LABEL, 'g')), 1, 'and the one alternative is choosable (T-21)');
   });
 
   test('the page renders the question and all four actions AC2 names', () => {
@@ -729,8 +821,8 @@ suite('renderStepHtml — every plan lookup is TOTAL: no throw from a render nob
 suite("renderStepHtml — the author's choice is marked from `taken` OR `authorChoice` (code review, finding 6)", () => {
   test('a plan with no `taken` anywhere still marks exactly one option — the one authorChoice names', () => {
     // Version skew, or a hand-edited plan. Without the fallback nothing is marked, every
-    // option wears a "coming with T-10" badge, and AC2 is silently unmet on a page that
-    // otherwise looks perfectly fine.
+    // option is offered as if none were the author's, and AC2 is silently unmet on a page
+    // that otherwise looks perfectly fine.
     const state = stateAt('st-4-symbol-render');
     const options = state.step.decision.options;
     assert.equal(options.length, 3, 'the fixture step this test needs');
@@ -741,8 +833,8 @@ suite("renderStepHtml — the author's choice is marked from `taken` OR `authorC
     const marked = rows.filter((r) => r.cls === 'option option-taken');
     assert.equal(marked.length, 1, 'exactly one option is marked');
     assert.equal(marked[0]!.id, options[1]!.id, 'and it is the one the plan named');
-    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), new RegExp(T10_BADGE, 'g')), 2,
-      'the other two are still badged for T-10');
+    assert.equal(occurrences(optionsList(renderStepHtml(state, FAKE_SKINS)), new RegExp(CHOOSE_LABEL, 'g')), 2,
+      'the other two are choosable (T-21)');
   });
 
   test('`taken` wins when the two fields disagree — one row marked, never two', () => {
@@ -764,7 +856,7 @@ suite("renderStepHtml — the author's choice is marked from `taken` OR `authorC
 
     const list = optionsList(renderStepHtml(state, FAKE_SKINS));
     assert.equal(occurrences(list, /option option-taken/g), 0, 'marking an arbitrary row would be a confident lie');
-    assert.equal(occurrences(list, new RegExp(T10_BADGE, 'g')), 3, 'so all three are honestly badged for T-10');
+    assert.equal(occurrences(list, new RegExp(CHOOSE_LABEL, 'g')), 3, 'so all three are honestly offered — none is marked as the road taken');
   });
 
   test('a non-string authorChoice marks nothing rather than matching an id that is also missing', () => {
@@ -827,6 +919,8 @@ class FakeElement {
 
 const ELEMENT_IDS = [
   'step-main', 'step-note', 'btn-prev', 'btn-open', 'btn-check', 'btn-next', 'btn-reproduce',
+  // T-21: the page's Choose this instead buttons; the tests that press one give it its option id.
+  'choose-0', 'choose-1', `choose-${MAX_OPTIONS_RENDERED - 1}`,
   'dial-manual', 'dial-scaffolded', 'dial-automated', 'skinpick',
   // T-6. `btn-tutor-cancel` is only on the page while an ask is in flight and
   // `btn-tutor-ask` only while one is not, so the tests that care delete whichever the page
@@ -941,6 +1035,25 @@ suite('the step panel\'s client script, actually executed against a fake DOM (AC
     // eslint-disable-next-line @typescript-eslint/no-implied-eval -- parse-only, see test/unit/page.test.ts
     assert.doesNotThrow(() => new Function(code));
     assert.ok(code.includes(stepScript()), 'the harness below runs the script the page really ships');
+  });
+
+  test('Choose this instead posts its option and the step this page was drawn for, which the parser keeps (T-21, AC2)', () => {
+    const dom = buildFakeDom();
+    dom.elements.get('choose-0')!.setAttribute('data-option-id', 'alt-1');
+    runScript(dom, stateAt('st-4-symbol-render'));
+    dom.elements.get('choose-0')!.dispatch('click');
+    assert.equal(dom.posted.length, 1, 'the press posts one message');
+    assert.deepEqual(dom.posted[0], { type: 'step:choose', payload: { optionId: 'alt-1', stepId: 'st-4-symbol-render' } });
+    assert.deepEqual(parseStepMessage(dom.posted[0]), { type: 'step:choose', payload: { optionId: 'alt-1', stepId: 'st-4-symbol-render' } });
+    assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, 'choice', 'the answer will be brought into view on the repaint');
+  });
+
+  test('the last control the list can draw is wired too: the script covers every row the cap allows (re-review R29)', () => {
+    const dom = buildFakeDom();
+    dom.elements.get(`choose-${MAX_OPTIONS_RENDERED - 1}`)!.setAttribute('data-option-id', 'the-last-road');
+    runScript(dom, stateAt('st-4-symbol-render'));
+    dom.elements.get(`choose-${MAX_OPTIONS_RENDERED - 1}`)!.dispatch('click');
+    assert.deepEqual(dom.posted, [{ type: 'step:choose', payload: { optionId: 'the-last-road', stepId: 'st-4-symbol-render' } }]);
   });
 
   test('each of the four buttons posts exactly the message parseStepMessage accepts for it', () => {
@@ -2237,6 +2350,8 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
       pair('state.shape contents', { shape: { signatures: ['export function f(): void {'], imports: [] } }, { shape: { signatures: ['export function g(): void {'], imports: [] } }),
       pair('state.writeNote appearing', {}, { writeNote: 'your version was kept' }),
       pair('state.writeNote changing', { writeNote: 'your version was kept' }, { writeNote: 'the reference file was written' }),
+      pair('state.choiceNote appearing (T-21: a refusal must repaint, or the press is silent)', {}, { choiceNote: 'That press was refused.' }),
+      pair('state.choiceNote changing (T-21, T-15: the second identical refusal must repaint too)', { choiceNote: 'That press was refused.' }, { choiceNote: 'That press was refused. Tried 2 times.' }),
       pair('state.reproduce appearing', {}, { reproduce: { count: 12, done: false } }),
       pair('state.reproduce count', { reproduce: { count: 12, done: false } }, { reproduce: { count: 3, done: false } }),
       pair('state.reproduce done', { reproduce: { count: 12, done: false } }, { reproduce: { count: 12, done: true } }),
@@ -2866,6 +2981,7 @@ suite('stepRenderKey — the sweep, by reflection, so a NEW field cannot slip pa
       check: { summary: 'every part is there: 1 export present', report: report({ symbols: [{ name: 'tokenize', kind: 'function', status: 'present' }] }) },
       shape: { signatures: ['export function f(): void {'], imports: ['import x from "y";'] },
       writeNote: 'the reference file was written',
+      choiceNote: 'That press was for a step you have since left, so nothing was recorded.',
       reproduce: { count: 4, done: false },
       transcript: [
         { role: 'user', content: 'why is this its own module?' },
@@ -3036,4 +3152,36 @@ suite('a detour refusal is drawn once (T-7 code review finding 5)', () => {
   function escapeRe(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
+});
+
+suite('T-21 AC7 — the promise that the options are not choosable is retired everywhere it was made', () => {
+  const ROOT = process.cwd();
+  const read = (rel: string): string => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+  const RETIRED = [/coming with T-10/i, /T10_BADGE/, /badge-t10/, /nothing in the DOM to select/, /nothing on this page is selectable/, /not selectable/];
+
+  for (const file of ['src/walk/step-view.ts', 'test/unit/walk-model.test.ts']) {
+    test(`${file} no longer says so`, () => {
+      const text = read(file);
+      assert.ok(text.length > 1000, `expected to read ${file}`);
+      for (const phrase of RETIRED) assert.ok(!phrase.test(text), `${file} still says ${phrase}`);
+    });
+  }
+
+  test('the page itself carries none of it, in its markup or in its CSS', () => {
+    const html = renderStepHtml(stateAt('st-4-symbol-render'), FAKE_SKINS);
+    assert.ok(html.includes('class="btn option-choose"'), 'discriminates: this is a page with choices on it');
+    for (const phrase of RETIRED) assert.ok(!phrase.test(html), `the page still says ${phrase}`);
+  });
+
+  test('the lesson keeps the history but no longer states it as the present', () => {
+    const lessons = read('kb/wiki/lessons.md');
+    assert.ok(/coming with T-10/.test(lessons), 'discriminates: the history is still told');
+    assert.ok(!/alternatives carry a "coming with T-10" label/.test(lessons), 'stated in the present tense');
+  });
+
+  test('the file header says what the list does now', () => {
+    const header = read('src/walk/step-view.ts').slice(0, 2600);
+    assert.ok(/Choose this[\s*]+instead/.test(header), 'the header describes the control');
+    assert.ok(!/does not let the learner pick/.test(header), 'and no longer says the opposite');
+  });
 });

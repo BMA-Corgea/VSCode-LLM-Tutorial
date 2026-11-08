@@ -96,11 +96,14 @@ the thing you got wrong is a tree that tells you nothing.
 **Current Step** is the panel beside it:
 
 - the **question** this step is really answering;
-- the **options** — the one the author chose, marked as such, and every alternative with its
-  consequence spelled out. Alternatives are *shown, not offered*: choosing one is divergence,
-  which arrives with T-10, so until then they carry that label and are not rendered as
-  controls at all. There is nothing in the page to click, which is a straighter answer than a
-  greyed-out button;
+- the **options** — the one the author chose, marked *What the author did*, and every
+  alternative with its consequence spelled out. Each alternative has a **Choose this instead**
+  button: press it and that option becomes the highlighted one, marked *Your choice*, and a line
+  above the list says the rest of the walk still follows the author — re-planning the steps after
+  this one from your choice is not built yet. Your choice is kept with your progress, so it
+  survives a reload; you can change it, or choose the author's option again, at any time. A press
+  the panel cannot take, such as one from a page for a step you have already left, records nothing
+  and says so above the list. A step with only one option offers nothing to choose;
 - the **why**, with its source named — *from the model, reading the code*, *from the author's
   own comment*, or *not inferable from the source*. You always know whether you are reading
   the author or an inference about them;

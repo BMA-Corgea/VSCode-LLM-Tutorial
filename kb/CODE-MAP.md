@@ -93,7 +93,7 @@ will be overwritten.
 
 ## src/extension.ts
 
-- Exports: activate, deactivate, resumeOnActivate
+- Exports: activate, deactivate, resumeOnActivate, runBuild
 - Imports: (none)
 
 ## src/publish/disclosure.ts
@@ -138,7 +138,7 @@ will be overwritten.
 
 ## src/start/view.ts
 
-- Exports: renderStartHtml, startScript
+- Exports: SUBMIT_NOTES, renderStartHtml, startScript
 - Imports: (none)
 
 ## src/tutor/ask.ts
@@ -168,7 +168,7 @@ will be overwritten.
 
 ## src/walk/model.ts
 
-- Exports: FALLBACK_DIAL, currentStep, emptyProgress, markDone, nextStepId, prevStepId, setCheck, setCurrent, setDial, statusText, stepDial, treeModel
+- Exports: FALLBACK_DIAL, MAX_OPTIONS_RENDERED, MAX_OPTION_ID, currentStep, emptyProgress, isOptionKey, markDone, nextStepId, optionsTable, prevStepId, setCheck, setChosen, setCurrent, setDial, statusText, stepDial, treeModel, withChosen
 - Imports: (none)
 
 ## src/walk/paths.ts
@@ -178,7 +178,7 @@ will be overwritten.
 
 ## src/walk/session.ts
 
-- Exports: WalkSession
+- Exports: CHOICE_ALREADY_TAKEN, CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, WalkSession, choiceRefusalText
 - Imports: (none)
 
 ## src/walk/status.ts
@@ -198,7 +198,7 @@ will be overwritten.
 
 ## src/walk/step-view.ts
 
-- Exports: ASK_BUTTON_LABEL, ASK_PLACEHOLDER, AUTHOR_BADGE, CANCEL_BUTTON_LABEL, CHECK_HEADING, CHECK_PARSE_MESSAGE, CLEAR_BUTTON_LABEL, DETOUR_BACK_LABEL, DETOUR_BUTTON_LABEL, DETOUR_REGENERATE_HINT, DETOUR_REGENERATE_LABEL, DETOUR_UNREACHABLE_MESSAGE, DETOUR_WAITING_MESSAGE, EXPORTS_HEADING, FILE_MISSING_MESSAGE, IMPORTS_HEADING, MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT, MAX_TURNS_RENDERED, NOTE_TURN_LABEL, NOT_TEXT_MESSAGE, NO_HISTORY_MESSAGE, PREPARING_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_HEADING, SHAPE_NOTE_MESSAGE, T10_BADGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE, TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, USER_TURN_LABEL, detourElsewhereMessage, listOmittedMessage, optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey, stepScript, turnsOmittedMessage
+- Exports: ASK_BUTTON_LABEL, ASK_PLACEHOLDER, AUTHOR_BADGE, CANCEL_BUTTON_LABEL, CHECK_HEADING, CHECK_PARSE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, CLEAR_BUTTON_LABEL, DETOUR_BACK_LABEL, DETOUR_BUTTON_LABEL, DETOUR_REGENERATE_HINT, DETOUR_REGENERATE_LABEL, DETOUR_UNREACHABLE_MESSAGE, DETOUR_WAITING_MESSAGE, DIVERGED_NOTE, EXPORTS_HEADING, FILE_MISSING_MESSAGE, IMPORTS_HEADING, MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_PLAN_TEXT, MAX_REPLY_TEXT, MAX_TURNS_RENDERED, NOTE_TURN_LABEL, NOTICE_HEADING, NOT_TEXT_MESSAGE, NO_HISTORY_MESSAGE, PREPARING_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE, SHAPE_HEADING, SHAPE_NOTE_MESSAGE, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE, TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE, USER_TURN_LABEL, detourElsewhereMessage, listOmittedMessage, optionsOmittedMessage, renderNoticeHtml, renderStepHtml, reproduceOfferMessage, stepRenderKey, stepScript, turnsOmittedMessage
 - Imports: (none)
 
 ## src/walk/store.ts

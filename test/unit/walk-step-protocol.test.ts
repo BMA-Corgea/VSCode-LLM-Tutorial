@@ -36,7 +36,7 @@ import * as assert from 'node:assert/strict';
 import { DIALS, type Dial } from '../../src/start/request.js';
 import { currentStep, setCurrent, stepDial } from '../../src/walk/model.js';
 import {
-  MAX_ASK_TEXT, NOTHING_TO_ASK_MESSAGE, askTooLongMessage, handleStepMessage, parseStepMessage,
+  MAX_ASK_TEXT, MAX_OPTION_ID, NOTHING_TO_ASK_MESSAGE, askTooLongMessage, handleStepMessage, parseStepMessage,
   type StepEffects, type StepViewState,
 } from '../../src/walk/step-protocol.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
@@ -47,6 +47,10 @@ interface Calls {
   runCheck: number;
   reproduce: number;
   persistDial: Array<[string, Dial]>;
+  /** T-21: every choice that reached the session, as [step id, option id]. */
+  choose: Array<[string, string]>;
+  /** T-21: every press refused for coming from a page drawn for another step, by the host's own current step. */
+  refuseStaleChoice: string[];
   persistSkin: string[];
   /** T-6: every question that actually reached the session, exactly as it was handed over —
    *  which is how the two refusals below are proved to be refusals and not merely quiet. */
@@ -62,7 +66,7 @@ interface Calls {
 
 function noCalls(): Calls {
   return {
-    goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], persistSkin: [], ask: [],
+    goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], choose: [], refuseStaleChoice: [], persistSkin: [], ask: [],
     cancelAsk: 0, clearConversation: 0, startDetour: 0, regenerateDetour: 0, returnFromDetour: 0,
   };
 }
@@ -77,6 +81,8 @@ function fakeEffects(): { effects: StepEffects; calls: Calls } {
     runCheck: () => { calls.runCheck += 1; },
     reproduce: () => { calls.reproduce += 1; },
     persistDial: (stepId, dial) => { calls.persistDial.push([stepId, dial]); },
+    choose: (stepId, optionId) => { calls.choose.push([stepId, optionId]); },
+    refuseStaleChoice: (stepId) => { calls.refuseStaleChoice.push(stepId); },
     persistSkin: (name) => { calls.persistSkin.push(name); },
     // The one effect in this protocol that can spend money, and it is a recorder here like
     // every other — nothing in this suite has a provider anywhere near it.
@@ -262,6 +268,75 @@ suite('handleStepMessage — dial:set / skin:set (persist, reply with nothing)',
 });
 
 // ── the gate: nothing reaches handleStepMessage unparsed ────────────────────────────────────
+
+suite('step:choose — the learner takes a road (T-21)', () => {
+  const HERE = 'st-4-symbol-render';
+
+  function press(payload: unknown): Calls {
+    const { effects, calls } = fakeEffects();
+    const parsed = parseStepMessage({ type: 'step:choose', payload });
+    if (!parsed) throw new Error(`a press of ${JSON.stringify(payload)} did not parse`);
+    handleStepMessage(stateAt(HERE), parsed, effects);
+    return calls;
+  }
+
+  test('a choice from the page drawn for the current step reaches the session for that step, with nothing else', () => {
+    const calls = press({ optionId: 'stream', stepId: HERE });
+    assert.deepEqual(calls.choose, [[HERE, 'stream']]);
+    assert.deepEqual({ ...calls, choose: [] }, NOTHING);
+  });
+
+  test('a choice from a page drawn for ANOTHER step never reaches the session — it is refused, on the host\'s step', () => {
+    const calls = press({ optionId: 'stream', stepId: 'st-2-file-parse' });
+    assert.deepEqual(calls.choose, [], 'a stale page\'s press must not be recorded anywhere');
+    assert.deepEqual(calls.refuseStaleChoice, [HERE], 'answered on the step the host is on; the page\'s id goes no further');
+    assert.deepEqual({ ...calls, refuseStaleChoice: [] }, NOTHING);
+  });
+
+  for (const [label, stepId] of [
+    ['no step id at all', undefined],
+    ['a step id that is a number', 7],
+    ['a step id that is null', null],
+    ['a step id that is an object', { id: HERE }],
+    ['an empty step id', ''],
+  ] as const) {
+    test(`${label} is refused like a stale page — never waved through as a match`, () => {
+      const calls = press(stepId === undefined ? { optionId: 'stream' } : { optionId: 'stream', stepId });
+      assert.deepEqual(calls.choose, [], 'a press that cannot say which step it was for must not be recorded');
+      assert.deepEqual(calls.refuseStaleChoice, [HERE], 'and it is answered, not dropped');
+    });
+  }
+
+  test('the parser carries the step id for the host to compare, and calls anything but a string no step at all', () => {
+    assert.deepEqual(parseStepMessage({ type: 'step:choose', payload: { optionId: 'stream', stepId: 'st-1' } }),
+      { type: 'step:choose', payload: { optionId: 'stream', stepId: 'st-1' } });
+    assert.deepEqual(parseStepMessage({ type: 'step:choose', payload: { optionId: 'stream' } }),
+      { type: 'step:choose', payload: { optionId: 'stream', stepId: null } });
+    assert.deepEqual(parseStepMessage({ type: 'step:choose', payload: { optionId: 'stream', stepId: 7 } }),
+      { type: 'step:choose', payload: { optionId: 'stream', stepId: null } });
+  });
+
+  test('no payload at all is not a step:choose', () => {
+    assert.equal(parseStepMessage({ type: 'step:choose' }), null);
+  });
+
+  for (const [label, optionId] of [
+    ['an option id that is not a string', 7],
+    ['an empty option id', ''],
+    ['a missing option id', undefined],
+    ['an option id longer than any key', 'x'.repeat(MAX_OPTION_ID + 1)],
+  ] as const) {
+    test(`${label} reaches the session as no option at all, so the page is told why (AC2; re-review F3)`, () => {
+      const payload = optionId === undefined ? { stepId: HERE } : { optionId, stepId: HERE };
+      assert.deepEqual(parseStepMessage({ type: 'step:choose', payload }), { type: 'step:choose', payload: { optionId: '', stepId: HERE } });
+      assert.deepEqual(press(payload).choose, [[HERE, '']], 'the id that will not do is answered by the session, never used as a key');
+    });
+  }
+
+  test('the longest id a button can post still parses: the parser and the page share one limit (C6)', () => {
+    assert.ok(parseStepMessage({ type: 'step:choose', payload: { optionId: 'x'.repeat(MAX_OPTION_ID), stepId: HERE } }));
+  });
+});
 
 suite('parseStepMessage — malformed input is null, never a throw', () => {
   test('nothing at all, or the wrong kind of thing entirely', () => {

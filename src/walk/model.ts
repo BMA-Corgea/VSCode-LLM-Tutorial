@@ -29,6 +29,16 @@ export interface ProgressStep {
    *  *Check my work* here yet, which is different from a check that ran and failed — the
    *  tree renders those differently, and a learner deserves that distinction. */
   check?: { ok: boolean; at: string };
+  /**
+   * The option the LEARNER chose at this step, when they chose one (T-21, T-10 E1) — an option id
+   * of this step. Absent means the learner has not chosen, and the step stands as the plan has it.
+   *
+   * It lives HERE, in progress, not in `plan.json`: the plan is repo-tour's output and the walk
+   * never writes it (one writer per file — the foreman's ruling at T-21's gate). The session
+   * overlays it onto `decision.chosen` (`withChosen`) in the plan every consumer is handed, which
+   * is where the replan (T-22) reads it. Latest wins until T-22 lands.
+   */
+  chosen?: string;
 }
 
 /** `<target>/.repo-tour/build/progress.json` — schema §5.3 refinement notes, verbatim. */
@@ -140,6 +150,35 @@ export function setDial(progress: Progress, stepId: string, dial: Dial): Progres
   return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, dial } } };
 }
 
+export function setChosen(progress: Progress, stepId: string, optionId: string): Progress {
+  const existing = progress.steps[stepId];
+  return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, chosen: optionId } } };
+}
+
+/**
+ * The plan as the walk shows it: each step's `decision.chosen` is the learner's choice when they
+ * made one (T-21). Pure — a NEW plan; the original (repo-tour's, read from disk) is never mutated.
+ *
+ * A recorded choice the page could not show — a rebuilt plan whose options changed, an id past the
+ * window the page draws, an id two rows share — is IGNORED rather than shown: the page must never
+ * mark a road that is not on the table, and whatever is overlaid here is what the replan reads
+ * (T-22), so the screen and `decision.chosen` must agree. `optionsTable` is what decides. Steps and
+ * fields this function has no reason to touch are passed through by reference.
+ */
+export function withChosen(plan: PlanLike, progress: Progress): PlanLike {
+  if (!Array.isArray(plan.steps)) return plan;
+  let changed = false;
+  const steps = plan.steps.map((step) => {
+    const chosen = progress.steps[step.id]?.chosen;
+    if (typeof chosen !== 'string' || !step.decision || !Array.isArray(step.decision.options)) return step;
+    if (!optionsTable(step).keys.includes(chosen)) return step;
+    if (step.decision.chosen === chosen) return step;
+    changed = true;
+    return { ...step, decision: { ...step.decision, chosen } };
+  });
+  return changed ? { ...plan, steps } : plan;
+}
+
 export function setCheck(progress: Progress, stepId: string, ok: boolean, at: string): Progress {
   const existing = progress.steps[stepId];
   return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, check: { ok, at } } } };
@@ -158,6 +197,101 @@ export function setCheck(progress: Progress, stepId: string, ok: boolean, at: st
 export function stepDial(progress: Progress, stepId: string | null, globalDial?: Dial): Dial {
   const own = stepId ? progress.steps[stepId]?.dial : undefined;
   return own ?? globalDial ?? FALLBACK_DIAL;
+}
+
+// ── what a step's options list can show, decided once (T-21) ─────────────────────────────────
+
+/**
+ * How many options this panel will draw for one step.
+ *
+ * Measured, not guessed. A plan built with no interpretation gives every step exactly ONE
+ * option ("What the author did") — that is all 61 steps of the real sql-gauntlet plan. A fully
+ * interpreted step gives THREE: the author's own, plus the "exactly two OTHER reasonable ways"
+ * repo-tour's interpreter prompt asks for by name. Nothing repo-tour can legitimately produce
+ * goes past three, so 24 leaves eight times the headroom a real plan needs — while a hostile
+ * `alternatives` array (repo-tour's `parseAlternatives` keeps every entry the model emitted,
+ * unbounded) stops here instead of at ten thousand `<li>`s.
+ */
+export const MAX_OPTIONS_RENDERED = 24;
+
+/** The longest option id `step:choose` carries (T-21) — ids are keys, and a key longer than this is not one a plan carries. */
+export const MAX_OPTION_ID = 256;
+
+/** Whether a value is an option id the panel can carry: what the message parser accepts and what a button may post. One copy, so the page never draws a control whose press is dropped. */
+export function isOptionKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_OPTION_ID;
+}
+
+/** A step's options as the panel draws them. Rows are indices into `rows`; -1 means "no such row". */
+export interface OptionsTable {
+  /** What the page draws, in order: the first `MAX_OPTIONS_RENDERED`, with the author's option taking the last slot when a plan buries it past them. */
+  rows: OptionLike[];
+  /** How many of the plan's options are not among `rows`. */
+  omitted: number;
+  /** Each row's id when a press can name it — a key the message can carry, that no other row shares — and `null` when it cannot. */
+  keys: Array<string | null>;
+  /** The author's road. `taken` first, `authorChoice` when no option carries it. */
+  author: number;
+  /** The road this step is ON: the learner's when `decision.chosen` names a row, else the author's. */
+  on: number;
+  /** The step is on a road that is not the author's. */
+  diverged: boolean;
+  /** One per row: a press there can be taken, so the page draws a control and the session accepts it. */
+  choosable: boolean[];
+}
+
+/**
+ * "The road this step is on" and "what the page can show", decided ONCE (T-21, the code and
+ * security reviews' C4/C5/C6). The page draws from this, `WalkSession.choose` accepts by this, and
+ * `withChosen` overlays by this, all from the same overlaid step. Each used to work it out alone:
+ * the page read `taken` first where the session read `chosen ?? authorChoice`, the session accepted
+ * ids past the window the page draws, and the page drew buttons for ids the parser drops — three
+ * ways a control and its press could disagree, each found by pressing one.
+ *
+ * Which option is the AUTHOR'S is `taken` first and `authorChoice` only when `taken` answers nothing
+ * (T-4 code review, finding 6): a plan from an older builder can carry `authorChoice` with no
+ * `taken` anywhere. It is resolved to one row, so two rows can never both light up. The learner's
+ * choice sets `decision.chosen` and never `taken`. A row whose id a press could not name gets no
+ * control, and neither does any row when the step itself has no id the page could report.
+ *
+ * Total over whatever `plan.json` said: every field is read defensively, because the types above
+ * are a cast over `JSON.parse`.
+ */
+export function optionsTable(step: Pick<StepLike, 'id' | 'decision'>): OptionsTable {
+  const decision = step.decision as Partial<StepLike['decision']> | undefined;
+  const all = Array.isArray(decision?.options) ? decision.options : [];
+
+  const taken = all.findIndex((option) => option?.taken === true);
+  const authorChoice = decision?.authorChoice;
+  const authorInPlan = taken !== -1 || typeof authorChoice !== 'string' || authorChoice === ''
+    ? taken
+    : all.findIndex((option) => option?.id === authorChoice);
+
+  // AC2 outranks the cap: the option that must be marked takes the window's last slot rather than
+  // being one of the ones dropped.
+  const rows = all.slice(0, MAX_OPTIONS_RENDERED);
+  let author = authorInPlan;
+  if (authorInPlan >= MAX_OPTIONS_RENDERED) {
+    rows[MAX_OPTIONS_RENDERED - 1] = all[authorInPlan]!;
+    author = MAX_OPTIONS_RENDERED - 1;
+  }
+
+  const ids = rows.map((option) => option?.id);
+  const keys = ids.map((id) => (isOptionKey(id) && ids.indexOf(id) === ids.lastIndexOf(id) ? id : null));
+
+  const chosen = decision?.chosen;
+  const learners = isOptionKey(chosen) ? keys.indexOf(chosen) : -1;
+  const on = learners !== -1 ? learners : author;
+  const canPress = rows.length >= 2 && typeof step.id === 'string' && step.id !== '';
+  return {
+    rows,
+    omitted: all.length - rows.length,
+    keys,
+    author,
+    on,
+    diverged: learners !== -1 && learners !== author,
+    choosable: keys.map((key, row) => canPress && key !== null && row !== on),
+  };
 }
 
 // ── the decision tree (AC1) ─────────────────────────────────────────────────────────────────
