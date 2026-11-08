@@ -713,10 +713,11 @@ from the dev host — test it by installing the packaged `.vsix` into a throwawa
 ## A control that silently declines is a broken control (T-3, repo-tour)
 
 Inherited from repo-tour and repeatedly earned since: if something cannot act yet, it says so
-where the eye already is. T-4's alternatives carry a "coming with T-10" label and render no
+where the eye already is. T-4's alternatives carried a "coming with T-10" label and rendered no
 `<button>` or `<input>` at all — nothing in the DOM to click is a straighter answer than
-something greyed out. T-5 deleted the "arrives with T-5" placeholder the moment the real
-thing existed, because by then the placeholder was the lie.
+something greyed out. T-21 gave them real buttons and took the label away in the same change,
+as T-5 had deleted the "arrives with T-5" placeholder the moment the real thing existed: by then
+the placeholder was the lie.
 
 ## A polish audit compares consecutive states, not frames (T-16)
 

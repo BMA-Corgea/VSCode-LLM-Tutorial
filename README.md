@@ -99,10 +99,11 @@ the thing you got wrong is a tree that tells you nothing.
 - the **options** — the one the author chose, marked *What the author did*, and every
   alternative with its consequence spelled out. Each alternative has a **Choose this instead**
   button: press it and that option becomes the highlighted one, marked *Your choice*, and a line
-  under the list says the rest of the walk still follows the author — re-planning the steps after
+  above the list says the rest of the walk still follows the author — re-planning the steps after
   this one from your choice is not built yet. Your choice is kept with your progress, so it
-  survives a reload; you can change it, or choose the author's option again, at any time. A step
-  with only one option offers nothing to choose;
+  survives a reload; you can change it, or choose the author's option again, at any time. A press
+  the panel cannot take, such as one from a page for a step you have already left, records nothing
+  and says so above the list. A step with only one option offers nothing to choose;
 - the **why**, with its source named — *from the model, reading the code*, *from the author's
   own comment*, or *not inferable from the source*. You always know whether you are reading
   the author or an inference about them;
