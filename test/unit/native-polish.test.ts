@@ -169,6 +169,8 @@ suite('T-44 — under System the road a step is on reads as selected, not found'
     const base = declarationsFor(css(), '.option-taken');
     assert.match(base, /background:var\(--hl\)/, 'the rule a named skin still uses');
     assert.match(base, /border-color:var\(--accent\)/, 'the marked row keeps its edge whichever skin draws it');
+  });
+});
 
 // ── T-43 ──────────────────────────────────────────────────────────────────────────────────
 
