@@ -26,6 +26,8 @@ import { stepDial } from '../../src/walk/model.js';
 import type { StepViewState } from '../../src/walk/step-protocol.js';
 import { renderNoticeHtml, renderStepHtml, stepRenderKey } from '../../src/walk/step-view.js';
 import { renderNarratorHtml, type NarratorViewState } from '../../src/detour/narrator.js';
+import { renderStartHtml } from '../../src/start/view.js';
+import { emptyRequest } from '../../src/start/request.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const FAKE_SKINS: SkinsModule = {
@@ -239,6 +241,52 @@ suite('T-43 — the tutor box looks like an input, and Forget is away from Ask',
   test('F-09: Forget is still there only when there is a conversation, and never mid-ask', () => {
     assert.ok(!page().includes('id="btn-tutor-clear"'), 'no conversation, no control');
     assert.ok(!page({ transcript: [turn], tutor: { thinking: true } }).includes('id="btn-tutor-clear"'), 'never while an answer is landing');
+  });
+});
+
+// ── T-41 ──────────────────────────────────────────────────────────────────────────────────
+
+suite('T-41 — the skin picker is at the foot of the panel, not on the title row', () => {
+  const startPage = (): string => renderStartHtml({ request: emptyRequest(), problems: {}, skin: 'system', building: false, refusedInARow: 0 }, FAKE_SKINS);
+  const stepPage = (over: Partial<StepViewState> = {}): string => renderStepHtml(stateAt('st-4-symbol-render', over), FAKE_SKINS);
+
+  /** The id of every control in the page's `<main>`, in document order. */
+  function controlsInMain(html: string): string[] {
+    const main = /<main[\s\S]*<\/main>/.exec(html)?.[0] ?? '';
+    assert.ok(main.length > 0, 'the page has a <main>');
+    return [...main.matchAll(/<(?:button|select|textarea|input)\b[^>]*\bid="([^"]+)"/g)].map((m) => m[1]!);
+  }
+
+  for (const [surface, page, head] of [
+    ['the Current Step panel', stepPage, 'step-head'],
+    ['the Start form', startPage, 'start-head'],
+  ] as const) {
+    test(`${surface}: the picker is the last control in the page`, () => {
+      const controls = controlsInMain(page());
+      assert.ok(controls.length > 3, `discriminates: the page has other controls, found ${JSON.stringify(controls)}`);
+      assert.equal(controls.at(-1), 'skinpick');
+      assert.equal(controls.filter((id) => id === 'skinpick').length, 1, 'one picker, moved, not a second one added');
+    });
+
+    test(`${surface}: the title row holds only the heading`, () => {
+      const row = new RegExp(`<div class="${head}">([\\s\\S]*?)</div>`).exec(page())?.[1] ?? '';
+      assert.match(row.trim(), /^<h1>[^<]*<\/h1>$/, `the row is the heading and nothing else, found ${row}`);
+    });
+
+    test(`${surface}: the picker still has its label for assistive technology`, () => {
+      assert.match(page(), /<select class="skinpick" id="skinpick" name="skin" aria-label="Skin">/);
+    });
+  }
+
+  test('the Start form\'s picker is outside the form: inside it, a change would count as editing the request', () => {
+    const html = startPage();
+    assert.ok(html.indexOf('id="skinpick"') > html.indexOf('</form>'), 'a change inside the form posts form:changed and wipes the note under the button');
+  });
+
+  test('the heading takes the full width: no layout left over from sharing the row', () => {
+    const css = cssOf(stepPage());
+    assert.ok(!/max-width:70%/.test(declarationsFor(css, '.step-head h1')), 'the room made for the picker is gone');
+    assert.ok(!/display:flex/.test(declarationsFor(css, '.step-head')), 'and so is the row that shared it');
   });
 });
 
