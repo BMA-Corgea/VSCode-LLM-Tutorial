@@ -132,6 +132,12 @@ suite('T-44 — under System the road a step is on reads as selected, not found'
     assert.match(declarationsFor(css(), `${SYSTEM} .option-consequence`), /color:var\(--vscode-list-inactiveSelectionForeground,var\(--ink\)\)/);
   });
 
+  test('a badge on that row takes the editor\'s badge colours, so it stays readable on the new background', () => {
+    const decls = declarationsFor(css(), `${SYSTEM} .badge`);
+    assert.match(decls, /background:var\(--vscode-badge-background\)/, 'the accent on its translucent fill is 3.69:1 on the selection colour');
+    assert.match(decls, /color:var\(--vscode-badge-foreground\)/);
+  });
+
   test('a named skin keeps its own highlight and the blue edge stays for every skin', () => {
     const base = declarationsFor(css(), '.option-taken');
     assert.match(base, /background:var\(--hl\)/, 'the rule a named skin still uses');

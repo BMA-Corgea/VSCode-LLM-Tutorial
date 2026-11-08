@@ -726,6 +726,9 @@ main, section, .option { min-width:0; }
   outline:1px solid var(--vscode-contrastActiveBorder);
 }
 :root:not([data-theme]) .option-taken .option-consequence { color:var(--vscode-list-inactiveSelectionForeground, var(--ink)); }
+/* On that row a badge takes the editor's own badge colours: the accent on its translucent fill
+   measured 3.69:1 on the selection background in Dark Modern, and 4.03:1 in Light Modern. */
+:root:not([data-theme]) .option-taken .badge { background:var(--vscode-badge-background); color:var(--vscode-badge-foreground); }
 /* F-02: status roles. Under System, --kw and --str resolve to symbolIcon colours that every
    default theme sets to plain foreground, so a pass, a fail and every "news" line rendered as
    body text. The text keeps its colour; a MARKER (a left rule) carries the status, in VS Code's
