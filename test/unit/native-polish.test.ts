@@ -106,6 +106,39 @@ suite('T-16 F-03 — the taken option keeps its text readable on its highlight',
   });
 });
 
+// ── T-44 ──────────────────────────────────────────────────────────────────────────────────
+
+suite('T-44 — under System the road a step is on reads as selected, not found', () => {
+  const css = (): string => cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
+  const SYSTEM = ':root:not([data-theme]) .option-taken';
+
+  test('the row is drawn with the selection background and the foreground that goes with it', () => {
+    const decls = declarationsFor(css(), SYSTEM);
+    assert.match(decls, /(^|;)background:var\(--vscode-list-inactiveSelectionBackground\)(;|$)/, 'the selection colour, in the editor\'s own vocabulary');
+    assert.match(decls, /(^|;)color:var\(--vscode-list-inactiveSelectionForeground,var\(--ink\)\)(;|$)/, 'its foreground, or the body ink where a theme sets none');
+  });
+
+  test('its edge is the high-contrast theme\'s own, drawn only where a theme sets that colour', () => {
+    assert.match(declarationsFor(css(), SYSTEM), /(^|;)outline:1pxsolidvar\(--vscode-contrastActiveBorder\)(;|$)/, 'an unset variable makes this outline invalid, so dark and light draw none');
+  });
+
+  test('the search-match colour is gone from the System row, with no fallback that could bring it back', () => {
+    const decls = declarationsFor(css(), SYSTEM);
+    assert.ok(decls.length > 0, 'discriminates: the rule exists');
+    assert.ok(!decls.includes('--hl'), 'a theme with no selection colour marks the row with its edge, never the search colour');
+  });
+
+  test('the consequence line takes the same foreground, so a theme that sets one never mixes two', () => {
+    assert.match(declarationsFor(css(), `${SYSTEM} .option-consequence`), /color:var\(--vscode-list-inactiveSelectionForeground,var\(--ink\)\)/);
+  });
+
+  test('a named skin keeps its own highlight and the blue edge stays for every skin', () => {
+    const base = declarationsFor(css(), '.option-taken');
+    assert.match(base, /background:var\(--hl\)/, 'the rule a named skin still uses');
+    assert.match(base, /border-color:var\(--accent\)/, 'the marked row keeps its edge whichever skin draws it');
+  });
+});
+
 // ── F-04 ─────────────────────────────────────────────────────────────────────────────────────
 
 suite('T-16 F-04 — the narrator dims text with the theme, never with opacity', () => {

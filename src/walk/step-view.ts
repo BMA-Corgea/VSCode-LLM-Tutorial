@@ -709,12 +709,23 @@ main, section, .option { min-width:0; }
 }
 
 /* T-16, native polish. Additions only, so the rules above read as they did.
-   F-03: under System the taken option's highlight is the editor's translucent search-match
-   colour, and muted text on it measured 4.09:1 in Dark Modern. Inside the highlight, the
-   consequence takes the full ink colour; the badge, border and background still set the taken
-   option apart from the others. Unscoped on purpose: in a named skin, ink on the highlight is
-   only ever more contrast. Coupled to the option markup's class names. */
+   F-03: muted text on the marked option's highlight measured 4.09:1 in Dark Modern. Inside the
+   highlight, the consequence takes the full ink colour; the badge, border and background still
+   set the marked option apart from the others. Unscoped on purpose: in a named skin, ink on the
+   highlight is only ever more contrast. Coupled to the option markup's class names. */
 .option-taken .option-consequence { color:var(--ink); }
+/* T-44, the owner's call: under System the road this step is on reads as SELECTED, in the
+   editor's own words, not as a search hit, which is what the highlight above says. Its
+   background is the theme's inactive-selection colour, with the foreground that goes with it, and the outline is
+   the edge a high-contrast theme asks for (only those two themes set that colour, and an unset
+   one draws no outline). No fallback to the search colour: a theme with no selection colour
+   marks the row with its edge and the blue border instead. A named skin keeps its palette. */
+:root:not([data-theme]) .option-taken {
+  background:var(--vscode-list-inactiveSelectionBackground);
+  color:var(--vscode-list-inactiveSelectionForeground, var(--ink));
+  outline:1px solid var(--vscode-contrastActiveBorder);
+}
+:root:not([data-theme]) .option-taken .option-consequence { color:var(--vscode-list-inactiveSelectionForeground, var(--ink)); }
 /* F-02: status roles. Under System, --kw and --str resolve to symbolIcon colours that every
    default theme sets to plain foreground, so a pass, a fail and every "news" line rendered as
    body text. The text keeps its colour; a MARKER (a left rule) carries the status, in VS Code's
