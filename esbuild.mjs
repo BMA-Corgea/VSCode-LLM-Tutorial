@@ -4,7 +4,7 @@
  * `src/core.ts` — because it must stay loadable via dynamic `import()` for its
  * `import.meta.url` asset lookups (skins, grammar paths) to keep resolving correctly.
  *
- * Ten fixed entry points, plus one per `test/unit/*.test.ts` file, all CJS /
+ * Eleven fixed entry points, plus one per `test/unit/*.test.ts` file, all CJS /
  * platform:node, so a plain `require()` or dynamic `import()` of the output works the same
  * inside the extension host and outside it:
  *   - src/extension.ts        -> dist/extension.js            (external: vscode, repo-tour) — the extension
@@ -17,10 +17,12 @@
  *   - test/tutor.test.ts      -> dist/test/tutor.test.js       (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/detour.test.ts     -> dist/test/detour.test.js      (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/derive.test.ts     -> dist/test/derive.test.js      (external: vscode, repo-tour, mocha) — vscode-test
+ *   - test/start-screen.test.ts -> dist/test/screen/start-screen.test.js (external: vscode, repo-tour, mocha) — vscode-test's
+ *     "screen" host, the only one launched with a DevTools port (T-15; see .vscode-test.mjs)
  *   - test/unit/*.test.ts     -> dist/test/unit/*.js           (external: repo-tour, mocha)  — plain mocha, no vscode
  *
  * The unit/vscode-test split is a directory split on purpose: `.vscode-test.mjs`'s own
- * `files` glob is non-recursive (`dist/test/*.test.js`) so it picks up the five vscode-test
+ * `files` glob is non-recursive (`dist/test/*.test.js`) so it picks up the vscode-test
  * files here but never wanders into `dist/test/unit/`, and `npm run test:unit` points
  * `mocha` at exactly that subdirectory. A file that imports `vscode` belongs at the top
  * level of `test/`; a file that must never need an extension host belongs in `test/unit/`.
@@ -103,6 +105,12 @@ const builds = [
     ...shared,
     entryPoints: ['test/derive.test.ts'],
     outfile: 'dist/test/derive.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
+    entryPoints: ['test/start-screen.test.ts'],
+    outfile: 'dist/test/screen/start-screen.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
   },
   ...(unitEntryPoints.length > 0

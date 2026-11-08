@@ -20,6 +20,7 @@ import {
   type BuildContext, type BuildOutcome, type ResumeContext,
 } from './start/build.js';
 import type { BuildRequest } from './start/request.js';
+import type { BuildEnding } from './start/protocol.js';
 import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
 import { readSkin } from './skins.js';
 import { StepDecorator } from './walk/editor.js';
@@ -125,41 +126,93 @@ function buildContextFor(
 
 /**
  * A notification either way (so anyone not currently looking at the start screen — or, for
- * a resume, anyone who does not even have it open — still finds out); a REFUSAL or error
- * additionally goes `panel.reportProblem` when a panel is given, since AC3 asks for the
+ * a resume, anyone who does not even have it open — still finds out); a REFUSAL or error from a
+ * build the start screen started additionally goes under its repo field, since AC3 asks for the
  * reason "shown in the form", not only a transient toast. Every non-ok, non-cancelled reason
  * is attributed to the `repo` field: v1's actual failure modes here (a language refusal, a
  * clone failure) are always about the repo; a rarer internal error (e.g. a full disk during
  * the final write) reusing that same field is an acceptable simplification for v1 over
  * threading field-attribution through every stage of `build.ts`.
  */
-async function reportOutcome(outcome: BuildOutcome | undefined, panel?: StartPanel): Promise<void> {
-  // FIRST, and for every outcome including `undefined` (the learner cancelled): the button was
-  // disabled when the build started and nothing else brings it back (T-15 review finding 2).
-  panel?.buildFinished();
+function reportOutcome(outcome: BuildOutcome | undefined, fromStartScreen: boolean): void {
+  // FIRST, and for every outcome: the start screen's button was disabled when the build started
+  // and nothing else brings it back (T-15 review finding 2), and its note says how the build ended.
+  // Nothing here throws, so nothing below can be skipped by it.
+  // `StartPanel.buildFinished` reaches whichever start screen is open NOW — never the one captured
+  // when the build began, which the learner may have closed (that threw "Webview is disposed" here
+  // and swallowed everything below it).
+  if (fromStartScreen) {
+    // The reason first, then the ending: the note the ending writes points at the line under
+    // Reference repo, so that line must already say why. Posted the other way round, the page
+    // drew a frame with the note pointing at an empty line (driven 2026-11-05, a race the screen
+    // tests caught). Neither call can throw: both reach only the panel open NOW.
+    if (outcome && !outcome.ok && !outcome.cancelled) {
+      StartPanel.reportBuildProblem({ repo: outcome.reason ?? 'the build failed' });
+    }
+    StartPanel.buildFinished(buildEnding(outcome));
+  }
   if (!outcome) return;
+  // Not awaited, any of them (T-15, 2026-11-05). A message without buttons settles only when the
+  // person CLOSES it — so awaiting it inside `withProgress` kept "reading the repository…" and a
+  // live Cancel on screen after the build had ended, and held back everything after the build
+  // (clearing the bookmark; on success, opening the walk) until someone dismissed a toast.
   if (outcome.ok) {
-    await vscode.window.showInformationMessage(`Build Tutorials: ${completionMessage(outcome.plan!, outcome.cost!)}`);
+    void vscode.window.showInformationMessage(`Build Tutorials: ${completionMessage(outcome.plan!, outcome.cost!)}`);
   } else if (!outcome.cancelled) {
-    panel?.reportProblem({ repo: outcome.reason ?? 'the build failed' });
-    await vscode.window.showErrorMessage(`Build Tutorials: ${outcome.reason ?? 'the build failed'}`);
+    void vscode.window.showErrorMessage(`Build Tutorials: ${outcome.reason ?? 'the build failed'}`);
   } else {
-    await vscode.window.showInformationMessage(`Build Tutorials: ${outcome.reason ?? 'build cancelled'}`);
+    void vscode.window.showInformationMessage(`Build Tutorials: ${outcome.reason ?? 'build cancelled'}`);
   }
 }
 
-async function runBuild(context: vscode.ExtensionContext, core: CoreLoadResult, request: BuildRequest, panel: StartPanel): Promise<void> {
-  await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
-  const outcome = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
-    async (progress, token) => {
-      const built = await buildFromRequest(request, buildContextFor(context, core, progress, token));
-      await reportOutcome(built, panel);
-      return built;
-    },
-  );
+/** What the start screen's note says about a build that has ended. `undefined` is a dismissed resume. */
+function buildEnding(outcome: BuildOutcome | undefined): BuildEnding {
+  if (outcome?.ok) return 'built';
+  return !outcome || outcome.cancelled ? 'cancelled' : 'failed';
+}
+
+/**
+ * A build started from the start screen, from the press to the walk.
+ *
+ * `build` is the build itself, and only vscode-test passes anything else: the screen tests
+ * (`test/start-screen.test.ts`) drive this REAL function — the real progress notification and
+ * its Cancel button, the real `reportOutcome`, the real start screen — with a build body they can
+ * hold open, fail or watch being cancelled, because the real one either finishes in milliseconds
+ * or spends a model call.
+ */
+export async function runBuild(
+  context: vscode.ExtensionContext,
+  core: CoreLoadResult,
+  request: BuildRequest,
+  build: typeof buildFromRequest = buildFromRequest,
+): Promise<void> {
+  // The press was accepted the moment this runs, so the window believes a build is running — and
+  // ONLY `reportOutcome` lets it stop believing that. So every path below reaches it exactly once:
+  // a build body that throws, and the bookmark write before it, included. Either one escaping used
+  // to leave every start screen in the window at "Building…" until a reload (code review finding 1,
+  // security review finding 3). `buildFromRequest` itself reports failures rather than throwing,
+  // except where it cannot — the write-ahead marker failing to write to the target.
+  let outcome: BuildOutcome;
+  try {
+    await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
+    outcome = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
+      async (progress, token): Promise<BuildOutcome> => {
+        try {
+          return await build(request, buildContextFor(context, core, progress, token));
+        } catch (err) {
+          return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    );
+  } catch (err) {
+    outcome = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+  // After the progress has closed: the ending is told once, on screen and in a notification, and
+  // nothing waits on the person to dismiss anything.
+  reportOutcome(outcome, true);
   await forgetUnlessResumable(context, request.target);
-  if (outcome?.ok) await openOrOfferWalk(context, request.target);
+  if (outcome.ok) await openOrOfferWalk(context, request.target);
 }
 
 async function runStartCommand(context: vscode.ExtensionContext): Promise<void> {
@@ -172,11 +225,12 @@ async function runStartCommand(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
   const skins = core.loaded['skins'] as StartPanelDeps['skins'];
-  // `panel` is read inside `onSubmit`, never at the time this object literal is built — by
-  // the time a real form:submit can fire, `show()` below has long since returned it.
-  const panel: StartPanel = StartPanel.show(context, {
+  // No panel is handed to the build: its ending goes to whichever start screen is open when it
+  // ends (`StartPanel.buildFinished`), which may not be this one — the learner can close the tab
+  // and reopen it while the build runs (T-15).
+  StartPanel.show(context, {
     skins,
-    onSubmit: (request) => { void runBuild(context, core, request, panel); },
+    onSubmit: (request) => { void runBuild(context, core, request); },
     // A message from the webview that does not match any known shape is ignored, not acted
     // on and never thrown (T-3 rework, review finding 3) — this is where it gets said out
     // loud, so a page that has quietly stopped working is explainable rather than a mystery.
@@ -256,7 +310,7 @@ export async function resumeOnActivate(
     };
     return resumeIfMarked(target, resumeCtx);
   });
-  await reportOutcome(outcome);
+  reportOutcome(outcome, false);
   if (outcome?.ok) await openOrOfferWalk(context, target);
   // Resumed to completion, or Discarded (`resumeIfMarked` removes the marker either way):
   // nothing is left to resume, so the bookmark goes too. A dismissed prompt or a failed
