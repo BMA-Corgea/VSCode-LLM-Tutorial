@@ -9,6 +9,38 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## The mechanism a ticket names is a hypothesis: measure every phase, not the one it blames (T-30, 2026-11-08)
+
+T-30 was filed against `core.digest()`, with the source read and the fix shape written out: move the
+digest off the extension host's thread. Measured in the real host, on 20,000 TypeScript files,
+`buildPlan` — which the ticket never mentioned — stalled that thread for longer (25.5 s against 20.3 s).
+It had no `await` in it either, so it was the same defect.
+
+The ticket's own reproduction could not have shown this: its fixture was Go only, and a Go repository
+stops at the language refusal, so `buildPlan` never runs. The fix the ticket named would have shipped
+the same freeze under a different sentence on the notification, and only on the repositories that can
+succeed.
+
+- **Before designing around the phase a report blames, time all of them on input that reaches them
+  all.** The failing input in a bug report is the one that *fails*, and that is not the same as the
+  one that exercises the whole path.
+- **`async` on a signature says nothing.** `buildPlan` is declared `async` and never awaits. `grep`
+  for `await` in the body before believing a phase can yield.
+
+## Clean-up that stops at the file leaves the folder it made (T-30, 2026-11-08)
+
+A cancelled build deleted its write-ahead marker, and every check for the marker said the build had
+cleaned up. But writing the marker had created `.repo-tour/build/`, and the start screen refuses any
+folder with something in it. So the most ordinary thing to do after pressing Cancel — press *Build the
+plan* again on the same form — was refused with "not empty", by a build that believed it had left
+nothing behind. The Go-repository refusal had the same hole, and nobody had noticed: nothing failed,
+it just told you to go and find another folder.
+
+**Ask what the code that writes a file had to create first, and delete that too, when it is empty.**
+`rmdir` rather than `rm -r`, so the clean-up can only ever remove what is already empty. This is T-7's
+"leaves nothing behind needs a list of what nothing covers", one level down: the list had the files on
+it and not the directories.
+
 ## Read the screen, not the markup — `webview.html` never changes after a press (T-15, 2026-11-05)
 
 T-15's September fix was reviewed, corrected and merged with its pins green. Re-driven two months
