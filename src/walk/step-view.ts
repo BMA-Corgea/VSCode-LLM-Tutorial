@@ -716,19 +716,22 @@ main, section, .option { min-width:0; }
 .option-taken .option-consequence { color:var(--ink); }
 /* T-44, the owner's call: under System the road this step is on reads as SELECTED, in the
    editor's own words, not as a search hit, which is what the highlight above says. Its
-   background is the theme's inactive-selection colour, with the foreground that goes with it, and the outline is
-   the edge a high-contrast theme asks for (only those two themes set that colour, and an unset
-   one draws no outline). No fallback to the search colour: a theme with no selection colour
-   marks the row with its edge and the blue border instead. A named skin keeps its palette. */
+   background is the theme's inactive-selection colour, with the foreground that goes with it.
+   The outline is the edge a high-contrast theme asks for: both default high-contrast themes set
+   that colour and neither default dark nor light does, and an unset colour draws no outline. No
+   fallback to the search colour: a theme with no selection colour marks the row with its edge
+   and the blue border instead. A named skin keeps its palette. */
 :root:not([data-theme]) .option-taken {
   background:var(--vscode-list-inactiveSelectionBackground);
   color:var(--vscode-list-inactiveSelectionForeground, var(--ink));
   outline:1px solid var(--vscode-contrastActiveBorder);
 }
 :root:not([data-theme]) .option-taken .option-consequence { color:var(--vscode-list-inactiveSelectionForeground, var(--ink)); }
-/* On that row a badge takes the editor's own badge colours: the accent on its translucent fill
-   measured 3.69:1 on the selection background in Dark Modern, and 4.03:1 in Light Modern. */
-:root:not([data-theme]) .option-taken .badge { background:var(--vscode-badge-background); color:var(--vscode-badge-foreground); }
+/* On that row a badge takes the editor's own badge colours and edge, as VS Code's badges do: the
+   accent on its translucent fill measured 3.69:1 on the selection background in Dark Modern and
+   4.03:1 in Light Modern. The edge keeps its pill's shape in high contrast, where its fill is
+   the page's black. */
+:root:not([data-theme]) .option-taken .badge { background:var(--vscode-badge-background); color:var(--vscode-badge-foreground); outline:1px solid var(--vscode-contrastBorder); outline-offset:-1px; }
 /* F-02: status roles. Under System, --kw and --str resolve to symbolIcon colours that every
    default theme sets to plain foreground, so a pass, a fail and every "news" line rendered as
    body text. The text keeps its colour; a MARKER (a left rule) carries the status, in VS Code's

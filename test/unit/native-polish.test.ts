@@ -138,6 +138,33 @@ suite('T-44 — under System the road a step is on reads as selected, not found'
     assert.match(decls, /color:var\(--vscode-badge-foreground\)/);
   });
 
+  test('that badge keeps its shape in high contrast, with the theme\'s own edge', () => {
+    assert.match(declarationsFor(css(), `${SYSTEM} .badge`), /outline:1pxsolidvar\(--vscode-contrastBorder\)/, 'its fill is black on hc\'s black page');
+  });
+
+  test('those are the only rules that style the marked row, and none is inside an at-rule (re-review of T-44)', () => {
+    // The pins above read each rule's text, so they cannot see a later rule that overrides one, or a
+    // wrapper that stops one applying. This reads the sheet's own structure, by brace depth.
+    const sheet = cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
+    const rules: Array<{ selector: string; depth: number }> = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < sheet.length; i++) {
+      if (sheet[i] === '{') { rules.push({ selector: sheet.slice(start, i), depth }); depth += 1; start = i + 1; }
+      if (sheet[i] === '}') { depth -= 1; start = i + 1; }
+    }
+    assert.ok(rules.length > 20, 'discriminates: the sheet was read');
+    const marked = rules.filter((rule) => rule.selector.includes('.option-taken'));
+    assert.deepEqual(marked.map((rule) => rule.selector).sort(), [
+      '.option-taken',
+      '.option-taken.option-consequence',
+      ':root:not([data-theme]).option-taken',
+      ':root:not([data-theme]).option-taken.badge',
+      ':root:not([data-theme]).option-taken.option-consequence',
+    ].sort());
+    assert.deepEqual(marked.filter((rule) => rule.depth !== 0), [], 'a rule inside an @media or @supports may never apply');
+  });
+
   test('a named skin keeps its own highlight and the blue edge stays for every skin', () => {
     const base = declarationsFor(css(), '.option-taken');
     assert.match(base, /background:var\(--hl\)/, 'the rule a named skin still uses');
