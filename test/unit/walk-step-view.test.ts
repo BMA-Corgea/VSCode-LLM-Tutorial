@@ -151,12 +151,18 @@ function report(overrides: Partial<CheckReport> = {}): CheckReport {
   return { symbols: [], imports: [], parseErrors: 0, ok: true, ...overrides };
 }
 
+/** T-40: the markup with its decorative icons taken out: an empty, aria-hidden codicon says nothing,
+ *  so what an element says is unchanged by one (test/unit/codicons.test.ts pins the icons). */
+function withoutIcons(markup: string): string {
+  return markup.replace(/<span class="codicon [^"]*" aria-hidden="true"><\/span>/g, '');
+}
+
 /** The text inside one of the page's single-purpose paragraphs, so a test can assert what
  *  the line SAYS rather than merely that the phrase occurs somewhere on the page. */
 function paragraph(html: string, cls: string): string {
   const found = new RegExp(`<p class="${cls}">([\\s\\S]*?)</p>`).exec(html);
   assert.ok(found, `the page should render a .${cls} paragraph`);
-  return found[1]!;
+  return withoutIcons(found[1]!);
 }
 
 /** Just the `<ul class="options">…</ul>` slice — the region that must contain nothing
@@ -577,10 +583,10 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     const state = stateAt('st-3-symbol-handle');
     const html = renderStepHtml(state, FAKE_SKINS);
     assert.match(html, new RegExp(`<h1>${state.step.decision.question.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</h1>`));
-    assert.match(html, /id="btn-prev">Previous<\/button>/);
+    assert.match(withoutIcons(html), /id="btn-prev">Previous<\/button>/);
     assert.match(html, /id="btn-open">Open the file<\/button>/);
     assert.match(html, /id="btn-check">Check my work<\/button>/);
-    assert.match(html, /id="btn-next">Next<\/button>/);
+    assert.match(withoutIcons(html), /id="btn-next">Next<\/button>/);
     assert.match(html, /<select class="skinpick" id="skinpick"/, 'the skin picker rides along on this page too');
   });
 

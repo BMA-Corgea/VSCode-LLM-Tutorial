@@ -4,7 +4,7 @@
  * `src/core.ts` — because it must stay loadable via dynamic `import()` for its
  * `import.meta.url` asset lookups (skins, grammar paths) to keep resolving correctly.
  *
- * Sixteen fixed entry points, plus one per `test/unit/*.test.ts` file, all CJS /
+ * Eighteen fixed entry points, plus one per `test/unit/*.test.ts` file, all CJS /
  * platform:node, so a plain `require()` or dynamic `import()` of the output works the same
  * inside the extension host and outside it:
  *   - src/extension.ts        -> dist/extension.js            (external: vscode, repo-tour) — the extension
@@ -19,11 +19,13 @@
  *   - test/detour.test.ts     -> dist/test/detour.test.js      (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/derive.test.ts     -> dist/test/derive.test.js      (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/build-off-thread.test.ts -> dist/test/build-off-thread.test.js (external: vscode, repo-tour, mocha) — vscode-test
+ *   - test/codicons.test.ts   -> dist/test/codicons.test.js    (external: vscode, repo-tour, mocha) — vscode-test (T-40)
  *   - test/start-screen.test.ts -> dist/test/screen/start-screen.test.js (external: vscode, repo-tour, mocha) — vscode-test's
  *     "screen" host, the only one launched with a DevTools port (T-15; see .vscode-test.mjs)
  *   - test/derive-screen.test.ts -> dist/test/screen/derive-screen.test.js (external: vscode, repo-tour, mocha) — the same "screen" host (T-17)
  *   - test/step-screen.test.ts -> dist/test/screen/step-screen.test.js (external: vscode, repo-tour, mocha) — the same "screen" host (T-21)
  *   - test/step-outcomes-screen.test.ts -> dist/test/screen/step-outcomes-screen.test.js (external: vscode, repo-tour, mocha) — the same "screen" host (T-42)
+ *   - test/codicons-screen.test.ts -> dist/test/screen/codicons-screen.test.js (external: vscode, repo-tour, mocha) — the same "screen" host (T-40)
  *   - test/unit/*.test.ts     -> dist/test/unit/*.js           (external: repo-tour, mocha)  — plain mocha, no vscode
  *
  * The unit/vscode-test split is a directory split on purpose: `.vscode-test.mjs`'s own
@@ -126,6 +128,12 @@ const builds = [
   },
   {
     ...shared,
+    entryPoints: ['test/codicons.test.ts'],
+    outfile: 'dist/test/codicons.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
     entryPoints: ['test/start-screen.test.ts'],
     outfile: 'dist/test/screen/start-screen.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
@@ -146,6 +154,12 @@ const builds = [
     ...shared,
     entryPoints: ['test/step-outcomes-screen.test.ts'],
     outfile: 'dist/test/screen/step-outcomes-screen.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
+    entryPoints: ['test/codicons-screen.test.ts'],
+    outfile: 'dist/test/screen/codicons-screen.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
   },
   ...(unitEntryPoints.length > 0

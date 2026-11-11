@@ -418,9 +418,15 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     (vscode.window as { showOpenDialog: typeof original }).showOpenDialog = () =>
       new Promise<vscode.Uri[] | undefined>((resolve) => { closeDialog = resolve; });
     try {
-      const build = heldBuild();
+      // One HELD build per press (T-80). The second press used to run the first build's body again,
+      // whose ending had already settled, so the second build ended the moment it began: the page's
+      // own record showed "Building…" for 1 to 44 ms (driven 2026-11-10), while the polls, 50 ms
+      // apart on paper, came 51 to 113 ms apart under load. It was caught only by luck, failing 4 runs
+      // in 6 at load 13-18 on both VS Code 1.145.0 and 1.145.2. Held, it stays until this test ends it.
+      const first = heldBuild();
+      const second = heldBuild();
       let builds = 0;
-      const { page, read } = await open((r) => { builds += 1; void runBuild(context, core, r, build.build); });
+      const { page, read } = await open((r) => { builds += 1; void runBuild(context, core, r, (builds === 1 ? first : second).build); });
       await fill(page, validRequest());
       await until(read, filled, 'valid form');
       await press(page);
@@ -431,16 +437,77 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       while (!closeDialog && Date.now() < deadline) await sleep(50);
       assert.ok(closeDialog, 'Browse… never opened the (held) folder dialog');
 
-      build.end({ ok: false, reason: 'failed while the picker was open' });
+      first.end({ ok: false, reason: 'failed while the picker was open' });
       await until(read, (s) => s.button === 'Build the plan', 'the build ended while the dialog was open');
       closeDialog(undefined); // the person cancels the dialog AFTER the build has ended
       await sleep(300);
 
       assert.equal(panel!.getStateForTest().building, false, 'a dialog opened before the ending wrote "building" back');
+      const ended = await read();
+      assert.deepEqual({ button: ended.button, note: ended.note, reason: ended.problems[1] },
+        { button: 'Build the plan', note: SUBMIT_NOTES.failed, reason: 'failed while the picker was open' }, 'the screen after the dialog closed');
+      // And the host still knows how the build ended (T-80 review F1): a tab switch re-renders the page
+      // from the host's state, which the cancelled dialog's snapshot from before the ending used to replace.
+      await vscode.commands.executeCommand('workbench.action.files.newUntitledFile');
+      await sleep(500);
+      StartPanel.show(context, { skins, onSubmit: () => undefined });
+      const back = await until(read, (s) => s.button === 'Build the plan', 'the start tab is back');
+      assert.deepEqual({ note: back.note, reason: back.problems[1] }, { note: SUBMIT_NOTES.failed, reason: 'failed while the picker was open' },
+        'after the cancelled dialog, a re-render forgot that the build failed, and why');
+      const before = back;
       await press(page); // the form is still valid: this must start a build, not be told one is running
+      // `until`'s 10 s: the answer takes milliseconds on a quiet machine and under a second at load 20,
+      // so the deadline only ever bounds a press that is never answered at all.
       const next = await until(read, (s) => s.note === SUBMIT_NOTES.building || s.note === SUBMIT_NOTES.busy, 'the next press is answered');
       assert.equal(next.note, SUBMIT_NOTES.building, 'the window still believed a finished build was running');
-      assert.equal(builds, 2);
+      assert.notDeepEqual({ ...next, focus: '' }, { ...before, focus: '' }, 'the press left the screen as it was');
+      assert.equal(builds, 2, 'the second press did not start a second build');
+
+      // And that build ends like any other: the button comes back, and the screen says how and why.
+      second.end({ ok: false, reason: 'failed again, after the picker' });
+      const after = await until(read, (s) => s.button === 'Build the plan', 'the second build gives the button back');
+      assert.match(after.note, /^The build failed/);
+      assert.equal(after.problems[1], 'failed again, after the picker', "the screen kept the first build's reason");
+    } finally {
+      (vscode.window as { showOpenDialog: typeof original }).showOpenDialog = original;
+    }
+  });
+
+  test('a folder PICKED in a dialog left open across the END of a build never brings "Building…" back either (T-80 review)', async () => {
+    // The guard above, on the dialog's other way out. A cancelled dialog changes nothing, so nothing is
+    // written back at all (T-80 review F1); a pick changes the form, and that write must still read
+    // whether a build is running live, not from the snapshot taken before the dialog opened.
+    const original = vscode.window.showOpenDialog;
+    let closeDialog: ((v: vscode.Uri[] | undefined) => void) | undefined;
+    (vscode.window as { showOpenDialog: typeof original }).showOpenDialog = () =>
+      new Promise<vscode.Uri[] | undefined>((resolve) => { closeDialog = resolve; });
+    try {
+      const first = heldBuild();
+      const second = heldBuild();
+      let builds = 0;
+      const { page, read } = await open((r) => { builds += 1; void runBuild(context, core, r, (builds === 1 ? first : second).build); });
+      await fill(page, validRequest());
+      await until(read, filled, 'valid form');
+      await press(page);
+      await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+
+      await screen.reader(TITLE, `document.getElementById('browse-target').click()`, page, gone)();
+      const deadline = Date.now() + 5_000;
+      while (!closeDialog && Date.now() < deadline) await sleep(50);
+      assert.ok(closeDialog, 'Browse… never opened the (held) folder dialog');
+
+      first.end({ ok: false, reason: 'failed while the picker was open' });
+      await until(read, (s) => s.button === 'Build the plan', 'the build ended while the dialog was open');
+      const picked = tmpDir('screen-target-picked-');
+      closeDialog([vscode.Uri.file(picked)]); // the person picks a folder AFTER the build has ended
+      const shown = await until(read, (s) => s.fields[1] === picked, 'the picked folder is in the form');
+
+      assert.equal(panel!.getStateForTest().building, false, 'a dialog opened before the ending wrote "building" back');
+      await press(page);
+      const next = await until(read, (s) => s.note === SUBMIT_NOTES.building || s.note === SUBMIT_NOTES.busy, 'the next press is answered');
+      assert.equal(next.note, SUBMIT_NOTES.building, 'the window still believed a finished build was running');
+      assert.notDeepEqual({ ...next, focus: '' }, { ...shown, focus: '' }, 'the press left the screen as it was');
+      assert.equal(builds, 2, 'the press after the pick did not start a second build');
     } finally {
       (vscode.window as { showOpenDialog: typeof original }).showOpenDialog = original;
     }

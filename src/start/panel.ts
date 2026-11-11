@@ -14,6 +14,7 @@
 
 import * as vscode from 'vscode';
 import { readSkin, writeSkin } from '../skins.js';
+import { codiconsRoot, pageAssets } from '../webview/assets.js';
 import { emptyRequest, type BuildRequest, type RequestField } from './request.js';
 import {
   failedInARowAfter, handleStartMessage, parseInboundMessage, type BuildEnding, type OutboundMessage, type PanelState, type PickTarget,
@@ -63,6 +64,8 @@ export class StartPanel {
 
   private readonly panel: vscode.WebviewPanel;
   private readonly effects: StartEffects;
+  /** Where the packaged icon font is (T-40): the one folder this panel's webview may read. */
+  private readonly extensionUri: vscode.Uri;
   private state: PanelState;
   /** See `onMessage`: the channel gets one line about ignored messages, not one per message. */
   private loggedIgnoredMessage = false;
@@ -91,7 +94,12 @@ export class StartPanel {
     this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, VIEW_TITLE, vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: false,
+      // T-40: the packaged icon font's folder and nothing else. Left unset, as it was, VS Code
+      // grants the extension's whole install plus every open workspace folder (see
+      // `src/walk/step-panel.ts`); this page inlines everything except the font's stylesheet.
+      localResourceRoots: [codiconsRoot(context.extensionUri)],
     });
+    this.extensionUri = context.extensionUri;
     this.render();
 
     // `raw`, not `InboundMessage`: what arrives here is whatever the webview posted, and a
@@ -173,7 +181,9 @@ export class StartPanel {
   }
 
   private render(): void {
-    this.panel.webview.html = renderStartHtml({ ...this.state, building: StartPanel.running }, this.deps.skins);
+    this.panel.webview.html = renderStartHtml(
+      { ...this.state, building: StartPanel.running }, this.deps.skins, pageAssets(this.panel.webview, this.extensionUri),
+    );
   }
 
   /**
@@ -196,10 +206,17 @@ export class StartPanel {
       }
       return undefined;
     }
-    const { state, post } = await handleStartMessage({ ...this.state, building: StartPanel.running }, message, this.effects);
-    // Everything the message decided, EXCEPT whether a build is running: that is read live, after
-    // the await (see `running`).
-    this.state = { ...state, building: StartPanel.running };
+    const before: PanelState = { ...this.state, building: StartPanel.running };
+    const { state, post } = await handleStartMessage(before, message, this.effects);
+    // A message that changed nothing must not write back the snapshot it was handed (T-80 review F1).
+    // The one that awaits, a folder pick, can be open for as long as the person likes: a build that
+    // ended meanwhile wrote its ending and its reason into `this.state`, and a cancelled dialog's
+    // snapshot from before the ending put the screen back to never pressed on the next tab switch.
+    // Its reply is still sent: a press answered "busy" changes nothing here either.
+    //
+    // Everything else the message decided, EXCEPT whether a build is running: that is read live,
+    // after the await (see `running`).
+    if (state !== before) this.state = { ...state, building: StartPanel.running };
     if (post) void this.panel.webview.postMessage(post);
     return post;
   }

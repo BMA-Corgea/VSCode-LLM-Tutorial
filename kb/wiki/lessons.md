@@ -9,6 +9,26 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## In a webview, a linked stylesheet holds the script, and a late font moves what a reveal measured (T-40, 2026-11-10)
+
+T-40 added VS Code's icon font to every webview. Its unit tests, probe, mutants and its own real-host
+tests all passed; the blind review ran the FULL `screen` label and found 5-7 of the 22 existing tests
+failing. Two causes, neither visible to anything that measures a settled page:
+
+- **A `<link rel="stylesheet">` in `<head>` is script-blocking.** The parser builds the whole body, then
+  holds the page's one `<script>` until the sheet is fetched. For that window every button is in the
+  DOM with no listener, and every `webview.html` repaint opens the window again: a press on a freshly
+  drawn page was lost. Inline what the page needs under its nonce and fetch only what holds neither
+  the script nor the words (a font).
+- **A box sized by a glyph changes size when its font lands.** Until the font arrives an icon is as
+  wide as the fallback glyph; its arrival re-wrapped rows AFTER the page had scrolled a press's outcome
+  into view, and pushed it out of the panel. Give anything a late resource draws a fixed box.
+
+Before a webview change lands, run the full `screen` label, not only the new tests: the settled-page
+checks (probe, screenshots, `--grep`) cannot see a page whose controls are dead for 50 ms or whose
+layout moves after a reveal. A headless reproduction holds a resource back through Playwright's router
+(`.autodev/evidence/T-40/harness/late-and-lost.mjs`, the reviewer's method).
+
 ## A fix moves costs it did not look at, so a fix range needs its own blind read (T-17, 2026-11-08)
 
 Two reviews found the engine's defects, the fixes landed with pins, and every pin had been seen to
