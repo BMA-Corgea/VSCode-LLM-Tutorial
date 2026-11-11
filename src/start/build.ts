@@ -625,10 +625,19 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
     return { ok: false, reason };
   }
 
-  // T-72: a .gitattributes repo-tour would read without end is refused here, before the digest and
-  // before the marker, so there is nothing to resume (src/start/gitattributes.ts).
-  const hazard = await hazardousGitAttributes(repoRoot);
-  if (hazard) return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard) };
+  // T-72: a .gitattributes repo-tour would read without end is refused here, before the digest
+  // (src/start/gitattributes.ts). The walk stops at a Cancel, which ends the build the usual way.
+  ctx.onProgress?.('checking the repository…');
+  const hazard = await hazardousGitAttributes(repoRoot, ctx.isCancelled);
+  if (hazard === 'cancelled') return cancel(target, 'while checking the repository');
+  if (hazard) {
+    // A fresh build has written no marker yet. A Resume has: the one its crash left, often in this
+    // very read, before T-72. It goes too, as the language refusal's does. Resuming can never make
+    // this file safe, and a marker left here asks again on every reload and leaves the target
+    // "not empty" for the next press (T-72 code review, finding 1).
+    deleteMarker(target);
+    return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard) };
+  }
 
   runPhase(target, marker, 'digest', ctx);
   if (ctx.isCancelled?.()) return cancel(target, 'before reading the repository');

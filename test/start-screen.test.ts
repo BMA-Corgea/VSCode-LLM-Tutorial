@@ -363,8 +363,63 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await until(read, filled, 'valid form');
     await press(page);
     const refused = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the build is refused');
-    assert.match(refused.problems[1] ?? '', /^\.gitattributes is a link, which repo-tour would follow and might read without end: remove it/,
+    assert.match(refused.problems[1] ?? '', /^\.gitattributes is a link, which repo-tour would follow: remove it/,
       'the reason under Reference repo does not say what is wrong and what to do');
+  });
+
+  test('T-72: a name the reference repository chose never becomes a link in the refusal notification', async () => {
+    // T-72 security review, finding 1, re-driven here. The folder of a nested repository is named as a
+    // VS Code link to a command. Before the fix, the refusal quoted that name, the notification drew it
+    // as a link, and one click on it ran the command with the arguments the repository chose.
+    const ran: unknown[][] = [];
+    const probe = vscode.commands.registerCommand('t72.screen.probe', (...args: unknown[]) => { ran.push(args); });
+    try {
+      const repo = tmpDir('screen-t72-name-');
+      fs.mkdirSync(path.join(repo, '.git'));
+      fs.writeFileSync(path.join(repo, 'app.ts'), 'export const a = 1;\n');
+      const name = '[Remove the link for me](command:t72.screen.probe?%5B%22chosen-by-the-repository%22%5D)';
+      const nested = path.join(repo, name);
+      fs.mkdirSync(nested);
+      fs.writeFileSync(path.join(nested, '.git'), 'gitdir: ../.git/modules/x\n');
+      fs.symlinkSync('/dev/zero', path.join(nested, '.gitattributes'));
+      const request: BuildRequest = { idea: '', recreate: true, repo, target: tmpDir('screen-t72-name-target-'), dial: 'manual' };
+      const { page, read } = await open((r) => {
+        // SAFETY: as above, a digest that fails the test instead of reading the link.
+        void runBuild(context, core, r, (rr, ctx) =>
+          buildFromRequest(rr, { ...ctx, core: { ...ctx.core, digest: () => Promise.reject(new Error('T-72: the digest ran')) } }));
+      });
+      await fill(page, request);
+      await until(read, filled, 'valid form');
+      await press(page);
+      const refused = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the build is refused');
+      assert.equal(refused.problems[1],
+        `${name}/.gitattributes is a link, which repo-tour would follow: remove it from the reference repository, or build from a copy without it`,
+        'the line under Reference repo names the file as it is: the page sets it as text, so it needs nothing');
+
+      await vscode.commands.executeCommand('notifications.showList');
+      await sleep(300);
+      const bench = await screen.workbench();
+      const listed = await screen.listedNotifications();
+      const anchors = await screen.evaluate<Array<{ text: string | null; href: string | null }>>(bench,
+        `Array.from(document.querySelectorAll('.notifications-center .notification-list-item a')).map((a) => ({ text: a.textContent, href: a.getAttribute('href') }))`);
+      // What the learner would do: click the words that ask to be clicked, if they are a link.
+      await screen.evaluate<number>(bench, `(() => {
+        const links = Array.from(document.querySelectorAll('.notifications-center .notification-list-item a'))
+          .filter((a) => (a.getAttribute('href') || '').startsWith('command:t72.screen.probe'));
+        for (const a of links) a.click();
+        return links.length;
+      })()`);
+      await sleep(500);
+      await vscode.commands.executeCommand('notifications.hideList');
+      const commandLinks = anchors.filter((a) => (a.href ?? '').startsWith('command:'));
+      console.log(`T-72 refusal notification: ${commandLinks.length} command link(s) drawn, ${JSON.stringify(commandLinks)}; the probe ran ${ran.length} time(s), ${JSON.stringify(ran)}`);
+      assert.ok(listed.some((n) => n.includes('Remove the link for me') && n.includes('.gitattributes is a link')),
+        `the refusal notification is not in the notification centre: ${JSON.stringify(listed)}`);
+      assert.deepEqual(commandLinks, [], 'the refusal notification drew a command link that the repository chose');
+      assert.deepEqual(ran, [], 'one click on the refusal ran a command the repository named, with its arguments');
+    } finally {
+      probe.dispose();
+    }
   });
 
   test('AC5: closing the start tab mid-build never swallows the ending, and a reopened start screen shows it building', async () => {

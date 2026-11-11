@@ -11,9 +11,10 @@
  * host died.
  *
  * This side cannot change that read. It can refuse the repository first: visit the folders
- * repo-tour's walk would visit, by its rules, and look at each `.gitattributes` it would read. The
- * real fix (`lstat` and a bounded read, in repo-tour) is banked as a patch for the owner; it also
- * covers what this cannot see, a file swapped between this check and that read.
+ * repo-tour's walk would visit, by its rules and in its order, and look at each `.gitattributes` it
+ * would read. The real fix (`lstat`, then an open that follows no link and waits for no pipe, and a
+ * bounded read, in repo-tour) is banked as a patch for the owner; it also covers what this cannot
+ * see, a file swapped between this check and that read.
  *
  * Asynchronous, so a large repository's walk never holds the extension host's thread.
  */
@@ -23,7 +24,8 @@ import path from 'node:path';
 /**
  * The folders repo-tour's walk never enters: its `NEVER_DESCEND`, copied from
  * `../repo-tour/src/inventory.ts` (not exported there), so this check visits what that walk visits.
- * It also skips links and `.git` itself.
+ * It also skips links and `.git` itself. `test/unit/gitattributes.test.ts` reads repo-tour's list
+ * and fails when the two differ.
  */
 export const REPO_TOUR_NEVER_DESCEND: ReadonlySet<string> = new Set([
   'node_modules', '.venv', 'venv', '__pycache__', '.mypy_cache', '.pytest_cache',
@@ -43,26 +45,42 @@ export interface GitAttributesHazard {
 }
 
 /**
- * The first `.gitattributes` under `root` that repo-tour would read and must not, or `null`.
+ * The first `.gitattributes` under `root` that repo-tour would read and must not, or `null`. Or
+ * `'cancelled'`, when `isCancelled` returned true before the walk was done: it has cleared nothing.
  *
- * A folder is a repository root, as repo-tour's `maybeRepo` decides, when it holds an entry named
- * `.git` of any kind. Its `.gitattributes` is a hazard when it is a link, a pipe or a device, or a
- * regular file over `GITATTRIBUTES_MAX_BYTES`. One that is missing, unreadable or a folder is not:
- * repo-tour's read of it fails at once and it carries on (a pipe, by contrast, blocks that read).
+ * The walk is repo-tour's own (`walk` and `maybeRepo` in `../repo-tour/src/inventory.ts`), in its
+ * order. In each folder it first looks for `.git` by name, of any kind (a folder, a worktree's or a
+ * submodule's file, a link), as `maybeRepo` does with `lstat`. When there is one, it looks at that
+ * folder's `.gitattributes`. Only then does it list the folder. A folder it cannot list is not
+ * descended, as repo-tour's walk does not descend it either. Both checks come before the listing, as
+ * they do in `maybeRepo`, and both are by name, because repo-tour reads that file whether or not the
+ * folder can be listed. A folder that can be searched but not listed (mode 0311) has its
+ * `.gitattributes` read all the same, and a `.GIT` on a volume that ignores case answers to the name
+ * `.git` (T-72 reviews: the first version listed first, and missed both).
+ *
+ * A `.gitattributes` is a hazard when it is a link, a pipe or a device, or a regular file over
+ * `GITATTRIBUTES_MAX_BYTES`. One that is missing, unreadable or a folder is not: repo-tour's read of
+ * it fails at once and it carries on (a pipe, by contrast, blocks that read).
+ *
+ * `isCancelled` is asked before each folder, so a Cancel stops the walk within one folder's work.
  */
-export async function hazardousGitAttributes(root: string): Promise<GitAttributesHazard | null> {
+export async function hazardousGitAttributes(
+  root: string,
+  isCancelled?: () => boolean,
+): Promise<GitAttributesHazard | 'cancelled' | null> {
   const pending: string[] = [root];
   while (pending.length > 0) {
+    if (isCancelled?.()) return 'cancelled';
     const dir = pending.pop()!;
+    if (await named(path.join(dir, '.git'))) {
+      const hazard = await hazardOf(path.join(dir, '.gitattributes'));
+      if (hazard) return hazard;
+    }
     let entries: fs.Dirent[];
     try {
       entries = await fs.promises.readdir(dir, { withFileTypes: true });
     } catch {
-      continue; // unreadable: repo-tour's walk skips it the same way
-    }
-    if (entries.some((e) => e.name === '.git')) {
-      const hazard = await hazardOf(path.join(dir, '.gitattributes'));
-      if (hazard) return hazard;
+      continue; // not listed, so not descended, as in repo-tour's walk; its .gitattributes was looked at above
     }
     // A link is never entered: `readdir` reports one as a link, never as a directory, as repo-tour's
     // walk relies on too.
@@ -71,6 +89,16 @@ export async function hazardousGitAttributes(root: string): Promise<GitAttribute
     }
   }
   return null;
+}
+
+/** Whether anything at all has this name, a dangling link included: `maybeRepo`'s `lstat`. */
+async function named(file: string): Promise<boolean> {
+  try {
+    await fs.promises.lstat(file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function hazardOf(file: string): Promise<GitAttributesHazard | null> {
@@ -87,13 +115,20 @@ async function hazardOf(file: string): Promise<GitAttributesHazard | null> {
   return null;
 }
 
-/** The refusal, under Reference repo: which file, what is wrong with it, and what to do. */
+/**
+ * The refusal, under Reference repo: which file, what is wrong with it, and what to do.
+ *
+ * A link is "a link, which repo-tour would follow", and no more: one to `/dev/zero` is read without
+ * end, but one to a small file is not, so the words do not say that every link is. The size is
+ * rounded up, so the figure shown is never at or under the bound it is said to be over.
+ */
 export function gitAttributesRefusal(root: string, hazard: GitAttributesHazard): string {
   const where = path.relative(root, hazard.file).split(path.sep).join('/') || '.gitattributes';
+  const mb = (bytes: number): string => (Math.ceil((bytes / (1024 * 1024)) * 10) / 10).toFixed(1);
   const what = hazard.why === 'link'
-    ? 'is a link, which repo-tour would follow and might read without end'
+    ? 'is a link, which repo-tour would follow'
     : hazard.why === 'not-a-file'
       ? 'is not a regular file (a pipe or a device), which repo-tour might read without end'
-      : `is ${((hazard.bytes ?? 0) / (1024 * 1024)).toFixed(1)} MB, far too large to be a .gitattributes`;
+      : `is ${mb(hazard.bytes ?? 0)} MB, over the ${GITATTRIBUTES_MAX_BYTES / (1024 * 1024)} MB a .gitattributes may be`;
   return `${where} ${what}: remove it from the reference repository, or build from a copy without it`;
 }
