@@ -195,10 +195,17 @@ export class StartPanel {
       }
       return undefined;
     }
-    const { state, post } = await handleStartMessage({ ...this.state, building: StartPanel.running }, message, this.effects);
-    // Everything the message decided, EXCEPT whether a build is running: that is read live, after
-    // the await (see `running`).
-    this.state = { ...state, building: StartPanel.running };
+    const before: PanelState = { ...this.state, building: StartPanel.running };
+    const { state, post } = await handleStartMessage(before, message, this.effects);
+    // A message that changed nothing must not write back the snapshot it was handed (T-80 review F1).
+    // The one that awaits, a folder pick, can be open for as long as the person likes: a build that
+    // ended meanwhile wrote its ending and its reason into `this.state`, and a cancelled dialog's
+    // snapshot from before the ending put the screen back to never pressed on the next tab switch.
+    // Its reply is still sent: a press answered "busy" changes nothing here either.
+    //
+    // Everything else the message decided, EXCEPT whether a build is running: that is read live,
+    // after the await (see `running`).
+    if (state !== before) this.state = { ...state, building: StartPanel.running };
     if (post) void this.panel.webview.postMessage(post);
     return post;
   }
