@@ -59,9 +59,12 @@ jobs:
       - name: Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
+      # T-81: through the temp-folder check. It runs `npm test` in a fresh, private temp folder and
+      # fails naming every entry the run leaves there. Before T-81, every unit run left 390 folders
+      # and every screen run 34, and three agents filled a shared disk in one afternoon.
       - name: Test
         working-directory: VSCode-LLM-Tutorial
-        run: npm test
+        run: node scripts/check-tmp.mjs -- npm test
 
       # T-8 replaced `vsce package --no-dependencies` with `scripts/package.mjs`, which VENDORS
       # repo-tour: `npm pack` the sibling checkout, install the tarball into a staging copy, and
