@@ -142,6 +142,11 @@ function setup() {
 }
 
 const stepNamed = (plan: PlanLike, id: string): StepLike | undefined => plan.steps.find((s) => s.id === id);
+/** The tree a press that re-derived something wrote: a re-plan always writes one. */
+const treeOf = (out: { derivedRoot: string | null }): string => {
+  assert.ok(out.derivedRoot !== null, 'a press that re-derived code wrote a tree');
+  return out.derivedRoot;
+};
 /** A step as the walk sees it, minus its position. */
 const content = (s: StepLike | undefined): string => JSON.stringify(s === undefined ? null : Object.fromEntries(Object.entries(s).filter(([k]) => k !== 'ordinal')));
 
@@ -208,11 +213,11 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     const { plan, root, gs, target } = setup();
     const out = await divergePlan(input(plan, root, 's-parse'), depsFor(model().run, gs, target));
     if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
-    assert.equal(fs.readFileSync(path.join(out.derivedRoot, 'src/parse.ts'), 'utf8'), 'export const from = "src/parse.ts";\n');
-    assert.ok(fs.existsSync(path.join(out.derivedRoot, 'src/api/routes.ts')));
+    assert.equal(fs.readFileSync(path.join(treeOf(out), 'src/parse.ts'), 'utf8'), 'export const from = "src/parse.ts";\n');
+    assert.ok(fs.existsSync(path.join(treeOf(out), 'src/api/routes.ts')));
     const newest = (out.plan as { divergences?: Array<{ tree: string }> }).divergences?.at(-1);
-    assert.equal(fs.realpathSync(path.join(gs, 'derived', newest?.tree ?? 'nothing')), fs.realpathSync(out.derivedRoot), 'the plan names the tree its code is in');
-    assert.ok(!fs.existsSync(path.join(out.derivedRoot, 'src/store.ts')), 'a kept file is read from the repository');
+    assert.equal(fs.realpathSync(path.join(gs, 'derived', newest?.tree ?? 'nothing')), fs.realpathSync(treeOf(out)), 'the plan names the tree its code is in');
+    assert.ok(!fs.existsSync(path.join(treeOf(out), 'src/store.ts')), 'a kept file is read from the repository');
     const record = (out.plan as unknown as { divergences: Array<{ stepId: string; answer: string }> }).divergences;
     assert.deepEqual(record.map((r) => [r.stepId, r.answer]), [['s-parse', 'alt-1']]);
     assert.deepEqual(fs.readdirSync(target), [], 'the learner\'s folder is not touched');
@@ -225,7 +230,7 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
     assert.equal(content(stepNamed(out.plan, 's-routes')), content(stepNamed(plan, 's-routes')), 'a walked step is never re-derived');
     assert.deepEqual(out.staleDependents, ['s-routes']);
-    assert.equal(fs.readFileSync(path.join(out.derivedRoot, 'src/parse.ts'), 'utf8'), 'export const from = "src/parse.ts";\n', 'and the decision\'s own code still follows the answer');
+    assert.equal(fs.readFileSync(path.join(treeOf(out), 'src/parse.ts'), 'utf8'), 'export const from = "src/parse.ts";\n', 'and the decision\'s own code still follows the answer');
   });
 
   test('a decision at a symbol step re-derives its file: the step keeps its id and owns the file, and un-walked siblings go', async () => {
@@ -281,9 +286,9 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     if (!first.ok || !first.changed) assert.fail(first.ok ? 'nothing changed' : first.reason);
     const second = await divergePlan(input(first.plan, root, 's-render', 'alt-1', [], first.derivedRoot), depsFor(model().run, gs, target));
     if (!second.ok || !second.changed) assert.fail(second.ok ? 'nothing changed' : second.reason);
-    assert.ok(fs.existsSync(path.join(second.derivedRoot, 'src/parse.ts')), 'the first divergence\'s file is still there');
-    assert.ok(fs.existsSync(path.join(second.derivedRoot, 'src/view/render.ts')));
-    assert.ok(fs.existsSync(path.join(first.derivedRoot, 'src/parse.ts')), 'and the first tree is untouched');
+    assert.ok(fs.existsSync(path.join(treeOf(second), 'src/parse.ts')), 'the first divergence\'s file is still there');
+    assert.ok(fs.existsSync(path.join(treeOf(second), 'src/view/render.ts')));
+    assert.ok(fs.existsSync(path.join(treeOf(first), 'src/parse.ts')), 'and the first tree is untouched');
     assert.equal((second.plan as unknown as { divergences: unknown[] }).divergences.length, 2);
   });
 
@@ -426,6 +431,101 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.ok(fresh.dependsOn.includes('s-routes'), `it depends on routes.ts's own step; it names ${JSON.stringify(fresh.dependsOn)}`);
     assert.ok(!fresh.dependsOn.some((id) => id === 's-handle' || id === 's-status'), `and on none of that file's symbol steps: ${JSON.stringify(fresh.dependsOn)}`);
     assert.ok(fresh.dependsOn.includes('s-store'), 'and on the decision');
+  });
+
+  // T-22's code review, MF2: repo-tour breaks an import cycle at the file with the fewest unmet
+  // imports, so a file can be listed before a file it imports. Plan order is then not a topological order.
+  test('an import cycle: a file listed before the file it imports is still reached, and nothing is left depending on a removed step', async () => {
+    const root = tempDir('diverge-cycle-');
+    for (const [rel, text] of Object.entries({ 'src/d.ts': 'export const D = 1;\n', 'src/a.ts': "import { B } from './b';\nexport const A = (): number => B;\n", 'src/b.ts': "import { D } from './d';\nimport { A } from './a';\nexport const B = D + A();\n" })) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), text);
+    }
+    const cycle = (): PlanLike => ({ ...repoPlan(), chapters: [{ key: 'src', title: 'src', subtitle: 's', tierPath: 'src' }], steps: [
+      step('s-src', 1, 'src', 'shape', 'src'), step('s-d', 2, 'src', 'file', 'src/d.ts'),
+      step('s-a', 3, 'src', 'file', 'src/a.ts', ['s-b']), step('s-b', 4, 'src', 'file', 'src/b.ts', ['s-d', 's-a']),
+    ] });
+    const out = await divergePlan(input(cycle(), root, 's-d', 'alt-1', ['s-src']), depsFor(model().run, tempDir('diverge-gs-'), tempDir('diverge-target-')));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const ids = new Set(out.plan.steps.map((s) => s.id));
+    assert.deepEqual(out.plan.steps.flatMap((s) => s.dependsOn.filter((dep) => !ids.has(dep)).map((dep) => `${s.id} -> ${dep}`)), [], 'no step depends on one the re-plan removed');
+    assert.equal(stepNamed(out.plan, 's-a'), undefined, 'a.ts imports b.ts, which imports the decision: it is re-derived too');
+
+    const walkedA = await divergePlan(input(cycle(), root, 's-d', 'alt-1', ['s-src', 's-a']), depsFor(model().run, tempDir('diverge-gs-'), tempDir('diverge-target-')));
+    if (!walkedA.ok || !walkedA.changed) assert.fail(walkedA.ok ? 'nothing changed' : walkedA.reason);
+    assert.ok(walkedA.staleDependents.includes('s-a'), `walked, a.ts stood on the old road and is named: ${JSON.stringify(walkedA.staleDependents)}`);
+  });
+
+  // T-22's code review, SF2: the file is the unit, so a symbol step goes only with a file being rewritten.
+  test('a kept file keeps its symbol steps: a decision upstream of a walked file does not delete its un-walked symbols', async () => {
+    const { plan, root, gs, target } = setup();
+    const out = await divergePlan(input(plan, root, 's-parse', 'alt-1', ['s-src', 's-parse', 's-store', 's-api', 's-routes']), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(content(stepNamed(out.plan, 's-routes')), content(stepNamed(plan, 's-routes')), 'discriminates: routes.ts is walked and kept verbatim');
+    for (const id of ['s-handle', 's-status']) assert.equal(content(stepNamed(out.plan, id)), content(stepNamed(plan, id)), `${id} still describes the kept routes.ts, so it stays`);
+  });
+
+  // T-22's code review, MF3: at a symbol step D owns its file. Its file's own step, if nothing walked stands on it, goes with the file.
+  test('a symbol press whose file step is not walked leaves one file step for that file: D, standing where the file step stood', async () => {
+    const { plan, root, gs, target } = setup();
+    const out = await divergePlan(input(plan, root, 's-handle', 'alt-1', ['s-src', 's-parse', 's-store', 's-api']), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const onRoutes = out.plan.steps.filter((s) => s.target.file === 'src/api/routes.ts' && s.kind === 'file');
+    assert.deepEqual(onRoutes.map((s) => s.id), ['s-handle'], `one file step for routes.ts, and it is D: ${JSON.stringify(onRoutes.map((s) => s.id))}`);
+    assert.deepEqual(stepNamed(out.plan, 's-handle')?.dependsOn, ['s-parse'], 'D stands on what routes.ts\'s step stood on');
+    const ids = new Set(out.plan.steps.map((s) => s.id));
+    assert.deepEqual(out.plan.steps.flatMap((s) => s.dependsOn.filter((dep) => !ids.has(dep))), [], 'and nothing is left depending on the step that went');
+  });
+
+  // T-22's code review, MF1: "nothing follows" is about what is downstream, not about what is left to re-derive.
+  test('a chapter decision whose every dependent is walked lands a record naming them, and asks the model nothing', async () => {
+    const { plan, root, gs, target } = setup();
+    const m = model();
+    const walked = plan.steps.filter((s) => s.id !== 's-view' && s.id !== 's-docs').map((s) => s.id);
+    const out = await divergePlan(input(plan, root, 's-view', 'alt-1', walked), depsFor(m.run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing landed, and render.ts stood on this chapter' : out.reason);
+    assert.deepEqual(out.staleDependents, ['s-render']);
+    assert.equal(m.asked.length, 0, 'there is nothing to re-derive, so nothing is asked');
+    assert.equal(stepNamed(out.plan, 's-view')?.decision.chosen, 'alt-1', 'the choice is recorded on the plan');
+    const record = (out.plan['divergences'] as Array<{ stepId: string; staleDependents: string[]; replanned?: boolean }>).at(-1);
+    assert.deepEqual(record && { stepId: record.stepId, staleDependents: record.staleDependents, replanned: record.replanned }, { stepId: 's-view', staleDependents: ['s-render'], replanned: false });
+    for (const s of plan.steps.filter((x) => x.id !== 's-view')) assert.equal(content(stepNamed(out.plan, s.id)), content(s), `${s.id} is kept`);
+
+    const nothing = await divergePlan(input(repoPlan(), root, 's-docs', 'alt-1', walked), depsFor(model().run, gs, target));
+    assert.ok(nothing.ok && !nothing.changed, 'a chapter nothing stands on still changes nothing');
+  });
+
+  // T-22's code review, SF8: each file keeps its own language; a NEW file takes the decision's.
+  test('a TypeScript decision whose reach holds a JavaScript file re-plans it as JavaScript, and a new JavaScript file is refused', async () => {
+    const { root, gs, target } = setup();
+    fs.renameSync(path.join(root, 'src/api/routes.ts'), path.join(root, 'src/api/routes.js'));
+    const mixed = (): PlanLike => {
+      const p = repoPlan();
+      p.steps = p.steps.filter((s) => s.kind !== 'symbol').map((s) => (s.target.file === 'src/api/routes.ts' ? { ...s, target: { file: 'src/api/routes.js' } } : s));
+      return p;
+    };
+    const out = await divergePlan(input(mixed(), root, 's-parse', 'alt-1', ['s-src']), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.ok(out.plan.steps.some((s) => s.target.file === 'src/api/routes.js' && s.derivedFrom === 's-parse'), 'routes.js is re-planned, in its own language');
+
+    const newJs = model(undefined, () => ({ steps: [{ kind: 'file', chapter: 'c2', path: 'src/api/extra.js', question: 'q?', options: options(), recommended: 'author', why: 'w', dependsOn: ['src/parse.ts'] }] }));
+    const refused = await divergePlan(input(mixed(), root, 's-parse', 'alt-1', ['s-src']), depsFor(newJs.run, tempDir('diverge-gs-'), tempDir('diverge-target-')));
+    assert.ok(!refused.ok, 'a file the plan never had takes the decision\'s language');
+    assert.match(refused.reason, /extra\.js/);
+  });
+
+  // T-22's security review, F3: what the reproduce copy refuses to ship is not shipped to a model either.
+  test('a dependency the reproduce copy would withhold (a credentials file) is never sent to the model', async () => {
+    const { plan, root, gs, target } = setup();
+    fs.mkdirSync(path.join(root, 'config'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'config/.env'), 'API_KEY=a-secret-value\n');
+    plan.steps.push(step('s-env', 11, 'src', 'file', 'config/.env'));
+    stepNamed(plan, 's-routes')!.dependsOn = ['s-parse', 's-env'];
+    const m = model();
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(m.run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.ok(m.asked.some((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/api/routes.ts'), 'discriminates: the file that stood on it was written');
+    assert.ok(!JSON.stringify(m.asked).includes('a-secret-value'), 'the credentials file\'s contents are in no question');
   });
 
   test('a refusal of the model\'s answer says it was the model\'s answer: its "step 1" is not the walk\'s', async () => {

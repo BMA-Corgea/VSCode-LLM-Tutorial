@@ -108,8 +108,11 @@ export interface PlanDivergence {
   /** walked steps that stood on the old road, by id, in plan order (the M1 warning) */
   staleDependents: string[];
   at: string;
-  /** which tree in the `derived/` store holds this plan's re-derived files */
-  tree: string;
+  /** which tree in the `derived/` store holds this plan's re-derived files; absent while none was ever written */
+  tree?: string;
+  /** `false` when nothing was re-derived: every later step that stood on the old road was already walked
+   *  (T-22's code review, MF1). Absent means it was re-planned. */
+  replanned?: false;
 }
 
 /**
@@ -127,14 +130,17 @@ export function treeNamedBy(plan: PlanLike): string | undefined {
 }
 
 /** T-22: the plan's own record of the last re-plan decided at this step, if it has one. */
-export function divergenceAt(plan: PlanLike, stepId: string): { staleDependents: string[] } | undefined {
+export function divergenceAt(plan: PlanLike, stepId: string): { staleDependents: string[]; replanned: boolean } | undefined {
   const all: unknown = plan['divergences'];
   if (!Array.isArray(all)) return undefined;
   for (let i = all.length - 1; i >= 0; i -= 1) {
     const entry: unknown = all[i];
     if (typeof entry !== 'object' || entry === null || (entry as { stepId?: unknown }).stepId !== stepId) continue;
     const stale: unknown = (entry as { staleDependents?: unknown }).staleDependents;
-    return { staleDependents: Array.isArray(stale) ? stale.filter((id): id is string => typeof id === 'string') : [] };
+    return {
+      staleDependents: Array.isArray(stale) ? stale.filter((id): id is string => typeof id === 'string') : [],
+      replanned: (entry as { replanned?: unknown }).replanned !== false,
+    };
   }
   return undefined;
 }

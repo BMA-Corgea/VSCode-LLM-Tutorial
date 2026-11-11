@@ -161,8 +161,8 @@ suite('divergenceAt — the plan\'s own record of a re-plan decided at a step (T
         { stepId: D, answer: 'c', staleDependents: [], at: 't3', tree: 'k/3' },
       ],
     };
-    assert.deepEqual(divergenceAt(plan, D), { staleDependents: [] }, 'not the first press\'s list, which named a step the second one did not stand on');
-    assert.deepEqual(divergenceAt(plan, 'st-4-symbol-render'), { staleDependents: ['st-3-symbol-handle'] }, 'and a record at another step is that step\'s alone');
+    assert.deepEqual(divergenceAt(plan, D), { staleDependents: [], replanned: true }, 'not the first press\'s list, which named a step the second one did not stand on');
+    assert.deepEqual(divergenceAt(plan, 'st-4-symbol-render'), { staleDependents: ['st-3-symbol-handle'], replanned: true }, 'and a record at another step is that step\'s alone');
     assert.equal(divergenceAt(plan, 'st-3-symbol-handle'), undefined, 'a step nothing was decided at has none');
   });
 });

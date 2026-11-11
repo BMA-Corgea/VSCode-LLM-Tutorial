@@ -22,11 +22,21 @@ export type GraphNode = Pick<DerivedNode, 'path' | 'dependsOn'>;
  * would let a derivation that changes nothing but `chosen` look as though it had responded.
  */
 export function downstreamOf(nodes: readonly GraphNode[], decision: string): Set<string> {
-  const out = new Set<string>();
-  // Plan order is a topological order (every dependency is an earlier node), so one forward pass
-  // sees each node after everything it depends on.
+  // Along the edges backwards, from the decision, so the answer does not depend on the order the
+  // nodes come in. Mode A's plans are in topological order, but a real repository's are not: repo-tour
+  // breaks an import cycle by listing a file before a file it imports (T-22's code review, MF2), and a
+  // single forward pass then missed it. On a plan in topological order the two give the same set.
+  const dependents = new Map<string, string[]>();
   for (const n of nodes) {
-    if (n.dependsOn.some((d) => d === decision || out.has(d))) out.add(n.path);
+    for (const d of n.dependsOn) dependents.set(d, [...(dependents.get(d) ?? []), n.path]);
+  }
+  const out = new Set<string>();
+  const stack = [...(dependents.get(decision) ?? [])];
+  while (stack.length > 0) {
+    const p = stack.pop()!;
+    if (p === decision || out.has(p)) continue;
+    out.add(p);
+    stack.push(...(dependents.get(p) ?? []));
   }
   return out;
 }

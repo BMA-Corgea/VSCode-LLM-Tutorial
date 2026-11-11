@@ -26,8 +26,8 @@
 import path from 'node:path';
 import type { DialCore } from '../dial/core.js';
 import { languageOf } from '../dial/core.js';
-import { readReference } from '../dial/writer.js';
-import type { ChapterLike, PlanDivergence, PlanLike, StepLike } from '../walk/model.js';
+import { readReference, withheldReason } from '../dial/writer.js';
+import { treeNamedBy, type ChapterLike, type PlanDivergence, type PlanLike, type StepLike } from '../walk/model.js';
 import { askOnce, newTally, type DeriveAskDeps } from './ask.js';
 import { boilerplateRanges, lineCountOf, loadBearingRanges, stepIdFor, type DeriveCost, type ExtractLike } from './assemble.js';
 import { costOf, extractAll, REPO_IMPORTS, refusalForFile, thrownSentence, type ImportRules } from './engine.js';
@@ -64,7 +64,8 @@ export interface DivergeDeps extends DeriveAskDeps {
 export type DivergeOutcome =
   /** Nothing follows from this decision and it owns no file: there is nothing to re-derive. */
   | { ok: true; changed: false; staleDependents: string[]; cost: DeriveCost }
-  | { ok: true; changed: true; plan: PlanLike; derivedRoot: string; staleDependents: string[]; cost: DeriveCost }
+  /** `derivedRoot` is `null` only when no divergence has ever written a tree (a record that re-planned nothing). */
+  | { ok: true; changed: true; plan: PlanLike; derivedRoot: string | null; staleDependents: string[]; cost: DeriveCost }
   | { ok: false; reason: string; cost: DeriveCost };
 
 /** How many files all of a plan's divergences together may have written. */
@@ -139,17 +140,48 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     if (!d.decision.options.some((o) => o.id === answer)) return fail(`${JSON.stringify(answer.slice(0, 40))} is not one of the options at this step`);
 
     const owner = fileStepOf(d, steps);
+    const ownFile = d.kind === 'shape' ? null : owner.target.file;
     const graph = graphOf(steps);
     const { replaced: reached } = keptBy(graph, owner.id, walked);
-    const replaced = new Set([...reached].filter((id) => id !== d.id && id !== owner.id));
     const downstream = downstreamOf(graph, owner.id);
+    // What a walked step stands on stays where it is (`keptBy`'s own rule).
+    const anchored = ancestorsOf(graph, walked);
+    // At a symbol step D owns its file from now on, so the file's own step goes with the file, unless
+    // something walked stands on it (T-22's code review, MF3): one file step per file.
+    const ownerGoes = d.kind === 'symbol' && owner.id !== d.id && !anchored.has(owner.id);
+    // The files being rewritten: D's own, and every reached file step's.
+    const rewritten = new Set<string>(ownFile === null ? [] : [ownFile]);
+    for (const s of steps) if (reached.has(s.id) && s.kind === 'file') rewritten.add(s.target.file);
+    // A symbol step describes lines of its file, so it goes only with a file that is being rewritten: the
+    // symbol steps of a file the plan keeps describe it still (T-22's code review, SF2).
+    const replaced = new Set([...reached].filter((id) => {
+      if (id === d.id || id === owner.id) return false;
+      const s = byId.get(id);
+      return s !== undefined && (s.kind !== 'symbol' || rewritten.has(s.target.file));
+    }));
+    if (ownerGoes) replaced.add(owner.id);
     const staleDependents = steps
       .filter((s) => s.id !== d.id && walked.has(s.id) && (downstream.has(s.id) || s.id === owner.id))
       .map((s) => s.id);
-    const ownFile = d.kind === 'shape' ? null : owner.target.file;
-    if (ownFile === null && replaced.size === 0) return { ok: true, changed: false, staleDependents, cost: costOf(tally, deps) };
+    if (ownFile === null && replaced.size === 0) {
+      if (staleDependents.length === 0) return { ok: true, changed: false, staleDependents, cost: costOf(tally, deps) };
+      // Something does follow, and all of it is walked (T-22's code review, MF1): there is nothing to
+      // re-derive and nothing is asked, but the choice is recorded on a version that names those steps.
+      const at = (deps.now?.() ?? new Date()).toISOString();
+      const priorTree = treeNamedBy(plan);
+      const prior = (plan as { divergences?: PlanDivergence[] }).divergences ?? [];
+      const recorded: PlanLike & { divergences: PlanDivergence[] } = {
+        ...plan,
+        steps: plan.steps.map((s) => (s.id === d.id ? { ...s, decision: { ...s.decision, chosen: answer } } : s)),
+        generatedAt: at,
+        cost: costOf(tally, deps),
+        divergences: [...prior, { stepId: d.id, answer, staleDependents, at, replanned: false, ...(priorTree === undefined ? {} : { tree: priorTree }) }],
+      };
+      return { ok: true, changed: true, plan: recorded, derivedRoot, staleDependents, cost: costOf(tally, deps) };
+    }
 
-    const reachedUnits = steps.filter((s) => replaced.has(s.id) && s.kind !== 'symbol');
+    // The file D owns is D's to write, so its old file step is not one the model is asked to re-plan.
+    const reachedUnits = steps.filter((s) => replaced.has(s.id) && s.kind !== 'symbol' && s.id !== owner.id);
     if (reachedUnits.length > DERIVE_LIMITS.maxSteps) {
       return fail(`this decision reaches ${reachedUnits.length} later steps, more than the ${DERIVE_LIMITS.maxSteps} one press can re-plan`);
     }
@@ -165,7 +197,15 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       const key = realKey.get(alias) ?? alias;
       return key.startsWith('@') ? null : key;
     };
-    const pathRules: PathRules = { chapterDir, extensions: extensionsFor(language), maxSegments: REPO_MAX_PATH_SEGMENTS };
+    // Each file keeps its own language, and only a file the plan never had takes the decision's (T-22's
+    // code review, SF8): a `.ts` decision may reach a `.js` file in a repository that has both.
+    const reachedLanguages = new Set<CodeLanguage>([language]);
+    for (const s of reachedUnits) {
+      const own = s.kind === 'file' ? asCodeLanguage(languageOf(s.target.file)) : null;
+      if (own !== null) reachedLanguages.add(own);
+    }
+    const pathRules: PathRules = { chapterDir, extensions: [...new Set([...reachedLanguages].flatMap(extensionsFor))], maxSegments: REPO_MAX_PATH_SEGMENTS };
+    const replacedPaths = new Set(reachedUnits.filter((s) => s.kind === 'file').map((s) => s.target.file));
     const keyOf = (s: StepLike): string => (s.kind === 'shape' ? aliases.get(s.chapter) ?? s.chapter : s.target.file);
     const onRoad = (s: StepLike): string => s.decision.chosen ?? s.decision.authorChoice;
     // Every question this press asks is about the plan after it: D is on the learner's road there,
@@ -235,7 +275,9 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       const owedKeys = [keyOf(owner), ...externals.flatMap((id) => { const e = byId.get(id); return e === undefined ? [] : [keyOf(e)]; })];
       const reply = await askOnce(deps, `derive:diverge:${d.id}`, prompt, (t) => {
         const parsed = parseReplanReply(t, language, pathRules);
-        return ofTheAnswer(isDeriveRefusal(parsed) ? parsed : mergeReply(parsed, { steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId: d.id }));
+        return ofTheAnswer(isDeriveRefusal(parsed) ? parsed : mergeReply(parsed, {
+          steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId: d.id, replacedPaths, newFileExtensions: extensionsFor(language),
+        }));
       }, tally);
       if (isDeriveRefusal(reply)) return fail(reply.refused);
       merged = reply;
@@ -245,6 +287,8 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const freshById = new Map(merged.fresh.map((f) => [f.node.path, f] as const));
     const written = new Map<string, string>();
     const plannedFiles = new Set([
+      // D's own file is in the plan whether or not the file step it took over stays.
+      ...(ownFile === null ? [] : [ownFile]),
       ...steps.filter((s) => s.kind === 'file' && !replaced.has(s.id)).map((s) => s.target.file),
       ...merged.fresh.filter((f) => f.node.kind === 'file').map((f) => f.node.path),
     ]);
@@ -274,7 +318,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     if (ownFile !== null) {
       deps.onProgress?.(`writing ${ownFile}…`);
       const fileDeps = owner.dependsOn.flatMap((id) => { const dep = byId.get(id); return dep?.kind === 'file' ? [dep] : []; });
-      const dependencies: DependencyForPrompt[] = fileDeps.map((dep) => ({ ...decisionOf(dep, roadOf(dep)), content: contentOf(dep.target.file) }));
+      const dependencies: DependencyForPrompt[] = fileDeps.map((dep) => ({ ...decisionOf(dep, roadOf(dep)), ...shownContent(dep.target.file, written, contentOf) }));
       const refused = await writeFile(ownFile, `derive:code:${d.id}`, shapeDecision(d.chapter), { ...decisionOf(d, answer), path: ownFile }, dependencies, new Set(fileDeps.map((dep) => dep.target.file)));
       if (refused !== null) return fail(refused.refused);
     }
@@ -287,7 +331,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
         const earlier = freshById.get(id);
         if (dep?.kind === 'file' || dep?.kind === 'symbol') {
           allowed.add(dep.target.file);
-          dependencies.push({ ...decisionOf(dep, roadOf(dep)), content: written.get(dep.target.file) ?? contentOf(dep.target.file) });
+          dependencies.push({ ...decisionOf(dep, roadOf(dep)), ...shownContent(dep.target.file, written, contentOf) });
         } else if (earlier !== undefined && earlier.node.kind === 'file') {
           allowed.add(earlier.node.path);
           dependencies.push({ path: earlier.node.path, question: earlier.node.question, chosen: { label: earlier.node.options[0]?.label ?? '', consequence: '' }, why: earlier.node.why, content: written.get(earlier.node.path) ?? '' });
@@ -322,6 +366,8 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       decision: { ...d.decision, chosen: answer },
       // Its code is the model's now. A step the model wrote in the first place keeps saying where it came from.
       ...(ownFile === null ? {} : { kind: 'file' as const, target: { file: ownFile }, scaffold: scaffoldOf(ownFile, derivedFiles, extracts), derivedFrom: d.derivedFrom ?? d.id }),
+      // The file step it took over is gone, so D stands on what that step stood on.
+      ...(ownerGoes ? { dependsOn: [...owner.dependsOn] } : {}),
     };
     stepsById.set(d.id, answered);
     for (const f of merged.fresh) stepsById.set(f.id, freshStep(f, d.id, realKey, derivedFiles, extracts));
@@ -342,6 +388,17 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
   } catch (err) {
     return fail(`the re-plan stopped unexpectedly: ${thrownSentence(err)}`);
   }
+}
+
+/**
+ * What a code question is shown of a file it may build on: what this press has written for it, else the
+ * file as it stands. Never a file the reproduce copy refuses to ship (`withheldReason`: credentials, keys,
+ * agent configuration): it is not shipped to a model either (T-22's security review, F3).
+ */
+function shownContent(file: string, written: ReadonlyMap<string, string>, contentOf: (file: string) => string): { content?: string } {
+  const own = written.get(file);
+  if (own !== undefined) return { content: own };
+  return withheldReason(file) === null ? { content: contentOf(file) } : {};
 }
 
 function chosenOf(node: DerivedNode): { label: string; consequence: string } {
@@ -405,6 +462,10 @@ interface MergeContext {
   ownFile: string | null;
   /** the step the road changed at, which owns `ownFile` once this lands */
   decisionId: string;
+  /** the paths of the file steps being re-planned: each keeps its own language */
+  replacedPaths: ReadonlySet<string>;
+  /** what a file the plan never had may end in: the decision's language (T-22's code review, SF8) */
+  newFileExtensions: readonly string[];
 }
 
 /**
@@ -412,7 +473,7 @@ interface MergeContext {
  * (`askOnce`'s `parse`), so a reply this refuses is never cached.
  */
 function mergeReply(reply: ReplanReply, ctx: MergeContext): Merged | DeriveRefusal {
-  const { steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId } = ctx;
+  const { steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId, replacedPaths, newFileExtensions } = ctx;
   const known = new Set([...aliases.values(), ...aliases.keys()]);
   const newKeys = new Set<string>();
   for (const c of reply.chapters) {
@@ -436,22 +497,29 @@ function mergeReply(reply: ReplanReply, ctx: MergeContext): Merged | DeriveRefus
   for (const n of reply.nodes) {
     if (keptKeys.has(n.path.toLowerCase())) return refuse(`the replan returned a step at ${JSON.stringify(n.path)}, which is a step this plan keeps`);
     if (freshKeys.has(n.path)) return refuse(`the replan returned two steps at ${JSON.stringify(n.path)}`);
+    if (n.kind !== 'shape' && !replacedPaths.has(n.path) && !newFileExtensions.some((e) => n.path.endsWith(e))) {
+      return refuse(`the replan adds a new file ${JSON.stringify(n.path)}, and a new file takes the decision's language (${newFileExtensions.join(' or ')})`);
+    }
     if (!known.has(n.chapter) && !newKeys.has(n.chapter)) return refuse(`the replan put a step in a chapter ${JSON.stringify(n.chapter)} the plan does not have`);
     if (newKeys.has(n.chapter)) {
       if (n.kind === 'shape') seenShapes.add(n.chapter);
       else if (!seenShapes.has(n.chapter)) return refuse(`the replan opened chapter ${JSON.stringify(n.chapter)} with no shape step before its files`);
     }
+    freshKeys.set(n.path, stepIdFor(n));
+  }
+  // Every new step's key is known before any edge is resolved: in a real repository two files can
+  // import each other (T-22's code review, MF2), so a new step may stand on one the reply lists later.
+  for (const n of reply.nodes) {
+    const own = freshKeys.get(n.path)!;
     const ids: string[] = [];
     for (const key of new Set([...owedKeys, ...n.dependsOn])) {
       const id = allKeys.get(key) ?? freshKeys.get(key);
       // A file's edge to its own chapter is only owed when the chapter still has a shape step.
       if (id === undefined && key === n.chapter) continue;
       if (id === undefined) return refuse(`the replanned step ${JSON.stringify(n.path)} depends on ${JSON.stringify(key)}, which no step provides, so the replanned steps do not make a plan`);
-      ids.push(id);
+      if (id !== own) ids.push(id);
     }
-    const id = stepIdFor(n);
-    fresh.push({ id, node: n, dependsOn: [...new Set(ids)] });
-    freshKeys.set(n.path, id);
+    fresh.push({ id: own, node: n, dependsOn: [...new Set(ids)] });
   }
   return { fresh, chapters: reply.chapters };
 }

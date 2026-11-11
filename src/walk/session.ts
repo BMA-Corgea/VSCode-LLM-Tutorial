@@ -1014,7 +1014,8 @@ export class WalkSession {
     }
     this.replan = undefined;
     this.plan = outcome.plan;
-    this.request = { ...request, derivedRoot: outcome.derivedRoot };
+    // A press that re-planned nothing, on a plan that never diverged, has no tree: the request stands as it was.
+    this.request = outcome.derivedRoot === null ? request : { ...request, derivedRoot: outcome.derivedRoot };
     this.progress = setChosenIn(this.progress, job.stepId, job.optionId);
     if (this.progress.current === null || !this.hasStep(this.progress.current)) this.progress = setCurrent(this.progress, job.stepId);
     this.forgetOldCode(job.stepId);
