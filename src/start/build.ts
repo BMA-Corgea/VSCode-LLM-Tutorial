@@ -756,6 +756,9 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
       ...(runner ? { runner: runner.run } : {}),
     });
   } catch (err) {
+    // Only a guard (T-70 review I1). repo-tour's `interpretStops` records every runner error, a refusal
+    // and an abort included, as that file's failure and goes on, so a stop never throws out of
+    // `interpretPlan`: it is answered just below, after the phase returns.
     if (runner?.stopped()) return cancel(target, 'while asking about each decision');
     return fail(err);
   }

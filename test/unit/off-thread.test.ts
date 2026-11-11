@@ -541,7 +541,7 @@ suite('Cancel while a phase is running (T-30 AC4, AC5, AC6)', function () {
       onPhase: (phase: BuildPhase) => { if (phase === 'interpret') cancelled = true; },
     }));
     assert.equal(outcome.cancelled, true);
-    assert.equal(outcome.reason, 'build cancelled before writing the plan', 'interpret keeps today\'s between-phase Cancel (T-70)');
+    assert.equal(outcome.reason, 'build cancelled before writing the plan', 'with no model call to end (the cache answers every file), the check after the phase answers the Cancel');
   });
 });
 
