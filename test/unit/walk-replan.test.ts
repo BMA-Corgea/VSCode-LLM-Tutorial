@@ -100,6 +100,8 @@ interface Options {
   replannerLoad?: (replanner: Replanner) => Promise<Replanner | undefined>;
   /** the dial core's load: at once and absent by default; a test holds it to keep the chain busy */
   core?: () => Promise<undefined>;
+  /** files in the reference repository, written before the walk opens; it is empty by default */
+  reference?: Record<string, string>;
 }
 
 /** Every file under `root` with its contents, except what is under `skip`. */
@@ -124,6 +126,10 @@ function harness(options: Options = {}): Harness {
   const store = tempDir('rp-store-');
   const tree = path.join(store, TREE);
   fs.mkdirSync(tree, { recursive: true });
+  for (const [rel, text] of Object.entries(options.reference ?? {})) {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), text);
+  }
   const plan = options.plan ?? fixturePlan();
   const dir = buildDir(target);
   fs.mkdirSync(dir, { recursive: true });
@@ -356,6 +362,20 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     await finish(h, job, landed(h.plan, h.tree));
     assert.equal(h.view().step.id, 'st-3-symbol-handle');
     assert.match(h.view().choiceNote ?? '', /^Re-planned/, 'and they are told on the page they are on');
+  });
+
+  test('what the page said about D\'s old code goes with it: in manual mode, the shape of the file it replaced', async () => {
+    const SIGNATURE = 'export function tokenize(text: string): string[] {';
+    const h = harness({
+      progress: (p) => setDial(fixtureProgress(p), D, 'manual'),
+      reference: { 'src/parse.ts': `${SIGNATURE}\n${'  return [];\n'.repeat(11)}}\n` },
+    });
+    await h.session.settled();
+    assert.deepEqual(h.view().shape?.signatures, [SIGNATURE], 'discriminates: in manual mode D shows the shape of its file');
+    h.session.choose(D, ANSWER);
+    await finish(h, await reachedEngine(h), landed(h.plan, h.tree));
+    assert.equal(h.view().step.id, D, 'discriminates: the learner is still on D');
+    assert.equal(h.view().shape, undefined, 'the shape of a file D no longer has is not shown over the code that replaced it');
   });
 
   test('a learner standing on a step that is gone is brought back to D', async () => {
@@ -618,6 +638,28 @@ suite('while one is running (T-22, AC6)', () => {
     const job = await reachedEngine(h);
     h.session.goTo('st-3-symbol-handle');
     assert.deepEqual(h.view().replanning, { stepId: D, message: REPLAN_STARTING });
+    await finish(h, job, FAILED);
+  });
+
+  test('a refusal is said on the step the learner walked on to, where the running line was', async () => {
+    const h = harness();
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    h.session.goTo('st-3-symbol-handle');
+    await finish(h, job, FAILED);
+    assert.equal(h.view().step.id, 'st-3-symbol-handle', 'discriminates: the learner is not on D');
+    assert.equal(h.view().replanning, undefined);
+    assert.equal(h.view().choiceNote, replanRefusedText('the model said no'), 'the running line is gone from this page, so what became of the press is said here');
+  });
+
+  test('a cancel is said on the step it was pressed on', async () => {
+    const h = harness();
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    h.session.goTo('st-3-symbol-handle');
+    h.session.cancelReplan();
+    assert.equal(h.view().step.id, 'st-3-symbol-handle', 'discriminates: the learner is not on D');
+    assert.equal(h.view().choiceNote, REPLAN_CANCELLED_UNSENT, 'the Cancel was on this page, so its answer is too');
     await finish(h, job, FAILED);
   });
 
