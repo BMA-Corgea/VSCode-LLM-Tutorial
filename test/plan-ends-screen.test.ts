@@ -12,11 +12,12 @@ import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
-import { LAST_STEP_HINT } from '../src/walk/step-view.js';
+import { FIRST_STEP_HINT, LAST_STEP_HINT } from '../src/walk/step-view.js';
 import { Screen, sleep } from './support/screen.js';
 import { writeFixtureTarget } from './unit/walk-fixtures.js';
 
 const TITLE = 'Build Tutorials: Step';
+const FIRST = 'st-1-shape-src';
 const LAST = 'st-4-symbol-render';
 const BEFORE_LAST = 'st-3-symbol-handle';
 
@@ -73,6 +74,19 @@ suite('T-51: the ends of the plan, read off the real panel and the real title ba
       const back = await until(panel, (p) => p.step === BEFORE_LAST, 'the page one step back');
       assert.ok(!back.nextDisabled && !back.prevDisabled && back.hint === null, `between the ends both work and nothing needs explaining: ${JSON.stringify(back)}`);
       await until(arrows, (a) => a.length >= 2 && a.every((x) => !x.disabled), 'both title-bar arrows enabled again');
+
+      // The first step, the mirror image (the review's F3: a typo in Previous's condition passed every suite).
+      session.goTo(FIRST);
+      const atFirst = await until(panel, (p) => p.step === FIRST, 'the first step\'s page');
+      assert.ok(atFirst.prevDisabled && !atFirst.nextDisabled, `Previous, not Next, is disabled at the first step: ${JSON.stringify(atFirst)}`);
+      assert.equal(atFirst.hint, FIRST_STEP_HINT, 'and the panel says why');
+      const barAtFirst = await until(arrows, (a) => a.some((x) => x.label.startsWith('Previous step') && x.disabled), 'the title bar\'s Previous arrow disabled');
+      assert.ok(barAtFirst.some((x) => x.label.startsWith('Next step') && !x.disabled), `Next still enabled: ${JSON.stringify(barAtFirst)}`);
+
+      // A walk that closes clears both (the review's F3): left set, Previous step would vanish from the
+      // palette for good and T-43's "no tutorial is open" answer could not be reached.
+      session.dispose();
+      await until(arrows, (a) => a.length >= 2 && a.every((x) => !x.disabled), 'both title-bar arrows enabled once the walk closes');
     } finally {
       screen.close();
       api._walk.session()?.dispose();

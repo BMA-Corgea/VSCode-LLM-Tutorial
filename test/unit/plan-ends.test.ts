@@ -14,6 +14,7 @@ import { type SkinsModule } from '../../src/start/view.js';
 import { setCurrent, stepDial, type PlanLike } from '../../src/walk/model.js';
 import type { StepViewState } from '../../src/walk/step-protocol.js';
 import { FIRST_STEP_HINT, LAST_STEP_HINT, ONLY_STEP_HINT, renderStepHtml } from '../../src/walk/step-view.js';
+import { cssOf, declarationsFor } from './css-rules.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const FAKE_SKINS: SkinsModule = {
@@ -82,5 +83,16 @@ suite('T-51: the step panel at the ends of the plan', () => {
     assert.ok(disabled(button(first, 'btn-prev')) && !disabled(button(first, 'btn-next')), 'st-1 is still the first step');
     const last = pageAt('st-4-symbol-render', plan);
     assert.ok(disabled(button(last, 'btn-next')) && !disabled(button(last, 'btn-prev')), 'st-4 is still the last step');
+    // T-51's review, F2: the count agrees with the moves and the ends, so "Step 4 of 4" never sits beside
+    // "This is the first step of the plan".
+    assert.match(first, /<p class="step-count">Step 1 of 4<\/p>/, 'the first step is counted first');
+    assert.match(last, /<p class="step-count">Step 4 of 4<\/p>/, 'and the last last');
+  });
+
+  test('a disabled Next keeps its look under the pointer (the review\'s F1)', () => {
+    const css = cssOf(pageAt('st-4-symbol-render'));
+    const hover = declarationsFor(css, '.btn.primary[disabled]:hover');
+    assert.match(hover, /background:var\(--accent-solid\)/, 'not the primary hover colour');
+    assert.match(hover, /border-color:var\(--accent-solid-edge\)/);
   });
 });
