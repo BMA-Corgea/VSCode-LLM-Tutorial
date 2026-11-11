@@ -173,6 +173,8 @@ interface FakeOptions {
   noGitIdentity?: boolean;
   /** Make `git commit` reject, the way a stale lock file or an unchanged tree does. */
   gitFails?: string;
+  /** What `git rev-parse --git-dir` and `--git-common-dir` answer (T-82): the git dir, relative to the target. */
+  gitDir?: string;
   /** Make one git subcommand reject the way the runner's own bound does (T-13) — a subprocess
    *  that was STOPPED, which is not the same rejection as git answering "no". */
   gitTimesOut?: string;
@@ -286,6 +288,9 @@ function fakeGit(log: Call[], options: FakeOptions): GitRunner {
       // surfaces as a rejection — not an empty string.
       if (options.noGitIdentity) return Promise.reject(new Error(`error: key does not exist: ${args[1] ?? ''}`));
       return Promise.resolve(args[1] === 'user.name' ? 'A Learner\n' : 'learner@example.com\n');
+    }
+    if (args[0] === 'rev-parse' && (args[1] === '--git-dir' || args[1] === '--git-common-dir') && options.gitDir !== undefined) {
+      return Promise.resolve(`${options.gitDir}\n`);
     }
     if (args[0] === 'commit' && options.gitFails !== undefined) {
       // Shaped exactly as `gitRunnerWith` shapes an ordinary failure — `git <argv> failed: …`
@@ -2121,24 +2126,26 @@ suite('the dial, the check and the commit (T-5)', () => {
 
     /**
      * The other half of dropping that sentence: when a lock really does survive, the advice
-     * still reaches the learner — from git, at the moment it is true, through the ordinary
-     * branch, because the runner passes git's own stderr through verbatim. Driven, git's
-     * message for a stale lock ends *"remove the file manually to continue"*.
+     * still reaches the learner, through the ordinary branch, at the moment it is true. It is the
+     * extension's own now (T-82): git 2.43 ended its message with "remove the file manually to
+     * continue", but git 2.54 and later say only that the lock "may be stale", as here.
      */
-    test('and when a lock really IS in the way, git’s own advice reaches them through the ordinary branch', async () => {
+    test('and when a lock really IS in the way, the extension’s own advice reaches them, whatever git said (T-82)', async () => {
       const { session, fake } = await walking({
         dial: 'scaffolded',
+        gitDir: '.git',
         gitFails: "fatal: Unable to create '.git/index.lock': File exists.\n\nAnother git process seems to be "
-          + 'running in this repository. If it still fails, a git process may have crashed in this repository '
-          + 'earlier:\nremove the file manually to continue.',
+          + 'running in this repository, or the lock file may be stale',
       });
+      fs.mkdirSync(path.join(target, '.git'), { recursive: true });
+      fs.writeFileSync(path.join(target, '.git', 'index.lock'), '');
       session.runCheck();
       await session.settled();
 
       const message = pick(fake, 'reportError')[0]?.message ?? '';
       assert.match(message, /index\.lock/, 'git named the file');
-      assert.match(message, /remove the file manually to continue/,
-        'and git gave the advice, in full, which is why this extension does not have to guess at it');
+      assert.ok(message.includes(`a git that stopped earlier left ${path.join(target, '.git', 'index.lock')} behind: delete that one file`),
+        `the learner is not told what to do about the lock: ${message}`);
       assert.doesNotMatch(message, /bound is this extension’s/, 'this was git answering, not us stopping it');
     });
 
