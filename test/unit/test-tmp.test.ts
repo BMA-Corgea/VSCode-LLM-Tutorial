@@ -339,8 +339,10 @@ suite('T-81: a test run owns its temp folders', function () {
       const r = await stopWhenReady([RUN_TESTS, '--label', 'screen'], hostEnv(tmp, { T81_FAKE_MODE: 'wait', T81_SERVER_PID_FILE: pidFile }), 'SIGTERM');
       assert.equal(running(Number(fs.readFileSync(pidFile, 'utf8'))), false, `the server xvfb-run started outlived the SIGTERM (an orphan, as Xvfb was)${said(r)}`);
       assert.equal(r.signal, 'SIGTERM', `run-tests.mjs should die of SIGTERM${said(r)}`);
-      // The stand-in host only stops by itself after 30 s: a run that ends well before that was stopped.
-      assert.ok((r.afterSignalMs ?? Infinity) < 15_000, `the host was left running: the run ended ${r.afterSignalMs} ms after SIGTERM${said(r)}`);
+      // The stand-in host only stops by itself after 30 s, and a group left running is ended 10 s after
+      // the child exits (GROUP_GRACE_MS): a run that ends within 5 s was stopped by the signal itself,
+      // sent to all of it at once, not by that safety net.
+      assert.ok((r.afterSignalMs ?? Infinity) < 5_000, `the signal did not reach all of the run at once: it ended ${r.afterSignalMs} ms after SIGTERM${said(r)}`);
       assert.deepEqual(left(tmp), [], `the stopped host run left these${said(r)}`);
     });
   });
