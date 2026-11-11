@@ -14,13 +14,47 @@
  * inline tag on the page) keeps this a normal, safe VS Code webview: no external network,
  * no unscoped inline script.
  *
+ * **The one thing a page loads instead of inlining** (T-40): VS Code's own icon font. A panel
+ * that hands over `assets` gets `codicon.css` linked from the extension's own install, and the
+ * CSP widened by exactly the webview's own origin (`webview.cspSource`) for styles and fonts:
+ * nothing else, and never for scripts. A panel that hands over nothing gets the page this shell
+ * always drew. See `./codicons.ts` for what ships and why every icon is decoration.
+ *
  * Client script lives inside a TS template literal (repo-tour lesson, T-3, 2026-08-26: a
  * stray escape here renders a page that does nothing and says nothing about why) — every
  * caller's script is parsed with `new Function` in test/unit/page.test.ts.
  */
 
 import { randomBytes } from 'node:crypto';
+import { CODICON_PAGE_CSS } from './codicons.js';
 import { escapeAttr, escapeHtml } from './html.js';
+
+/**
+ * What a page may load from the extension's own install (T-40), built by the panel from its live
+ * `vscode.Webview` (`./assets.ts`) and handed in as two strings, so this module stays pure.
+ */
+export interface PageAssets {
+  /** `webview.cspSource`: the one origin this page may take a stylesheet or a font from. */
+  cspSource: string;
+  /** `webview.asWebviewUri(…)` of the packaged `codicon.css`, as a string. */
+  codiconCss: string;
+}
+
+/**
+ * What a `cspSource` may look like: one or more CSP source expressions (`https://*.vscode-cdn.net`,
+ * `'self'`), separated by single spaces. Anything else (a `;`, a quote that is not a keyword's, a
+ * comma, a newline) could close the directive and open another, so the page is drawn without the
+ * icons rather than under a policy nobody wrote. VS Code's own value always matches.
+ */
+const CSP_SOURCE_LIST = /^[A-Za-z0-9*+.:/'_-]+(?: [A-Za-z0-9*+.:/'_-]+)*$/;
+
+/** The assets this page will actually use: all of them, or none when either string is unusable. */
+function usableAssets(assets: PageAssets | undefined): PageAssets | undefined {
+  if (!assets) return undefined;
+  if (typeof assets.cspSource !== 'string' || !CSP_SOURCE_LIST.test(assets.cspSource)) return undefined;
+  if (typeof assets.codiconCss !== 'string' || assets.codiconCss === '') return undefined;
+  return assets;
+}
 
 export interface RenderPageOptions {
   title: string;
@@ -40,6 +74,12 @@ export interface RenderPageOptions {
    * automatically, so every page's script can call those with no setup of its own.
    */
   script: string;
+  /**
+   * T-40: the icon font, when the panel has a webview to serve it from. Optional so a page
+   * rendered with no webview at all (a unit test, the design-polish harness) is the page it always
+   * was: every icon is decoration, so a page without the font loses no words.
+   */
+  assets?: PageAssets;
 }
 
 function nonce(): string {
@@ -67,8 +107,18 @@ function bootstrapScript(): string {
 export function renderPage(opts: RenderPageOptions): string {
   const n = nonce();
   const themeAttr = opts.skin && opts.skin !== 'system' ? ` data-theme="${escapeAttr(opts.skin)}"` : '';
-  const csp = ["default-src 'none'", `style-src 'nonce-${n}'`, `script-src 'nonce-${n}'`].join('; ');
+  const assets = usableAssets(opts.assets);
+  // With the icon font: styles and fonts may also come from the webview's own origin, which is
+  // where codicon.css and the codicon.ttf it names are served from. Scripts never may.
+  const csp = (assets
+    ? ["default-src 'none'", `style-src 'nonce-${n}' ${assets.cspSource}`, `font-src ${assets.cspSource}`, `script-src 'nonce-${n}'`]
+    : ["default-src 'none'", `style-src 'nonce-${n}'`, `script-src 'nonce-${n}'`]
+  ).join('; ');
   const script = `${bootstrapScript()}\n${opts.script}`;
+  // Ahead of every inlined sheet, so a page's own rules override codicon.css's at equal specificity.
+  const icons = assets
+    ? `<link rel="stylesheet" href="${escapeAttr(assets.codiconCss)}">\n<style nonce="${n}">${CODICON_PAGE_CSS}</style>\n`
+    : '';
 
   return `<!doctype html>
 <html lang="en"${themeAttr}>
@@ -77,7 +127,7 @@ export function renderPage(opts: RenderPageOptions): string {
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(opts.title)}</title>
-<style nonce="${n}">${opts.coreCss}</style>
+${icons}<style nonce="${n}">${opts.coreCss}</style>
 <style nonce="${n}">${opts.bridgeCss}</style>
 ${opts.pageCss ? `<style nonce="${n}">${opts.pageCss}</style>` : ''}
 </head>

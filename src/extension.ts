@@ -663,6 +663,7 @@ function registerWalk(context: vscode.ExtensionContext): void {
       back: () => { walkSession?.returnFromDetour(); },
     },
     () => walkSkins,
+    context.extensionUri,
   );
   walkStatus = new WalkStatusBar();
   walkPanel = new StepViewProvider(context, {

@@ -38,9 +38,10 @@
  *
  * One `WebviewPanel`, beside the code rather than over it, rendering `renderNarratorHtml` —
  * model-authored text, escaped there, under `renderPage`'s nonce CSP with `localResourceRoots`
- * explicitly empty for the reason `step-panel.ts` gives at length: unset does not mean "no
- * roots", it means the extension directory plus every open workspace folder, and this page
- * draws strings a model wrote about a repository the learner pointed us at.
+ * set to one folder, the packaged icon font's (T-40), for the reason `step-panel.ts` gives at
+ * length: unset does not mean "no roots", it means the extension directory plus every open
+ * workspace folder, and this page draws strings a model wrote about a repository the learner
+ * pointed us at.
  *
  * Its three messages (`detour:prev`, `detour:next`, `detour:back`) are parsed by
  * `parseNarratorMessage` before anything acts on them, never read off the raw event — the same
@@ -56,6 +57,7 @@
 import path from 'node:path';
 import * as vscode from 'vscode';
 import type { SkinsModule } from '../start/view.js';
+import { codiconsRoot, pageAssets } from '../webview/assets.js';
 import { parseNarratorMessage, renderNarratorHtml, type NarratorViewState } from './narrator.js';
 import type { DetourAdapters } from './session.js';
 
@@ -95,7 +97,12 @@ export class NarratorPanel implements vscode.Disposable {
    */
   private readonly selfClosed = new WeakSet<vscode.WebviewPanel>();
 
-  constructor(private readonly handlers: NarratorHandlers, private readonly skins: () => SkinsModule | undefined) {}
+  /** `extensionUri` (T-40): where the packaged icon font is, the one folder the narrator may read. */
+  constructor(
+    private readonly handlers: NarratorHandlers,
+    private readonly skins: () => SkinsModule | undefined,
+    private readonly extensionUri: vscode.Uri,
+  ) {}
 
   show(state: NarratorViewState): void {
     const skins = this.skins();
@@ -115,9 +122,9 @@ export class NarratorPanel implements vscode.Disposable {
         {
           enableScripts: true,
           retainContextWhenHidden: false,
-          // Explicitly empty — see `step-panel.ts`. Everything on this page is inlined by
-          // `renderPage`; there is nothing to grant, so nothing is granted.
-          localResourceRoots: [],
+          // The icon font's folder and nothing else — see `step-panel.ts`. Everything else on
+          // this page is inlined by `renderPage`.
+          localResourceRoots: [codiconsRoot(this.extensionUri)],
         },
       );
       this.panel = panel;
@@ -133,7 +140,7 @@ export class NarratorPanel implements vscode.Disposable {
         }),
       );
     }
-    this.panel.webview.html = renderNarratorHtml(state, skins);
+    this.panel.webview.html = renderNarratorHtml(state, skins, pageAssets(this.panel.webview, this.extensionUri));
   }
 
   /** Close it, without the dispose being read as the learner asking to go back. */
