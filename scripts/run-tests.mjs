@@ -5,10 +5,12 @@
 // there is no DISPLAY to draw the Extension Development Host into (CI). On a desktop with a
 // real or virtual X server already set (DISPLAY set), it runs directly (AC8).
 //
-// T-81: the run starts inside a temp folder of its own, and this script removes that folder when
-// the run ends. Everything the test hosts make goes in it: the tests' fixtures, and what VS Code
-// makes for itself. A SIGINT, SIGTERM or SIGHUP sent to this script is passed on to the run, which
-// then stops; this script cleans up after it and dies of the same signal (scripts/test-tmp.mjs).
+// T-81: the run starts inside a temp folder of its own, as a process group of its own (xvfb-run,
+// Xvfb, vscode-test, VS Code and its extension hosts), and this script removes that folder once
+// every process of the group has ended. Everything the test hosts make in the temp folder goes in
+// it: the tests' fixtures, and what VS Code makes there for itself. A SIGINT, SIGTERM or SIGHUP sent
+// to this script goes to the whole group, not just to xvfb-run, which as a dash script dies of one
+// without stopping its Xvfb (T-81 review F1). Then this script dies of the same signal.
 import { exitLike, spawnInTestTmp } from './test-tmp.mjs';
 
 const needsXvfb = !process.env.DISPLAY;

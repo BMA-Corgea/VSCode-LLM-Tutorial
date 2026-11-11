@@ -10,13 +10,18 @@
 // week later. scripts/test-tmp.mjs is what keeps the suites clean; this is how we know it does.
 //
 // Exit status: the command's own status when the command failed. Otherwise 1 when anything was
-// left behind and 0 when nothing was. When stopped by a signal, the command is stopped too, and
-// this script dies by the same signal. Afterwards the fresh folder is removed, leftovers and all,
-// unless BUILD_TUTORIALS_KEEP_TMP is set.
+// left behind and 0 when nothing was. The command runs as a process group of its own, and the count
+// is taken once every process of it has ended. When this script is stopped by a signal, the whole
+// group is too, and this script dies by the same signal. Afterwards the fresh folder is removed,
+// leftovers and all, unless BUILD_TUTORIALS_KEEP_TMP asks to keep it.
+//
+// What it does not see (review F3): anything written outside TMPDIR. That is Xvfb's lock in /tmp,
+// the sockets VS Code keeps in XDG_RUNTIME_DIR, and a host's run folder on the rare machine where it
+// has to fall back to /tmp (scripts/test-tmp.mjs, `vscodeRunFolderBase`).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { exitLike, KEEP_ENV, keepWanted, removeTree, runForwardingSignals } from './test-tmp.mjs';
+import { exitLike, KEEP_ENV, keepWanted, removeTree, ROOT_PREFIX, runForwardingSignals } from './test-tmp.mjs';
 
 /** What a run may leave in a fresh temp folder, and why each one is acceptable. */
 const ALLOWED = new Map([
@@ -39,7 +44,7 @@ const before = new Set(fs.readdirSync(fresh));
 console.log(`[check-tmp] fresh TMPDIR ${fresh} (${before.size} entries) -> ${[command, ...args].join(' ')}`);
 
 const result = await runForwardingSignals(command, args, {
-  stdio: 'inherit',
+  stdio: ['ignore', 'inherit', 'inherit'],
   env: { ...process.env, TMPDIR: fresh, TMP: fresh, TEMP: fresh },
 });
 
@@ -58,7 +63,9 @@ if (left.length === 0) {
 } else {
   console.error(`[check-tmp] FAIL: the command left ${left.length} entr${left.length === 1 ? 'y' : 'ies'} in its temp folder:`);
   for (const name of left) console.error(`  ${name}  (${kindOf(name)})`);
-  if (process.env[KEEP_ENV] !== undefined) console.error(`[check-tmp] (${KEEP_ENV} is set, so the run folders it kept are among them on purpose)`);
+  if (left.some((name) => name.startsWith(ROOT_PREFIX)) && keepWanted(process.env[KEEP_ENV], true)) {
+    console.error(`[check-tmp] (${KEEP_ENV}=${process.env[KEEP_ENV]} asks to keep run folders, so the bt-test-* ones among these may be kept on purpose)`);
+  }
 }
 
 const failed = result.error !== undefined || result.code !== 0 || result.caught !== undefined || left.length > 0;

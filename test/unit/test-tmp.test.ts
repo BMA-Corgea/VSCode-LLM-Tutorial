@@ -26,6 +26,7 @@ const MOCHA = path.join(ROOT, 'node_modules', 'mocha', 'bin', 'mocha.js');
 const RUN_TESTS = path.join(ROOT, 'scripts', 'run-tests.mjs');
 const CHECK = path.join(ROOT, 'scripts', 'check-tmp.mjs');
 const KEEP = 'BUILD_TUTORIALS_KEEP_TMP';
+const OWNER = 'BUILD_TUTORIALS_TEST_TMP';
 
 /** A folder made at load, in a passing test, by a child process, by a worker, one left unwritable, and in a failing test. */
 const MAKES = `
@@ -87,12 +88,51 @@ const path = require('node:path');
 fs.mkdtempSync(path.join(os.tmpdir(), 'fake-vscode-'));
 process.stdout.write('TMP ' + os.tmpdir() + '\\n');
 setTimeout(() => process.exit(9), 30000);
-if (process.env.T81_FAKE_MODE === 'wait') process.stdout.write('READY\\n');
-else process.exit(Number(process.env.T81_FAKE_EXIT));
+// The server xvfb-run started beside this host is up before the host goes on (or 5 s have passed).
+const serverUp = Date.now() + 5000;
+const go = () => {
+  if (process.env.T81_SERVER_PID_FILE && !fs.existsSync(process.env.T81_SERVER_PID_FILE) && Date.now() < serverUp) return setTimeout(go, 20);
+  if (process.env.T81_FAKE_MODE === 'wait') process.stdout.write('READY\\n');
+  else process.exit(Number(process.env.T81_FAKE_EXIT));
+};
+go();
+`;
+
+/**
+ * What the \`xvfb-run\` stand-in starts beside the host, as the real one starts Xvfb: it says where
+ * it is, and on SIGTERM it writes into its temp folder a moment later, as a slow process on its way
+ * out can. If the run folder had been removed while it still ran, that write puts the folder back
+ * and the test sees a leftover. It never outlives 30 s.
+ */
+const SERVER = `
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const quit = setTimeout(() => process.exit(0), 30000);
+process.on('SIGTERM', () => {
+  clearTimeout(quit);
+  setTimeout(() => {
+    fs.mkdirSync(os.tmpdir(), { recursive: true });
+    fs.writeFileSync(path.join(os.tmpdir(), 'late-from-the-server'), 'x');
+    process.exit(0);
+  }, 300);
+});
+// Only once it would hear a SIGTERM: the host waits for this before it goes on.
+if (process.env.T81_SERVER_PID_FILE) fs.writeFileSync(process.env.T81_SERVER_PID_FILE, String(process.pid));
 `;
 
 let fixtures: string;
 let fakeBin: string;
+
+/** Whether a process with this id is running. Signal 0 only asks; it kills nothing. */
+function running(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** A fresh, empty folder to be one nested run's whole temp folder. */
 function freshTmp(): string {
@@ -103,6 +143,7 @@ function freshTmp(): string {
 function envFor(tmp: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp, TMP: tmp, TEMP: tmp, ...extra };
   if (!(KEEP in extra)) delete env[KEEP];
+  if (!(OWNER in extra)) delete env[OWNER]; // this run's own door sets it; a nested run starts unowned
   return env;
 }
 
@@ -162,13 +203,28 @@ suite('T-81: a test run owns its temp folders', function () {
     fs.writeFileSync(path.join(fixtures, 'makes.cjs'), MAKES);
     fs.writeFileSync(path.join(fixtures, 'waits.cjs'), WAITS);
     fs.writeFileSync(path.join(fixtures, 'fake.cjs'), FAKE);
+    fs.writeFileSync(path.join(fixtures, 'server.cjs'), SERVER);
     fakeBin = path.join(fixtures, 'bin');
     fs.mkdirSync(fakeBin);
-    for (const name of ['xvfb-run', 'npx']) {
-      const stand = path.join(fakeBin, name);
-      fs.writeFileSync(stand, `#!/bin/sh\nexec "${process.execPath}" "${path.join(fixtures, 'fake.cjs')}" "$@"\n`);
-      fs.chmodSync(stand, 0o755);
-    }
+    const node = process.execPath;
+    // Like the real xvfb-run, a /bin/sh script that does NOT exec its child (review F1): it starts a
+    // server beside the host, runs the host, then stops the server without waiting for it. A signal
+    // that reaches the script alone kills it without that clean-up.
+    const xvfbRun = path.join(fakeBin, 'xvfb-run');
+    fs.writeFileSync(xvfbRun, [
+      '#!/bin/sh',
+      `"${node}" "${path.join(fixtures, 'server.cjs')}" &`,
+      'server=$!',
+      `"${node}" "${path.join(fixtures, 'fake.cjs')}" "$@"`,
+      'status=$?',
+      'kill "$server" 2>/dev/null',
+      'exit $status',
+      '',
+    ].join('\n'));
+    fs.chmodSync(xvfbRun, 0o755);
+    const npx = path.join(fakeBin, 'npx');
+    fs.writeFileSync(npx, `#!/bin/sh\nexec "${node}" "${path.join(fixtures, 'fake.cjs')}" "$@"\n`);
+    fs.chmodSync(npx, 0o755);
   });
 
   suite('the mocha door: every mocha run started here', () => {
@@ -191,6 +247,20 @@ suite('T-81: a test run owns its temp folders', function () {
       const inside = fs.readdirSync(kept);
       for (const prefix of MADE) {
         assert.ok(inside.some((name) => name.startsWith(prefix)), `${prefix}* was not made inside the run's folder: ${inside.join(', ')}`);
+      }
+    });
+
+    test(`${KEEP}: 0, false, no, off and an unknown value keep nothing (an unknown one says so); 1, yes, TRUE keep it`, () => {
+      for (const value of ['0', 'false', 'no', 'off', 'FALSE', ' 0 ', 'fail']) {
+        const tmp = freshTmp();
+        const r = mocha('makes.cjs', envFor(tmp, { [KEEP]: value }));
+        assert.deepEqual(left(tmp), [], `${KEEP}=${JSON.stringify(value)} kept something${said(r)}`);
+        if (value === 'fail') assert.match(r.stderr, /BUILD_TUTORIALS_KEEP_TMP=fail is not a value it knows/, `an unknown value said nothing${said(r)}`);
+      }
+      for (const value of ['yes', 'TRUE']) {
+        const tmp = freshTmp();
+        const r = mocha('makes.cjs', envFor(tmp, { [KEEP]: value }), ['--grep', 'a passing test']);
+        assert.equal(left(tmp).length, 1, `${KEEP}=${value} should keep the run's folder${said(r)}`);
       }
     });
 
@@ -231,7 +301,7 @@ suite('T-81: a test run owns its temp folders', function () {
       assert.match(left(kept)[0] ?? '', /^bt-test-unit-/);
     });
 
-    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
       test(`a run stopped by ${signal} leaves nothing behind, and still dies of ${signal}`, async () => {
         const tmp = freshTmp();
         const r = await stopWhenReady([MOCHA, '--ui', 'tdd', path.join(fixtures, 'waits.cjs')], envFor(tmp), signal);
@@ -250,9 +320,11 @@ suite('T-81: a test run owns its temp folders', function () {
       return env;
     }
 
-    test("the host runs inside a folder of its own, which goes when it ends, and run-tests.mjs exits with the host's status", () => {
+    test("the host runs inside a folder of its own, which goes once ALL of the run has ended, and run-tests.mjs exits with the host's status", () => {
       const tmp = freshTmp();
-      const r = run([RUN_TESTS, '--label', 'screen'], hostEnv(tmp, { T81_FAKE_EXIT: '3' }));
+      const pidFile = path.join(fixtures, `server-${Date.now()}.pid`);
+      const r = run([RUN_TESTS, '--label', 'screen'], hostEnv(tmp, { T81_FAKE_EXIT: '3', T81_SERVER_PID_FILE: pidFile }));
+      assert.equal(running(Number(fs.readFileSync(pidFile, 'utf8'))), false, `the server xvfb-run started outlived run-tests.mjs${said(r)}`);
       assert.equal(r.status, 3, `run-tests.mjs should exit with what the host exited with${said(r)}`);
       const where = /TMP (\S+)/.exec(r.stdout)?.[1];
       assert.ok(where !== undefined, `the stand-in did not run${said(r)}`);
@@ -261,9 +333,11 @@ suite('T-81: a test run owns its temp folders', function () {
       assert.deepEqual(left(tmp), [], `the host run left these${said(r)}`);
     });
 
-    test('a SIGTERM to run-tests.mjs alone stops the host too, removes its folder, and run-tests.mjs dies of SIGTERM', async () => {
+    test('a SIGTERM to run-tests.mjs alone stops all of the run (the xvfb-run script, its server, the host), removes its folder, and run-tests.mjs dies of SIGTERM', async () => {
       const tmp = freshTmp();
-      const r = await stopWhenReady([RUN_TESTS, '--label', 'screen'], hostEnv(tmp, { T81_FAKE_MODE: 'wait' }), 'SIGTERM');
+      const pidFile = path.join(fixtures, `server-${Date.now()}.pid`);
+      const r = await stopWhenReady([RUN_TESTS, '--label', 'screen'], hostEnv(tmp, { T81_FAKE_MODE: 'wait', T81_SERVER_PID_FILE: pidFile }), 'SIGTERM');
+      assert.equal(running(Number(fs.readFileSync(pidFile, 'utf8'))), false, `the server xvfb-run started outlived the SIGTERM (an orphan, as Xvfb was)${said(r)}`);
       assert.equal(r.signal, 'SIGTERM', `run-tests.mjs should die of SIGTERM${said(r)}`);
       // The stand-in host only stops by itself after 30 s: a run that ends well before that was stopped.
       assert.ok((r.afterSignalMs ?? Infinity) < 15_000, `the host was left running: the run ended ${r.afterSignalMs} ms after SIGTERM${said(r)}`);
@@ -285,6 +359,11 @@ suite('T-81: a test run owns its temp folders', function () {
       [MAC_TMPDIR, 'darwin', { XDG_RUNTIME_DIR: '/run/user/501' }, '/tmp'], // macOS ignores XDG_RUNTIME_DIR
       ['/tmp', 'darwin', {}, '/tmp'],
       [LONG, 'win32', {}, LONG], // named pipes: no path limit
+      // The boundary, exactly: <tmpdir>/bt-test-vscode-XXXXXX/vscode-ipc-<uuid>.sock is the tmpdir plus 75.
+      [`/${'a'.repeat(31)}`, 'linux', {}, `/${'a'.repeat(31)}`], // 107 characters: fits
+      [`/${'a'.repeat(32)}`, 'linux', {}, '/tmp'], // 108: does not
+      [`/${'a'.repeat(27)}`, 'darwin', {}, `/${'a'.repeat(27)}`], // 103: fits
+      [`/${'a'.repeat(28)}`, 'darwin', {}, '/tmp'], // 104: does not
     ];
     const script = `import { vscodeRunFolderBase } from ${JSON.stringify(LIB)};
       const cases = ${JSON.stringify(cases)};
@@ -292,6 +371,41 @@ suite('T-81: a test run owns its temp folders', function () {
     const r = run(['--input-type=module', '-e', script], envFor(freshTmp()));
     assert.equal(r.status, 0, said(r));
     assert.deepEqual(JSON.parse(r.stdout), cases.map((c) => c[3]));
+  });
+
+  test(`the vscode-test door keeps a failed host run's folder under ${KEEP}=failed, and nothing of one that passed`, () => {
+    const env = (tmp: string, exit: string): NodeJS.ProcessEnv => {
+      const e = envFor(tmp, { PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`, T81_FAKE_EXIT: exit, [KEEP]: 'failed' });
+      delete e.DISPLAY;
+      return e;
+    };
+    const failing = freshTmp();
+    const f = run([RUN_TESTS], env(failing, '3'));
+    assert.equal(f.status, 3, said(f));
+    assert.equal(left(failing).length, 1, `a failed host run under ${KEEP}=failed should keep its folder${said(f)}`);
+    assert.match(left(failing)[0] ?? '', /^bt-test-vscode-/);
+    const passing = freshTmp();
+    const p = run([RUN_TESTS], env(passing, '0'));
+    assert.equal(p.status, 0, said(p));
+    assert.deepEqual(left(passing), [], said(p));
+  });
+
+  test('.vscode-test.mjs owns a folder for a host started WITHOUT run-tests.mjs, removed when vscode-test exits, and adds nothing under it', () => {
+    const LIB = path.join(ROOT, 'scripts', 'test-tmp.mjs');
+    const host = `import fs from 'node:fs'; import path from 'node:path'; import { vscodeTestEnv } from ${JSON.stringify(LIB)};
+      const env = vscodeTestEnv(); console.log(JSON.stringify(env));
+      if (env.TMPDIR) fs.writeFileSync(path.join(env.TMPDIR, 'made-by-a-host'), 'x');`;
+    const tmp = freshTmp();
+    const direct = run(['--input-type=module', '-e', host], envFor(tmp));
+    assert.equal(direct.status, 0, said(direct));
+    const env = JSON.parse(direct.stdout) as { TMPDIR?: string };
+    assert.equal(path.dirname(env.TMPDIR ?? ''), tmp, `a direct vscode-test got no folder of its own in ${tmp}${said(direct)}`);
+    assert.match(path.basename(env.TMPDIR ?? ''), /^bt-test-vscode-/);
+    assert.deepEqual(left(tmp), [], `the direct run's folder outlived it${said(direct)}`);
+    const owned = freshTmp();
+    const under = run(['--input-type=module', '-e', host], envFor(owned, { [OWNER]: owned }));
+    assert.equal(under.stdout.trim(), '{}', `under run-tests.mjs it must add nothing${said(under)}`);
+    assert.deepEqual(left(owned), [], said(under));
   });
 
   suite('the check: scripts/check-tmp.mjs', () => {
