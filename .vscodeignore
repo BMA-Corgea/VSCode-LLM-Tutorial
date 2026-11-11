@@ -18,6 +18,7 @@ dist/test/**
 scripts/**
 esbuild.mjs
 eslint.config.mjs
+.mocharc.cjs
 tsconfig.json
 .gitignore
 **/*.ts
