@@ -28,7 +28,8 @@ import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
 import { readSkin } from './skins.js';
 import { StepDecorator } from './walk/editor.js';
 import { resolveInsideTarget } from './walk/paths.js';
-import { WalkSession, type WalkAdapters } from './walk/session.js';
+import { planEnds } from './walk/model.js';
+import { WalkSession, type WalkAdapters, type WalkView } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
@@ -394,7 +395,7 @@ function isOpenableFile(target: string, absPath: string): boolean {
 function walkAdaptersFor(context: vscode.ExtensionContext, target: string): WalkAdapters {
   return {
     setTree: (view) => walkTree?.setView(view),
-    setPanel: (view) => walkPanel?.setView(view),
+    setPanel: (view) => { walkPanel?.setView(view); setEndsContext(view); },
     setStatus: (text) => walkStatus?.setText(text),
     revealEditor: (view) => { void walkDecorator?.revealStep(target, view.step); },
     clearEditor: () => walkDecorator?.clear(),
@@ -778,6 +779,40 @@ export interface ExtensionApi {
 export const NO_WALK_OPEN_MESSAGE = 'Build Tutorials: no tutorial is open in this folder — run "Build Tutorials: Start" to build one.';
 
 /**
+ * T-51: what *Previous step* or *Next step* says when it runs at the end it cannot move past. In the UI it
+ * cannot (the title-bar arrow is disabled there and the palette leaves the command out, through its
+ * `enablement`), so this answers every other way in: a keybinding, another extension's `executeCommand`.
+ * From the second press at the same place it counts, because VS Code collapses a notification identical to
+ * one it is already showing, and an unchanged sentence would look like a press that was ignored.
+ */
+export function atEndMessage(end: 'first' | 'last', presses: number): string {
+  const where = end === 'first' ? 'the first step of the plan — there is nothing before it' : 'the last step of the plan — there is nothing after it';
+  return presses <= 1
+    ? `Build Tutorials: this is ${where}.`
+    : `Build Tutorials: still ${where} (pressed ${presses} times).`;
+}
+
+/**
+ * T-51: the two context keys the commands' `enablement` reads (`package.json`), kept current from every
+ * view the walk pushes, and both false when no walk is open, so that answer is unchanged. At an end VS
+ * Code greys out that end's title-bar arrow and leaves its command out of the palette.
+ */
+function setEndsContext(view: WalkView | undefined): void {
+  const ends = view ? planEnds(view.plan, view.progress) : { atFirst: false, atLast: false };
+  void vscode.commands.executeCommand('setContext', 'buildTutorials.atFirstStep', ends.atFirst);
+  void vscode.commands.executeCommand('setContext', 'buildTutorials.atLastStep', ends.atLast);
+}
+
+/** Presses at one end of one step, counted so the repeat says something new (`atEndMessage`); any move resets it. */
+let atEndPresses = { key: '', count: 0 };
+
+function sayAtEnd(end: 'first' | 'last'): void {
+  const key = `${end}:${walkSession?.getView()?.step.id ?? ''}`;
+  atEndPresses = atEndPresses.key === key ? { key, count: atEndPresses.count + 1 } : { key, count: 1 };
+  void vscode.window.showInformationMessage(atEndMessage(end, atEndPresses.count));
+}
+
+/**
  * What a palette command that needs a walk says when none is open, instead of doing nothing (T-43,
  * F-09b; T-15's rule). "Open" is a session with a view: a plan with no steps leaves a session and
  * nothing to walk, and the panel already says there is no tutorial.
@@ -792,13 +827,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     vscode.commands.registerCommand('buildTutorials.doctor', () => runDoctorCommand(context)),
     vscode.commands.registerCommand('buildTutorials.start', () => runStartCommand(context)),
     vscode.commands.registerCommand('buildTutorials.openWalk', () => runOpenWalkCommand(context)),
+    // T-51: at the end a step command cannot move past, it says so rather than doing nothing.
     vscode.commands.registerCommand('buildTutorials.nextStep', () => {
-      if (walkSession?.getView()) walkSession.next();
-      else sayNoWalkOpen();
+      if (!walkSession?.getView()) { sayNoWalkOpen(); return; }
+      if (walkSession.next()) atEndPresses = { key: '', count: 0 };
+      else sayAtEnd('last');
     }),
     vscode.commands.registerCommand('buildTutorials.prevStep', () => {
-      if (walkSession?.getView()) walkSession.prev();
-      else sayNoWalkOpen();
+      if (!walkSession?.getView()) { sayNoWalkOpen(); return; }
+      if (walkSession.prev()) atEndPresses = { key: '', count: 0 };
+      else sayAtEnd('first');
     }),
     // The tree hands this the step's own id. `unknown`, and checked: the command is also
     // reachable by hand (it is hidden from the palette, not from `executeCommand`), and
