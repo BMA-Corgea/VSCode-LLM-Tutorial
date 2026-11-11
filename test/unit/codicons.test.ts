@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { renderPage, type PageAssets } from '../../src/webview/page.js';
 import { CODICON_GLYPHS } from '../../src/webview/codicons.js';
+import { cssOf, declarationsFor } from './css-rules.js';
 import {
   DETOUR_WAITING_MESSAGE, PREPARING_MESSAGE, THINKING_MESSAGE, renderNoticeHtml, renderStepHtml,
 } from '../../src/walk/step-view.js';
@@ -44,7 +45,7 @@ const ASSETS: PageAssets = {
 
 /** The `@font-face` the page's own sheet declares, and the URL it names. */
 function fontFaceOf(html: string): string | null {
-  return /@font-face{font-family:"codicon";font-display:block;src:url\("([^"]*)"\)format\("truetype"\);?\}/.exec(cssOf(html))?.[1] ?? null;
+  return /@font-face\{font-family:"codicon";font-display:block;src:url\("([^"]*)"\) format\("truetype"\);?\}/.exec(cssOf(html))?.[1] ?? null;
 }
 
 const FAKE_SKINS: SkinsModule = {
@@ -122,22 +123,8 @@ function nonceOf(html: string): string {
   return n;
 }
 
-/** Every `<style>` block of a page, joined, comments dropped and whitespace squeezed out. */
-function cssOf(html: string): string {
-  return [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, '');
-}
-
-/** The declarations of every top-level rule whose selector list contains `selector` exactly. */
-function declarationsFor(css: string, selector: string): string {
-  const squeezed = selector.replace(/\s+/g, '');
-  const out: string[] = [];
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    const selectors = m[1]!.split(',').map((s) => s.trim());
-    if (selectors.includes(squeezed)) out.push(m[2]!);
-  }
-  return out.join(';');
-}
+/* `cssOf` and `declarationsFor` come from `./css-rules.ts`, which keeps a selector's descendant spaces (the
+   squeezing helpers this file first had erased them, so a selector typo passed: T-52's review, F1). */
 
 /**
  * A selector's specificity as one comparable number (ids × 10 000 + classes, attributes and
@@ -255,10 +242,11 @@ suite('T-40: renderPage carries VS Code\'s icon font, and nothing else', () => {
 
     const editor = [...css.matchAll(/([^{}@]+)\{animation:none;?\}/g)].map((m) => m[1]!).flatMap((s) => s.split(','))
       .filter((s) => s.startsWith('body.vscode-reduce-motion') && s.includes('.codicon-modifier-spin'));
+    for (const s of editor) assert.ok(s.startsWith('body.vscode-reduce-motion '), `${s}: the class is on the body and the icon is inside it (a descendant)`);
     assert.ok(editor.length > 0, 'a rule stops the spin when the editor asks for reduced motion');
     for (const s of editor) assert.ok(specificity(s) > strongest, `${s} must outrank the spin rule`);
 
-    const media = /@media\(prefers-reduced-motion:reduce\)\{([^{}]+)\{animation:none;?\}\}/.exec(css);
+    const media = /@media \(prefers-reduced-motion: reduce\)\{([^{}]+)\{animation:none;?\}\}/.exec(css);
     assert.ok(media, 'a rule stops the spin when the operating system asks for reduced motion');
     for (const s of media[1]!.split(',')) {
       assert.ok(s.includes('.codicon-modifier-spin'), s);
@@ -386,7 +374,7 @@ suite('T-40: the icons, where VS Code would draw one', () => {
     const timing = /\.codicon-loading\{animation-duration:([^!;]+)!important;animation-timing-function:([^!;]+)!important;?\}/.exec(shipped);
     assert.ok(timing, 'codicon.css should time its loading icon');
     const page = cssOf(pagesWithAssets()[1]![1]);
-    assert.ok(page.includes(`.codicon-loading.codicon-modifier-spin{animation:codicon-spin${timing[1]}${timing[2]}infinite;}`),
+    assert.ok(page.includes(`.codicon-loading.codicon-modifier-spin{animation:codicon-spin ${timing[1]} ${timing[2]} infinite;}`),
       `the page's spin should be ${timing[1]} ${timing[2]}, as VS Code's`);
   });
 });
