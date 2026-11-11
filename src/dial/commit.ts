@@ -385,6 +385,25 @@ function resolveFiles(target: string, files: readonly string[]): string[] {
 }
 
 /**
+ * What to do about the lock files a git left behind (T-82), said by this extension whatever git says.
+ *
+ * git 2.43 ended its message about a stale lock with "remove the file manually to continue". From
+ * git 2.54, as on GitHub's runners, it says only that the lock "may be stale", and adds no next
+ * step. Both are translated, and a git can also fail and say nothing at all. So this extension never
+ * relies on git's words for the advice: it looks for the lock files themselves. A commit stopped
+ * part-way can leave several: `index.lock`, `HEAD.lock`, `next-index-*.lock`, the branch's own ref
+ * lock, and `index~pid.lock` (`core.lockfilePid`). It names every one it finds (review F1, F8),
+ * because a learner who deletes only the first would meet the next.
+ */
+export function staleLockAdvice(locks: readonly string[]): string {
+  const files = locks.length <= 1 ? (locks[0] ?? '') : `${locks.slice(0, -1).join(', ')} and ${locks[locks.length - 1]}`;
+  const them = locks.length <= 1 ? 'that one file' : 'those files';
+  return 'if no other git is running in this repository (an editor that `git commit` opened, a terminal, '
+    + `another window), a git that stopped earlier left ${files} behind: delete ${them}, and the `
+    + 'next step you complete commits as usual';
+}
+
+/**
  * Ensures `target` is inside a repository, stages exactly `files` — containment-checked,
  * nothing else — and commits exactly those same paths with `commitSubject(step)`, so neither
  * a second file sitting untouched in the same folder nor one the learner has already STAGED
@@ -413,21 +432,6 @@ function resolveFiles(target: string, files: readonly string[]): string[] {
  * `exclude` instead of a tracked `.gitignore`. So "nothing of yours was edited" holds; "it
  * writes nothing" did not, and is not what is claimed here.
  */
-/**
- * What to do about a lock file a git left behind (T-82), said by this extension whatever git says.
- *
- * git 2.43 ended its message about a stale `index.lock` with "remove the file manually to
- * continue". git 2.56, as on GitHub's runners, says only that the lock "may be stale", and adds no
- * next step. Both are translated, and a git can also fail and say nothing at all. So this extension
- * never relies on git's words for the advice: it looks at whether the lock file is there, and when
- * it is, says what to do and names the file.
- */
-export function staleLockAdvice(lock: string): string {
-  return 'if no other git is running in this folder (an editor that `git commit` opened, a terminal, '
-    + `another window), a git that stopped earlier left ${lock} behind: delete that one file, and the `
-    + 'next step you complete commits as usual';
-}
-
 export async function commitStep(
   target: string,
   step: StepLike,
@@ -457,21 +461,46 @@ export async function commitStep(
     const said = err instanceof Error ? err.message : String(err);
     // T-82: when the lock file is really there, say what to do about it, whatever git said. A git
     // this extension stopped keeps its own notice; if it left a lock, the next commit says so here.
-    const lock = refusal === 'git-failed' ? await indexLockLeft(target, git) : null;
-    const reason = lock === null ? said : said ? `${said} — ${staleLockAdvice(lock)}` : staleLockAdvice(lock);
+    const locks = refusal === 'git-failed' ? await locksLeft(target, git) : [];
+    const reason = locks.length === 0 ? said : said ? `${said} — ${staleLockAdvice(locks)}` : staleLockAdvice(locks);
     return { committed: false, reason, refusal };
   }
 }
 
-/** The index lock of the repository `target` is in, when that file is there now; `null` otherwise. */
-async function indexLockLeft(target: string, git: GitRunner): Promise<string | null> {
-  try {
-    // `--git-dir`, as `ensureTranscriptIgnored` does: right for a subdirectory, a worktree and a submodule.
-    const raw = (await git(['rev-parse', '--git-dir'], target)).trim();
-    if (raw === '') return null;
-    const lock = path.resolve(target, raw, 'index.lock');
-    return fs.existsSync(lock) ? lock : null;
-  } catch {
-    return null;
+/**
+ * The lock files a stopped git can have left in the repository `target` is in, there now, sorted.
+ *
+ * `--git-dir` holds the per-worktree ones (`index.lock`, `HEAD.lock`, `next-index-*.lock`,
+ * `index~pid.lock`), and `--git-common-dir` the shared ones (the branch's ref lock under `refs/`,
+ * `packed-refs.lock`). Asked of git, as `ensureTranscriptIgnored` asks, so that a target in a
+ * subfolder, a linked worktree and a submodule are each right. An empty answer is no answer: it
+ * would make the learner's own folder the git dir.
+ */
+async function locksLeft(target: string, git: GitRunner): Promise<string[]> {
+  const ask = async (args: string[]): Promise<string> => {
+    try {
+      return (await git(args, target)).trim();
+    } catch {
+      return '';
+    }
+  };
+  const gitDirRaw = await ask(['rev-parse', '--git-dir']);
+  if (gitDirRaw === '') return [];
+  const gitDir = path.resolve(target, gitDirRaw);
+  const commonRaw = await ask(['rev-parse', '--git-common-dir']);
+  const common = commonRaw === '' ? gitDir : path.resolve(target, commonRaw);
+  const found = new Set<string>();
+  for (const dir of new Set([gitDir, common])) {
+    try {
+      for (const name of fs.readdirSync(dir)) if (name.endsWith('.lock')) found.add(path.join(dir, name));
+    } catch {
+      // a git dir this cannot list: nothing to name from it
+    }
   }
+  const ref = await ask(['symbolic-ref', '-q', 'HEAD']);
+  if (ref.startsWith('refs/')) {
+    const lock = `${path.join(common, ...ref.split('/'))}.lock`;
+    if (fs.existsSync(lock)) found.add(lock);
+  }
+  return [...found].sort();
 }

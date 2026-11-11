@@ -2111,9 +2111,9 @@ export class WalkSession {
    *     the strength of the rare case is still the wrong trade. Nothing is lost by dropping it:
    *     when a lock really does survive, the next commit's reason says so, naming the file and
    *     what to do, down the branch below. That advice is this extension's, given only when the
-   *     file is really there (`staleLockAdvice`, `src/dial/commit.ts`, T-82). It no longer comes
-   *     from git: 2.43 printed "remove the file manually to continue", 2.56 does not, and git's
-   *     words are translated.
+   *     files are really there (`staleLockAdvice`, `src/dial/commit.ts`, T-82). It no longer comes
+   *     from git: 2.43 printed "remove the file manually to continue", 2.54 and later do not, and
+   *     git's words are translated.
    *   - **Anything else** — a stale lock, a `pre-commit` hook, a detached HEAD — keeps the
    *     wording it has always had, and carries git's own words with it.
    */
