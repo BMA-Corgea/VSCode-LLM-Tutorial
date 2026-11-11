@@ -207,7 +207,7 @@ import { DetourSession, type DetourAdapters, type DetourView } from '../detour/s
 import { tutorialId } from '../detour/store.js';
 import { tutorContext } from '../tutor/context.js';
 import type { AskMessage, TutorCore } from '../tutor/core.js';
-import { appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
+import { REPLANNED_TRANSCRIPT_NOTE, appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
 import {
   currentStep,
   nextStepId,
@@ -264,8 +264,14 @@ export const REPLAN_NO_REFERENCE = 'This tutorial has no reference repository re
 export const REPLAN_CANCELLED_UNSENT = 'Re-planning was cancelled. Nothing was changed, and nothing more will be asked.';
 /** T-22: a cancel while a question was with the model, which cannot be unsent (T-6's rule). */
 export const REPLAN_CANCELLED_BILLED = 'Re-planning was cancelled and nothing was changed. The model is still finishing the question it was asked, and that will still be billed.';
-/** T-22: a choice that changes nothing later (a `shape` step with nothing after it). */
-export const REPLAN_NOTHING_FOLLOWS = 'Your choice is recorded. Nothing later in the walk depends on this step, so the rest of the walk stands.';
+/** T-22: a choice that changes nothing later (a `shape` step with nothing after it), on its own page, where
+ *  the road's own line says the rest (`DIVERGED_NOTE`): the same fact is not said twice (code review MF1). */
+export const REPLAN_NOTHING_FOLLOWS = 'Your choice is recorded.';
+
+/** The same, on another step's page, naming the step it was at (code review SF3). */
+export function replanNothingFollowsText(at: string | null): string {
+  return at === null ? REPLAN_NOTHING_FOLLOWS : `Your choice at ${at} is recorded. Nothing later depended on it, so the rest of the walk stands.`;
+}
 
 /** T-22: why a re-plan did not land. It always says the state is as it was, and that the press still works. */
 export function replanRefusedText(reason: string): string {
@@ -279,12 +285,30 @@ function replanCostText(cost: DeriveCost): string {
   return `It took ${questions} and cost ${cost.metered === true ? 'about' : 'at least'} $${cost.usd < 1 ? cost.usd.toFixed(4) : cost.usd.toFixed(2)}.`;
 }
 
-/** T-22: what a re-plan that landed changed, and what it cost. */
-export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost): string {
+/**
+ * T-22: what a re-plan that landed changed, and what it cost. `at` names the step it was at when the
+ * learner is on another one, whose own code did not change (code review SF3); `null` on its own page.
+ * `fileAsItWas`: the learner's own file is the one from before, and arriving at the step again is how
+ * the new code is written (a landing is not an arrival; code review N9).
+ */
+export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost, at: string | null = null, fileAsItWas = false): string {
+  // Every later step that stood on a chapter decision was walked: nothing re-derived, nothing asked (code review MF1).
+  if (fresh === 0 && !ownCode) {
+    return at === null
+      ? 'Your choice is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned.'
+      : `Your choice at ${at} is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned; that step's page names them.`;
+  }
+  const its = at === null ? 'This step\u2019s code' : 'Its code';
   const what = fresh > 0
-    ? `${ownCode ? 'This step\u2019s code and ' : ''}${fresh} later step${fresh === 1 ? '' : 's'} now follow${fresh === 1 && !ownCode ? 's' : ''} your choice.`
-    : 'This step\u2019s code now follows your choice. No later step needed re-planning.';
-  return `Re-planned. ${what} ${replanCostText(cost)}`;
+    ? `${ownCode ? `${its} and ` : ''}${fresh} later step${fresh === 1 ? '' : 's'} now follow${fresh === 1 && !ownCode ? 's' : ''} your choice.`
+    : `${its} now follows your choice. No later step needed re-planning.`;
+  const file = fileAsItWas && at === null ? ' Your file is as you left it: come back to this step to have the new code written.' : '';
+  return `${at === null ? 'Re-planned.' : `Re-planned from your choice at ${at}.`} ${what}${file} ${replanCostText(cost)}`;
+}
+
+/** How a step is named on another step's page: its place, and its file or chapter. */
+function stepLabel(step: StepLike): string {
+  return `step ${step.ordinal} (${step.target.file})`;
 }
 
 /** Every ticket a derivation opens starts with this; see `AskLedger.abandonPrefixed`. */
@@ -1004,8 +1028,18 @@ export class WalkSession {
     if (!outcome.changed) {
       this.replan = undefined;
       this.progress = setChosenIn(this.progress, job.stepId, job.optionId);
-      this.sayChoice(job, REPLAN_NOTHING_FOLLOWS);
+      const here = this.plan.steps.find((s) => s.id === job.stepId);
+      this.sayChoice(job, replanNothingFollowsText(this.progress.current === job.stepId || here === undefined ? null : stepLabel(here)));
       this.commit(false);
+      return;
+    }
+    // What the learner finished while this ran, and the new plan would replace (code review SF6): walked
+    // is fixed at the press, so their work there would leave the walk without a word. Refused, and said.
+    const stays = new Set(outcome.plan.steps.map((s) => s.id));
+    const finished = derivedFrom.steps.filter((s) => !stays.has(s.id) && this.progress.steps[s.id]?.status === 'done');
+    if (finished.length > 0) {
+      const named = finished.slice(0, 8).map(stepLabel).join(', ') + (finished.length > 8 ? `, and ${finished.length - 8} more` : '');
+      this.replanRefused(job, replanRefusedText(`you finished ${named} while it re-planned, and the new plan would have replaced ${finished.length === 1 ? 'it' : 'them'}. Press the road again to re-plan with your work kept`));
       return;
     }
     try {
@@ -1021,11 +1055,21 @@ export class WalkSession {
     this.progress = setChosenIn(this.progress, job.stepId, job.optionId);
     if (this.progress.current === null || !this.hasStep(this.progress.current)) this.progress = setCurrent(this.progress, job.stepId);
     this.forgetOldCode(job.stepId);
-    this.clearStepNotes();
+    // Only D's own notes describe code that is gone: an unrelated step the learner moved on to keeps its
+    // "What to write" (code review SF9).
+    const atD = this.progress.current === job.stepId;
+    if (atD) this.clearStepNotes();
     const decided = outcome.plan.steps.find((s) => s.id === job.stepId);
+    const ownCode = decided !== undefined && decided.kind !== 'shape';
+    // D keeps its id, so its conversation is about the author's code: a line in it says so, and the history
+    // a later question sends starts there (code review N12; `sentTurns`).
+    if (ownCode && getTranscript(this.progress, job.stepId).length > 0) {
+      this.progress = appendTurn(this.progress, job.stepId, { role: 'assistant', content: REPLANNED_TRANSCRIPT_NOTE, kind: 'note' });
+    }
     // D marks its own code as re-derived, so it is not one of the steps that followed it.
     const followed = outcome.plan.steps.filter((s) => s.derivedFrom === job.stepId && s.id !== job.stepId).length;
-    this.sayChoice(job, replanDoneText(followed, decided?.kind !== 'shape', outcome.cost));
+    const fileAsItWas = ownCode && stepDial(this.progress, job.stepId, request.dial) !== 'manual';
+    this.sayChoice(job, replanDoneText(followed, ownCode, outcome.cost, atD || decided === undefined ? null : stepLabel(decided), fileAsItWas));
     this.commit(false);
   }
 
@@ -2765,7 +2809,14 @@ export class WalkSession {
     // out. There is nothing left to cancel about an ask the learner already cancelled.
     // A re-plan's questions are shown as the re-plan (`WalkView.replanning`), not as a tutor question elsewhere.
     const away = this.ledger.live().find((entry) => entry.stepId !== stepId && !entry.abandoned && !entry.stepId.startsWith(REPLAN_TICKET_PREFIX));
-    const spend = this.ledger.spend();
+    // A re-plan's questions are shown as the re-plan, so they are not counted as with the tutor (code review N4).
+    const live = this.ledger.live().filter((entry) => !entry.stepId.startsWith(REPLAN_TICKET_PREFIX));
+    const spend = {
+      ...this.ledger.spend(),
+      preparing: live.filter((e) => e.phase === 'preparing').length,
+      sending: live.filter((e) => e.phase === 'sending').length,
+      unwatched: live.filter((e) => e.phase === 'sending' && e.abandoned).length,
+    };
     return {
       thinking: here !== undefined,
       ...(stage === 'preparing' || stage === 'sending' ? { stage } : {}),

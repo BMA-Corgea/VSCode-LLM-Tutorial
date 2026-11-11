@@ -823,7 +823,25 @@ suite('a step a re-plan wrote has no author (T-22, AC7)', () => {
     const label = step.decision.options.find((o) => o.id === 'stream')!.label;
     assert.match(ctx.build?.why ?? '', /^There is no author for this step/);
     assert.ok((ctx.build?.why ?? '').includes(label));
-    assert.ok((ctx.build?.why ?? '').includes(step.decision.why), 'and the reason is still there');
+    // T-22's code review, SF1: that reason was the recommended road's, sent beside the learner's.
+    assert.ok(!(ctx.build?.why ?? '').includes(step.decision.why), 'and not the reason for the road the learner turned down');
+  });
+
+  test('on the learner\'s road the tutor gets no reason written for another, and the road its code follows is marked (code review SF1)', async () => {
+    const step = rederived('stream');
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    assert.ok(!(ctx.fileMeaning ?? '').includes(step.decision.why), `fileMeaning: ${JSON.stringify(ctx.fileMeaning)}`);
+    assert.doesNotMatch(ctx.fileMeaning ?? '', /from the author's own comment|from the model, reading the code/, 'and the sentence in its place is not attributed to a source it did not come from');
+    assert.match(renderOptionsText(step), /\[the road this code follows\] Stream the response as it is produced/);
+    assert.equal((renderOptionsText(step).match(/\[the road this code follows\]/g) ?? []).length, 1, 'one road is marked');
+  });
+
+  test('a step the model wrote, on its own recommended road, keeps the reason it was written with', async () => {
+    const step = { ...rederived(null), derivedFrom: 'st-2-file-parse' };
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    assert.ok((ctx.fileMeaning ?? '').includes(step.decision.why), 'its reason is for the road its code follows');
+    assert.ok((ctx.build?.why ?? '').includes(step.decision.why));
+    assert.match(renderOptionsText(step), /\[the road this code follows\] What the author did/);
   });
 
   test('a step the model wrote, with no road chosen, still says so', async () => {

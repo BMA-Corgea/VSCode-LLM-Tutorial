@@ -129,6 +129,46 @@ export function treeNamedBy(plan: PlanLike): string | undefined {
   return typeof tree === 'string' && tree.length > 0 ? tree : undefined;
 }
 
+/**
+ * The reason a plan gives at a decision is the reason for the road it RECOMMENDS: repo-tour's `why` is
+ * why the author did it their way, and a derived node's is why its `recommended` option is the one.
+ * Sent beside any other road it argues for the road not taken, and a model asked for that road's code
+ * follows the reason over the choice: T-22's live run asked for "Scan the ranges one by one" with "Binary
+ * search on a sorted flat array of [start, end] pairs." as the why, and got a binary search. So another
+ * road goes out with a sentence that says whose road it is, and the reason stays with its own road.
+ */
+export function whyForRoad(why: string, chosenId: string, recommendedId: string, recommendedLabel: string | undefined): string {
+  if (chosenId === recommendedId) return why;
+  const named = recommendedLabel === undefined ? '' : ` ("${recommendedLabel}")`;
+  return `The learner chose this road instead of the recommended one${named}. The plan's reason for the recommended road does not apply to this one.`;
+}
+
+
+/**
+ * The road a step's code follows: what a re-plan derived it with (`decision.chosen`), else the one it
+ * recommends. Only a re-derived step's code follows `chosen`; an author's step is the author's road.
+ */
+export function roadItsCodeFollows(step: StepLike): string {
+  return step.derivedFrom !== undefined && step.decision.chosen !== null ? step.decision.chosen : step.decision.authorChoice;
+}
+
+/** The step's `why`, sent only beside the road it was written for (`whyForRoad`): a re-derived step's code may follow another. */
+export function whyOfStep(step: StepLike): string {
+  const why = typeof step.decision.why === 'string' ? step.decision.why : '';
+  if (step.derivedFrom === undefined) return why;
+  return whyForRoad(why, roadItsCodeFollows(step), step.decision.authorChoice, step.decision.options.find((o) => o.id === step.decision.authorChoice)?.label);
+}
+
+/**
+ * Whether anything later stands on this step: a step whose `dependsOn` names it, or, for a chapter's shape
+ * step, a file in that chapter (the edge the engine adds, `graphOf` in `../derive/diverge.ts`).
+ */
+export function stepHasDependents(plan: PlanLike, stepId: string): boolean {
+  const step = plan.steps.find((s) => s.id === stepId);
+  if (step === undefined) return false;
+  return plan.steps.some((s) => s.id !== stepId && (s.dependsOn.includes(stepId) || (step.kind === 'shape' && s.kind === 'file' && s.chapter === step.chapter)));
+}
+
 /** T-22: the plan's own record of the last re-plan decided at this step, if it has one. */
 export function divergenceAt(plan: PlanLike, stepId: string): { staleDependents: string[]; replanned: boolean } | undefined {
   const all: unknown = plan['divergences'];

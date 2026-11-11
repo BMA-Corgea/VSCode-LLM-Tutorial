@@ -175,7 +175,7 @@ import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
 import { renderPage } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
-import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, optionsTable, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
+import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, optionsTable, stepHasDependents, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
 import { DERIVED_CODE_MISSING_MESSAGE } from './reference.js';
 
@@ -261,8 +261,12 @@ export function staleStepsNote(names: readonly string[], omitted: number): strin
   const one = names.length + omitted === 1;
   return `You have already walked ${one ? 'a step' : 'steps'} that stood on the old road: ${list}. Your files are as you left them, so ${one ? 'it' : 'they'} may need revisiting.`;
 }
-/** T-21, T-22: a choice that re-planned nothing, because nothing later depended on it. */
+/** T-21, T-22: a choice at a chapter step that nothing later stands on, so there was nothing to re-plan. */
 export const DIVERGED_NOTE = 'You chose a different road here. Nothing later depended on it, so the rest of the walk stands.';
+/** T-22 (code review SF4): a choice with no re-plan on record, at a step something does stand on (a T-21-era choice). */
+export const NOT_REPLANNED_NOTE = 'You chose a different road here, but the walk was not re-planned from it: this step and the steps after it still follow the author\u2019s road.';
+/** T-22 (code review MF1): a re-plan was recorded at this step and re-derived nothing: everything that stood on it was walked. */
+export const RECORDED_NOTE = 'Your choice at this step is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned.';
 
 // ── the render caps (T-4 security review, finding 3) ───────────────────────────────────────
 // See the file header for the threat: `webview.html = ...` is synchronous on the extension
@@ -850,7 +854,11 @@ function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replan
     ? `<p class="options-refused" id="choice-note" role="note">${escapeHtml(planText(choiceNote))}</p>`
     : '';
   const record = divergenceAt(plan, step.id);
-  const road = record !== undefined ? REPLANNED_NOTE : table.diverged ? DIVERGED_NOTE : '';
+  // Each line from what is known: a record and what it did, or what the plan itself shows follows this step
+  // ("nothing later depended on it" is never concluded from a record that is merely absent: code review SF4).
+  const road = record !== undefined
+    ? (record.replanned ? REPLANNED_NOTE : RECORDED_NOTE)
+    : table.diverged ? (step.kind === 'shape' && !stepHasDependents(plan, step.id) ? DIVERGED_NOTE : NOT_REPLANNED_NOTE) : '';
   const roadNote = road === '' ? '' : `<p class="options-diverged" role="note">${escapeHtml(road)}</p>`;
   const writtenNote = noAuthor ? `<p class="options-diverged" role="note">${escapeHtml(WRITTEN_BY_THE_MODEL_NOTE)}</p>` : '';
   const stale = staleNoteText(plan, record);
@@ -2114,6 +2122,7 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
     state.derivedCodeMissing === true, // T-22: the code it was re-derived to is gone
     state.replanning ? [keyOf(state.replanning.stepId), keyOf(state.replanning.message)] : null, // T-22: every report changes the page
     divergenceAt(state.plan, id) !== undefined, // T-22: "the walk was re-planned here"
+    divergenceAt(state.plan, id)?.replanned ?? null, // T-22: or recorded, with nothing re-planned
     keyOf(staleNoteText(state.plan, divergenceAt(state.plan, id))), // T-22 (M1)
     keyOf(decision.why, MAX_PLAN_TEXT),
     decision.whySource,

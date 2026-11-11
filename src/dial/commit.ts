@@ -364,7 +364,10 @@ export function commitSubject(step: StepLike): string {
   // T-22: code a re-plan wrote follows the road it was derived with, whoever took the other one.
   const followed = step.derivedFrom === undefined ? undefined : step.decision.options.find((option) => option.id === step.decision.chosen);
   const taken = followed ?? step.decision.options.find((option) => option.taken);
-  const label = taken ? taken.label : '(no option marked taken)';
+  // A re-derived step back on the author's road is still the model's code (code review SF7): repo-tour
+  // labels that row "What the author did", and this lands in the learner's own git history.
+  const authorsWords = step.derivedFrom !== undefined && taken !== undefined && /^\s*what the author did\s*$/i.test(taken.label);
+  const label = authorsWords ? 'the author\u2019s road, as the model re-derived it' : taken ? taken.label : '(no option marked taken)';
   return `${step.ordinal}: ${step.decision.question} — ${label}`;
 }
 

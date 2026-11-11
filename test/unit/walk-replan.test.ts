@@ -17,6 +17,7 @@ import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
 import type { Dial } from '../../src/start/request.js';
 import { tutorCoreFor, type LlmReply, type TutorCore } from '../../src/tutor/core.js';
 import { DERIVED_CODE_MISSING_MESSAGE } from '../../src/walk/reference.js';
+import { REPLANNED_TRANSCRIPT_NOTE, getTranscript, sentTurns } from '../../src/tutor/transcript.js';
 import { setCurrent, setDial, markDone, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import {
   CHOICE_ALREADY_REPLANNING, CHOICE_ALREADY_TAKEN, REPLAN_CANCELLED_BILLED, REPLAN_CANCELLED_UNSENT, REPLAN_NOTHING_FOLLOWS,
@@ -33,7 +34,10 @@ const LATER = 'st-4-symbol-render';
 const TREE = 'k/new';
 
 const made: string[] = [];
+/** Every session a harness opened: disposed after each test, so no ledger leaves its scratch folder behind (code review N14). */
+const opened: WalkSession[] = [];
 teardown(() => {
+  for (const session of opened.splice(0)) session.dispose();
   for (const dir of made.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -186,6 +190,7 @@ function harness(options: Options = {}): Harness {
     }),
   };
   const session = WalkSession.open(target, adapters);
+  opened.push(session);
   coreCalls = 0;
   views.length = 0;
   return {
@@ -303,7 +308,9 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     const h = harness();
     h.session.choose(D, ANSWER);
     await finish(h, await reachedEngine(h), landed(h.plan, h.tree));
-    assert.equal(h.view().choiceNote, replanDoneText(1, true, COST));
+    // The walk's dial is automated: the learner's file is the one from before (a landing is not an arrival; code review N9).
+    assert.equal(h.view().choiceNote, replanDoneText(1, true, COST, null, true));
+    assert.match(h.view().choiceNote ?? '', /Your file is as you left it/);
     assert.match(h.view().choiceNote ?? '', /\$0\.0123/);
   });
 
@@ -324,7 +331,9 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     };
     await finish(h, await reachedEngine(h), { ok: true, changed: true, plan: next, derivedRoot: h.tree, staleDependents: [], cost: COST });
     assert.deepEqual(loadPlan(h.target), next, 'discriminates: it landed');
-    assert.equal(h.view().choiceNote, replanDoneText(1, false, COST), 'one later step follows the choice, and no code of the shape step\'s own');
+    // The learner stands on D, not on the chapter step: the note names where the press was (code review SF3).
+    assert.equal(h.view().choiceNote, replanDoneText(1, false, COST, 'step 1 (src)'), 'one later step follows the choice, and no code of the shape step\'s own');
+    assert.doesNotMatch(h.view().choiceNote ?? '', /This step/, 'and it does not say "this step" on another step\'s page');
   });
 
   test('when nothing later needed re-planning the note does not say nothing depended on it: a walked step may have', () => {
@@ -830,5 +839,91 @@ suite('the one reader, by what each reader does on a landed plan (T-22, AC5)', (
     } finally {
       again.dispose();
     }
+  });
+});
+
+// T-22's code review: what became of a press, said where it is true.
+suite('what a landing says, and what it leaves alone (T-22; code review MF1, SF3, SF6, SF9, N4, N12)', () => {
+  test('on another step\'s page the note names the step the press was at: that step\'s code did not change (SF3)', async () => {
+    const h = harness();
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    h.session.goTo('st-1-shape-src');
+    await finish(h, job, landed(h.plan, h.tree));
+    assert.equal(h.view().step.id, 'st-1-shape-src', 'discriminates: the learner is not on D');
+    assert.match(h.view().choiceNote ?? '', /^Re-planned from your choice at step 2 \(src\/parse\.ts\)\. Its code and 1 later step now follow your choice\./);
+    assert.doesNotMatch(h.view().choiceNote ?? '', /This step/);
+  });
+
+  test('a chapter whose followers were all walked: recorded, nothing re-planned, and said so (MF1)', async () => {
+    const h = harness();
+    const SHAPE = 'st-1-shape-src';
+    h.session.choose(D, ANSWER); // D is the file in the chapter; the press here only gives the walk a plan of its own to record on
+    await finish(h, await reachedEngine(h), FAILED);
+    const plan = h.plan;
+    const recorded: PlanLike = { ...plan, steps: plan.steps.map((s) => (s.id === SHAPE ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s)), divergences: [{ stepId: SHAPE, answer: 'author', staleDependents: [D], at: 't', replanned: false }] };
+    const h2 = harness({ plan: { ...plan, steps: plan.steps.map((s) => (s.id === SHAPE ? { ...s, decision: { ...s.decision, options: [...s.decision.options, { id: 'flat', label: 'One folder', consequence: 'c', taken: false }] } } : s)) } });
+    h2.session.choose(SHAPE, 'flat');
+    await finish(h2, await reachedEngine(h2), { ok: true, changed: true, plan: recorded, derivedRoot: null, staleDependents: [D], cost: { ...COST, calls: 0, usd: 0 } });
+    assert.equal(h2.view().choiceNote, replanDoneText(0, false, { ...COST, calls: 0, usd: 0 }, 'step 1 (src)'));
+    assert.match(h2.view().choiceNote ?? '', /nothing was re-planned/);
+    assert.doesNotMatch(h2.view().choiceNote ?? '', /^Re-planned/, 'nothing was re-planned, so it does not say it was');
+  });
+
+  test('a step the learner finished while it re-planned, which the new plan would replace: refused, and named (SF6)', async () => {
+    const h = harness();
+    const before = h.bytes();
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    h.session.goTo(LATER);
+    h.session.markDone(LATER);
+    await turns(); // not `settled()`: that waits for the re-plan, which this test is holding open
+    const finishedBytes = h.bytes();
+    assert.notDeepEqual(finishedBytes, before, 'discriminates: the step was finished, on disk');
+    await finish(h, job, landed(h.plan, h.tree));
+    assert.match(h.view().choiceNote ?? '', /you finished step 4 \(src\/api\/render\.ts\) while it re-planned/);
+    assert.ok(h.view().plan.steps.some((s) => s.id === LATER), 'the step the learner finished is still in the walk');
+    assert.deepEqual(h.bytes(), finishedBytes, 'and nothing else moved: not the plan, not a version');
+  });
+
+  test('a landing leaves an unrelated step\'s "What to write" alone; only D\'s own notes go (SF9)', async () => {
+    const h = harness({ progress: (p) => setDial(fixtureProgress(p), 'st-1-shape-src', 'manual'), navigates: true });
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    h.session.goTo('st-1-shape-src');
+    await turns();
+    const note = (h.session as unknown as { note?: { stepId: string; text: string } }).note;
+    (h.session as unknown as { note: { stepId: string; text: string } }).note = { stepId: 'st-1-shape-src', text: 'a note about this step' };
+    await finish(h, job, landed(h.plan, h.tree));
+    assert.equal(h.view().writeNote, 'a note about this step', `the learner's page on another step keeps its own note (it had ${JSON.stringify(note)})`);
+  });
+
+  test('a re-plan\'s question in flight is not "with the tutor" (N4)', async () => {
+    const h = harness();
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    let end: (() => void) | undefined;
+    const running = (): Promise<LlmReply> => new Promise((resolve) => { end = () => { resolve({ text: 'x', inputTokens: 0, outputTokens: 0, usd: 0, metered: false }); }; });
+    const core = { availability: () => Promise.resolve({ ok: true as const }), resolveTutorChoice: (_: unknown, build: unknown) => build, resolveChoice: (c: unknown) => c, runLlm: running };
+    const ticket = job.hooks.ledger.open('derive:diverge:x');
+    ticket.sendPrompt({ core, provider: 'p', model: 'm', timeoutMs: 60_000, run: running } as never, 'a question');
+    await turns();
+    assert.ok(end, 'discriminates: the question went out');
+    // A repaint while it is out: the view is drawn when the page is, so a stale one would prove nothing.
+    job.hooks.onProgress('writing src/parse.ts…');
+    assert.equal((job.hooks.ledger.spend()).sending, 1, 'discriminates: the ledger has it in flight');
+    assert.equal(h.view().tutor?.spend?.sending ?? 0, 0, 'the tutor has nothing in flight');
+    end();
+    await finish(h, job, FAILED);
+  });
+
+  test('D\'s conversation says its code was re-derived, and later questions are not sent the history about the author\'s code (N12)', async () => {
+    const h = harness({ progress: (p) => ({ ...fixtureProgress(p), steps: { ...fixtureProgress(p).steps, [D]: { ...fixtureProgress(p).steps[D]!, transcript: [{ role: 'user', content: 'why a tokenizer?' }, { role: 'assistant', content: 'because the author…' }] } } }) });
+    h.session.choose(D, ANSWER);
+    await finish(h, await reachedEngine(h), landed(h.plan, h.tree));
+    const progress = loadProgress(h.target, loadPlan(h.target));
+    const turnsAtD = getTranscript(progress, D);
+    assert.equal(turnsAtD.at(-1)?.content, REPLANNED_TRANSCRIPT_NOTE, 'the line is in the conversation, where the learner reads it');
+    assert.deepEqual(sentTurns(progress, D), [], 'and nothing from before it is sent as history about the new code');
   });
 });

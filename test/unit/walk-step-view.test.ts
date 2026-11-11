@@ -58,7 +58,7 @@ import {
   MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT,
   MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE,
   NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE,
-  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, MAX_STALE_NAMED, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
+  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, NOT_REPLANNED_NOTE, RECORDED_NOTE, MAX_STALE_NAMED, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, CLEAR_CONFIRM_LABEL, PREPARING_MESSAGE,
@@ -403,7 +403,9 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     assert.ok(list.includes('data-option-id="author">'), 'the author\'s option is still there');
     assert.ok(list.includes(`data-option-id="author">${CHOOSE_LABEL}</button>`), 'and choosable again — latest wins');
     assert.ok(!list.includes(`data-option-id="stream">${CHOOSE_LABEL}</button>`), 'his own road is not a control');
-    assert.ok(renderStepHtml(state, FAKE_SKINS).includes(DIVERGED_NOTE), 'and the line says the rest of the walk has not changed');
+    // T-22's code review, SF4: with no re-plan on record the walk was not re-planned, and something does stand on this step.
+    assert.ok(renderStepHtml(state, FAKE_SKINS).includes(escapeForHtml(NOT_REPLANNED_NOTE)), 'and the line says the walk was not re-planned from it');
+    assert.ok(!renderStepHtml(state, FAKE_SKINS).includes(escapeForHtml(DIVERGED_NOTE)), 'not that nothing depended on it');
   });
 
   test('a choice moves the repaint key — or the panel would never redraw it, and the press would be silent (T-15)', () => {
@@ -455,7 +457,7 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     const region = /<div class="options-outcome" id="outcome-choice">([\s\S]*?)<\/div><ul class="options">/.exec(html);
     assert.ok(region, 'the region directly precedes the rows');
     assert.ok(region[1]!.includes('Refused.'));
-    assert.ok(region[1]!.includes(escapeForHtml(DIVERGED_NOTE)));
+    assert.ok(region[1]!.includes(escapeForHtml(NOT_REPLANNED_NOTE)));
   });
 
   test('a row whose id another row shares, or that a press could not carry, offers no control (C4, C6, S4)', () => {
@@ -3253,13 +3255,24 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
   });
 
   test('a choice that changed nothing later says so, and the promise that this was not built is gone (AC7)', () => {
+    // A chapter step nothing stands on: the only place "nothing later depended on it" is known (code review SF4).
     const base = stateAt(ON);
-    const step = { ...base.step, decision: { ...base.step.decision, chosen: 'stream' } };
-    const page = html({ ...base, step });
+    const docs: StepLike = { ...base.step, id: 'st-docs', kind: 'shape', chapter: 'docs', target: { file: 'docs' }, dependsOn: [], decision: { ...base.step.decision, chosen: 'stream' } };
+    const page = html({ ...base, plan: { ...base.plan, steps: [...base.plan.steps, docs] }, step: docs });
     assert.ok(page.includes(escapeForHtml(DIVERGED_NOTE)));
     assert.ok(!page.includes(escapeForHtml(REPLANNED_NOTE)));
     assert.ok(!/isn.t built yet/.test(DIVERGED_NOTE), 'the sentence itself');
     assert.ok(!/isn.t built yet/.test(fs.readFileSync(path.join(process.cwd(), 'src/walk/step-view.ts'), 'utf8')), 'and anywhere in the file');
+  });
+
+  // T-22's code review, MF1: everything that stood on a chapter decision was walked, so nothing was re-planned.
+  test('a record that re-planned nothing says so, and names the walked steps, instead of claiming a re-plan', () => {
+    const base = replannedHere(['st-1-shape-src']);
+    const plan = { ...base.plan, divergences: [{ stepId: ON, answer: 'stream', staleDependents: ['st-1-shape-src'], at: 't', replanned: false }] };
+    const page = html({ ...base, plan });
+    assert.ok(page.includes(escapeForHtml(RECORDED_NOTE)), 'it says the choice is recorded and why nothing was re-planned');
+    assert.ok(!page.includes(escapeForHtml(REPLANNED_NOTE)), 'not that the model re-planned anything');
+    assert.ok(page.includes(escapeForHtml(staleStepsNote(['step 1 (src)'], 0))), 'and the walked step that stood on the old road is named');
   });
 
   test('an untouched step says none of it', () => {
