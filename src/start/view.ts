@@ -45,8 +45,10 @@ export const SUBMIT_NOTES = {
 } as const;
 
 const PAGE_CSS = `
-.start-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
+.start-head { margin-bottom:18px; }
 .start-head h1 { font-size:16px; margin:0; }
+/* T-41: the skin picker's place, the same as on the step panel. */
+.panel-foot { margin-top:20px; }
 main { max-width:640px; margin:0 auto; padding:20px 24px 40px; }
 .field { margin-bottom:16px; }
 .field > label { display:block; font-weight:600; margin-bottom:6px; }
@@ -90,7 +92,6 @@ function bodyHtml(state: PanelState, skins: SkinsModule): string {
 <main>
   <div class="start-head">
     <h1>Build a tutorial</h1>
-    ${pickerHtml(skins.SKINS, state.skin)}
   </div>
   <form id="start-form">
     <div class="field">
@@ -132,6 +133,8 @@ function bodyHtml(state: PanelState, skins: SkinsModule): string {
          ended. The build's own progress notification is in the corner, not here. -->
     <p class="submit-note" id="submit-note" role="status" aria-live="polite" data-kind="${noteKind(state)}">${noteKind(state) ? escapeHtml(SUBMIT_NOTES[noteKind(state) as keyof typeof SUBMIT_NOTES]) : ''}</p>
   </form>
+
+  <div class="panel-foot">${pickerHtml(skins.SKINS, state.skin)}</div>
 </main>`;
 }
 

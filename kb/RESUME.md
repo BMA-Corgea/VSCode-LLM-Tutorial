@@ -1,145 +1,123 @@
-# RESUME — Build Tutorials · overnight foreman run of Thu 2026-11-05, 00:30–02:35 MST
+# RESUME — Build Tutorials · foreman continuation run of Sun 2026-11-08, 11:50–16:30 MST
 
 > **Read this file first and read it in order. It is written for someone who was not here.**
 > Sections 1 and 2 save you from being wrong; the board is further down because the tracker
-> regenerates it in one command. The run ended on the week's usage meter (wind-down at 96%), not
-> because the work ran out.
+> regenerates it in one command. The run ended on the week's usage meter, by design.
 
-**In one line:** T-15 and T-16 landed and are on GitHub's `main` (`89a6546`); T-9 and T-10 were
-routed into seven tickets; T-17 (the derivation engine) and T-21 (choosing the road not taken)
-are part-built on local branches with true handoffs. Nothing was published to any marketplace.
+**In one line:** eight tickets landed and are on GitHub's `main` (`35f805c`): T-21, T-30, T-17, T-44,
+T-42, T-43, T-19, T-41. T-22 (the replan) is built most of the way on a local branch. Nothing was
+published to any marketplace. The owner's form answers are in the local ledger as GA-16.
 
 ---
 
 ## 1 · WHAT YOU WILL GET WRONG IF YOU TRUST THIS REPO
 
-1. **"T-15 shipped in September."** It merged then (`642eff4`) but its own goal was unmet: re-driven
-   on `main` on 2026-11-05, a second press with nothing edited changed nothing visible, a
-   double-click started two builds, and closing the start tab mid-build threw "Webview is
-   disposed" (and, on success, never opened the walk). Finished to AC1–AC8 and pushed at `a1c6400`.
-   Record: `.autodev/evidence/T-15/refine.md`, `uat.md`.
-2. **"vscode-test runs under xvfb by itself."** Only when `DISPLAY` is unset:
-   `scripts/run-tests.mjs` runs vscode-test DIRECTLY on any set `DISPLAY`, and the default tmux
-   server exports the desktop's (`:1` here). Start seats with `env -u DISPLAY` (this run's
-   `foreman.conf` does).
-3. **"vscode-test runs VS Code 1.136.1."** `.vscode-test.mjs` pins no version; it resolves "stable"
-   over the network on every run (1.145.0 here, a 361 MB download into each tree's `.vscode-test/`
-   unless you symlink one in).
-4. **"The screen tests are solid."** T-15's start-screen test *"a folder picker left open across
-   the END of a build…"* times out under machine load (6–8+): it failed during T-16's run and twice
-   in T-21's review, and passed on every quiet run. A failed step-screen test can also drag a T-15
-   screen test down with it. Not yet ticketed — see section 2.
-5. **"T-22 can start once T-17 and T-21 are on main."** The tracker's `--after` clears only when a
-   blocker has passed accept, release AND monitor.
-6. **T-14's `risk: low`** is stale and immutable: undo touches plan versions on the learner's disk.
+1. **"The walk re-plans after a choice."** Only on the branch `feature/T-22-the-replan` (local,
+   not merged; see section 2). On `main`, a press records the choice and the panel says plainly the
+   rest of the walk hasn't changed.
+2. **"The idea box exists."** `src/derive/` (T-17) landed on `main` and has **no caller in the shipped
+   extension** until T-20. T-17's proof is one live derivation (`.autodev/evidence/T-17/live-run.md`,
+   4 calls, $0.11): the prompts changed after that run, so what the model would write now is not
+   re-proved. T-19's harness proves the engine listens, on a fake model; it says nothing about a real
+   model or about plan quality.
+3. **"The screen suite is solid."** T-15's start-screen test *"a folder picker left open across the
+   END of a build…"* (T-80) fails intermittently, often under load, and passed on the final full run.
+   T-21's seat found it polls for a state lasting milliseconds (in a failing probe the second build
+   DID start). Don't read one failure as a regression; re-run once. T-80 holds the leads.
+4. **"vscode-test runs VS Code 1.145.0."** `.vscode-test.mjs` pins no version; `stable` resolves over
+   the network on every run. It is **1.145.2** now, and a tree without it downloads about 1 GB into its
+   `.vscode-test/`. Symlink an existing install instead.
+5. **"vscode-test runs under xvfb by itself."** Only when `DISPLAY` is unset: start seats with
+   `env -u DISPLAY -u WAYLAND_DISPLAY` (the local `foreman.conf` does).
+6. **"The test suites clean up after themselves."** They don't: each unit run leaves about 390 temp
+   folders in `/tmp` (T-81). Three seats filled the root disk this way in one afternoon; the foreman
+   cleared about 2.6 GB by exact path.
+7. **T-22's product call (M1) is already ruled:** the page warns and names each walked step that
+   stood on the old road, and the decision's own code follows the answer (foreman's ruling, reversible;
+   recorded in T-22's spec and handoff). Don't re-litigate it unless the owner overturns it.
+8. **T-14's `risk: low`** is stale and immutable (undo touches plan versions on the learner's disk).
    Override its review depth by hand, in its own evidence.
-7. **"The learner's choice is `options[].chosen`."** It is `step.decision.chosen` (T-1 §4.2). On
-   T-21's branch it is stored in `progress.json` and overlaid onto the plan the session hands out;
-   `plan.json` is never rewritten by the walk (the plan write is T-22's, versioned per T-17's plan).
 
 ## 2 · HALF-DONE, UNVERIFIED, OR DELIBERATELY PARKED
 
 | what | state | trigger / owner |
 |---|---|---|
-| **T-17** the derivation engine | `build`; branch `feature/T-17-derivation-engine` @ `8b53e18`, 27 commits, **local only**; 1397 unit + 77 vscode-test; steps 0a–6b(part) done; determinism (AC4) proven | Next session: `replanPlan` + changed answers (plan step 6b-2), AC3 close-out, two blind reviews, merge GO. Handoff `.autodev/handoffs/T-17.md` |
-| **T-21** choosing the road not taken | `auto-review`; branch `feature/T-21-choosing-the-road-not-taken` @ `1206123`, **local only**; 1291 unit + 75 host + 11 screen; built, not merged. Security review done (1 Medium S1, 1 Low, 2 Info). Code review finished at 02:28: **not ready to merge — three Mediums**: (1) a press from a page showing a previous step is written to the CURRENT step, silently (repo-tour gives every step the same option ids — same as S1; the message must carry the step id); (2) AC7's prose retirement not done in its three places; (3) AC5's refusal is drawn ~900 px below the button and a second refusal changes nothing (T-15's shape). Six Lows ride with the fixes | **Not mergeable until the security review's Medium is fixed:** a page still showing a previous step can record a choice on the current step (repo-tour gives every step the same option ids). Handoff `.autodev/handoffs/T-21.md`; reviews `.autodev/reviews/T-21-*` |
-| T-16 deliberate leftovers | F-07 bridges fonts, not text size (by decision); welcome-view flash + stale tab stop | **T-43** |
-| T-16's last fix commit `87be0af` | merged after tests + mutations, **no second blind review** (no new stages after 94%) | Next review that touches `src/walk/step-view.ts` covers it |
-| T-16 line 8: the real editor | everything measured headless; whether VS Code keeps the panel's scroll after a press is **unverified where it matters** | **T-42** |
-| Screen-harness flakes under load | see §1.4 | The moment a screen test fails twice on one tree: ticket it |
-| `feature/T-8-package` | September branch, 1 commit, local only (merged content is on main via `424fcec`) | none — informational |
+| **T-22** the replan | branch `feature/T-22-the-replan` @ `53b2311`, **local only** (the owner's Q13: branches stay here), `build` not passed; 1795 unit, 4 real-page re-plan tests and 14 real-page mutants caught; no model call made. Handoff `.autodev/handoffs/T-22.md` is exact | Next: the other 29 unit-level mutants, one live divergence AC12 (needs a live-run authorisation), the `build` pass, the `host` and `screen` labels, two blind reviews, merge GO |
+| **T-18, T-20, T-23** | not started | wait on T-22; T-20 also needs T-61 settled before it ships Mode A |
+| **T-40** codicons, waiting states | not started | next free seat |
+| **T-14** undo | ready (GA-11), not started | shares T-22's plan versions: land it after T-22 |
+| **T-61** model-written code runs as the learner | filed, open | settle before T-20 ships Mode A |
+| **T-50, T-51, T-52, T-60, T-70, T-71, T-72, T-73, T-80, T-81** | filed this run, `intake`, no go-ahead names them | see each ticket; none blocks T-22 |
 
-No gate was killed. Nothing was stopped mid-run except T-17's build stage (stopped at a commit by
-design, recorded in its handoff).
+No gate was killed. Every landing had blind review: two reviewers for T-17, T-21, T-30, T-19 and T-43; one for T-44, T-41 and T-42; T-17 and T-21 also had a blind re-review of their fixes. The landed branches are merged and pushed; worktrees are left in place beside this repo.
 
 ## 3 · WAITING ON THE OWNER
 
-- **T-44 — a taste call:** the option the author chose is filled with the editor's search-match
-  orange; in both high-contrast themes it is all but unmarked. (A) switch to the selection colour
-  + a high-contrast edge (the visual reviewer's pick), (B) keep the orange and add only the
-  high-contrast edge, (C) leave it. **If never answered:** nothing breaks; the high-contrast gap
-  stays as T-44 describes. Lands after T-21 (same markup).
-- **The design-polish skill's first run on a VS Code extension** produced **15 numbered proposed
-  edits** (the biggest: compare consecutive states, so a press that changes nothing is caught):
-  `.autodev/foreman/2026-11-05/design-polish-feedback.md` (local). Accept or reject them; the skill
-  at `~/.claude/skills/design-polish/` was read, not edited.
-- **Recommended, not required:** open *Build Tutorials: Start* and press *Build the plan* once with
-  a problem on the form. T-15 was accepted on your behalf after a real-editor drive under xvfb,
-  but it was your own press that found it.
-- **Branches only on this disk:** T-17 and T-21's (above). Q4 B covers pushing `main` only, so
-  they were not pushed to the public repo.
-- **Authority used tonight** (local ledger, `.autodev/events.jsonl`): GA-11 (his words + form Q2–Q4;
-  T-9, T-10, T-14, T-16), GA-12 (T-15 reconcile), GA-13 (T-17..T-23), GA-14 (finishing T-15). The
-  tickets filed tonight beyond those — **T-30, T-40..T-44 — have no go-ahead naming them**; the next
-  run needs its own.
+Nothing blocks the next run. Banked, each with what happens if never answered: the 15 proposed edits to
+the design-polish skill (`.autodev/foreman/2026-11-05/design-polish-feedback.md`, local): the skill stays as
+it is; and the T-22 M1 ruling, which they can overturn cheaply. Publishing to any marketplace remains the
+owner's act. **Authority used today** (local ledger `.autodev/events.jsonl`): GA-15 (T-17..T-23, T-30,
+T-40..T-43, on the owner's words on Nov 8), GA-16 (the form: T-44's answer A, push `main` after each
+reviewed landing, the owner skips the hands-on press, so the screen suite carries that check). T-50..T-81
+have no go-ahead naming them.
 
 ## 4 · THE INSTRUMENTS, AND WHAT EACH ONE REFUSES
 
 | tool | path | refuses |
 |---|---|---|
-| foreman instruments (`seat`, `send`, `fm`, `wait-any`, `lastmsg`) | `app-template/process/foreman/` (shared and live; not copied) | its README |
-| `foreman.conf` | `.autodev/foreman/foreman.conf` (local) | a private tmux server; `SEAT_COMMAND` starts every seat with `DISPLAY`/`WAYLAND_DISPLAY` unset (nothing reaches the desktop) and pages held (`AUTODEV_NOTIFY_BIN=foreman-holds-all-pages`) |
-| `push-scan.sh` | `.autodev/foreman/2026-11-05/instruments/push-scan.sh` (local) | a push whose messages or patches carry the owner's first name, an email (other than the noreply attribution), a `/home/` path, a token shape, or a `node_modules` / `.vscode-test/` / ledger path |
+| foreman instruments (`seat`, `send`, `fm`, `wait-any`, `lastmsg`) | app-template's `process/foreman/` (shared and live; not copied) | its README |
+| `foreman.conf` | `.autodev/foreman/foreman.conf` (local) | a private tmux server; `SEAT_COMMAND` starts every seat with `DISPLAY`/`WAYLAND_DISPLAY` unset and pages held |
+| `push-scan.sh` | `.autodev/foreman/2026-11-08/instruments/push-scan.sh` (local) | a push whose messages or patches carry the owner's first name, an email (other than the noreply attribution), a `/home/` path, a token shape, or a `node_modules` / `.vscode-test/` / ledger path |
+| `watch-seats.mjs` | `.autodev/foreman/2026-11-08/instruments/` (local) | one stream for a Monitor: seat reports, idle, an open prompt (once per prompt), meter changes |
+| `safe-send.sh` | `.autodev/foreman/2026-11-08/instruments/` (local) | pasting into a seat with a permission prompt open: a paste's Enter answers the prompt "Yes" (it happened once today) |
 
-**Known gaps:** `seat watch` fired early twice (no new marker) and once timed out on a seat that
-was mid-suite — read the transcript before acting on any fire. `wait-any`'s 600-character report
-threshold missed a short `FOREMAN:` id report for ten minutes; watch for the markers instead.
+**Known gaps:** `seat send` retries after 60 s and can mis-report on a busy seat; a seat's `rm` inside a compound command trips a permission prompt, and the seat stalls until it auto-blocks (tell seats: one plain `rm` with a literal path).
 
 ## 5 · THE SHAPE OF THE RUN, so you can recreate it
 
-- Three seats on the default tmux server, `opus` → **claude-opus-5-5**, `--effort max`, each in its
-  own worktree beside this repo with `node_modules` symlinked from the main checkout:
-  `bt-engine` (T-9/T-10 routing, then T-17), `bt-ui` (T-15, then T-21), `bt-polish` (T-16, opened
-  on "design-polish ready"). Worktrees are left in place for the branches they hold.
-- Reviews: two blind subagent reviews per build (code + security), plus a blind visual check for
-  T-16; the foreman re-ran the suites on `main` before every push.
-- Briefs, rulings, decisions: `.autodev/foreman/2026-11-05/` (local). The board:
-  `node <autodev>/scripts/tracker.mjs --root . status`.
+- Three seats on the default tmux server, `opus` → **claude-opus-5-5**, `--effort max`, each in its own worktree beside this repo with `node_modules` symlinked from the main checkout: `bt-t21` (T-21, T-44, T-43, T-41), `bt-t17` (T-17, T-22), `bt-t30` (T-30, T-42, T-19). All closed at wind-down.
+- Reviews: blind Opus subagents inside each seat; the foreman re-ran unit and typecheck on every merge head before its GO, and re-drove each ticket's real-host or real-panel tests on the merge commit before clearing `accept`.
+- Briefs, rulings, decisions, foreman checks: `.autodev/foreman/2026-11-08/` (local). The board: `node <autodev>/scripts/tracker.mjs --root . status`.
 
 ## 6 · STATE, PASTED FROM THE AUDIT
 
-Pasted from `wind-down/reference/wd-audit` at 02:26 MST, paths elided (public repo). The **gates / long runs in flight** it lists are OTHER foremen's pytest runs on this machine (autoSQL, state-map/GUTS), none of this run's. `dirty:1 untracked:1` is this file and `kb/CURRENT-WORK.md`, committed right after this paste.
+Pasted from `wind-down/reference/wd-audit` at the end of the run, paths elided (public repo). `dirty:2` is this file and `kb/CURRENT-WORK.md`, committed right after this paste.
 
 ```
 
-── GATES / LONG RUNS STILL IN FLIGHT ─────────────────────────────────────────
-276946 timeout 1800 systemd-run --user --scope -q -p MemoryMax=4G -p MemorySwapMax=0 demo/.venv/bin/python -m pytest demo/tests -ra -p no:cacheprovide
-276947 <tmp> -m pytest demo/tests -ra -p no:cacheprovider
-285206 <path> Projects/state-map-record/.venv/bin/python -m pytest -q -p no:cacheprovider tests/
-  ^ LET THESE FINISH, or record the SHA + command + 'killed, not failed'.
+── GATES / LONG RUNS STILL IN FLIGHT ──
+  none running (a bash shell merely WAITING on one does not count)
 
-── UNCOMMITTED / UNPUSHED, PER REPO ─────────────────────────────────────────
+── UNCOMMITTED / UNPUSHED, PER REPO ──
   UNTRACKED is where work DIES: a ledger-on-disk is untracked until staged, and a
   commit-count check reports clean over it. On this audit's first real use the repo
   showed unpushed:0 with NINE ticket files untracked. Commit your own, then push.
   tracked-dirty you did NOT write belongs to a peer session: NAME it, never commit it.
-  VSCode-LLM-Tutorial            [main] dirty:1   untracked:1   unpushed:0
+  VSCode-LLM-Tutorial            [main] dirty:2   untracked:0   unpushed:0
 
-── BRANCHES THAT EXIST ONLY ON THIS DISK (every local branch, not just the checked-out one) ─────────────────────────────────────────
-  feature/T-17-derivation-engine       27 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
-  feature/T-21-choosing-the-road-not-taken    6 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
+── BRANCHES THAT EXIST ONLY ON THIS DISK (every local branch, not just the checked-out one) ──
+  feature/T-22-the-replan               9 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
   feature/T-8-package                   1 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
   NOT SEEN: refs/remotes is this disk's CACHED belief about the remote, as of the last fetch.
   This contacted nothing. A branch deleted on the server still reads as backed up here.
   Stash entries are on no remote and are reachable from no branch, so no count above includes
   them: 0 entry(s), and the stack is shared across worktrees.
 
-── PIN vs MAIN (an organ ahead of its pin is a gap someone will 'fix') ─────────────────────────────────────────
-
-── ATTESTATIONS (bare audit: runs nothing) ─────────────────────────────────────────
+── PIN vs MAIN (an organ ahead of its pin is a gap someone will 'fix') ──
+── ATTESTATIONS (bare audit: runs nothing) ──
   (no repin_guard.py here)
 
-── SEAT HOLDS — every one of these must be GONE before the panes close ─────────────────────────────────────────
+── SEAT HOLDS — every one of these must be GONE before the panes close ──
   none (good)
 
-── WORKER PANES ─────────────────────────────────────────
+── WORKER PANES ──
   no w-* sessions
 
-── INSTRUMENTS STILL ONLY IN A SCRATCHPAD — these die with the session ─────────────────────────────────────────
+── INSTRUMENTS STILL ONLY IN A SCRATCHPAD — these die with the session ──
   none found (either already persisted, or look harder)
 
-── OPERATOR GATES STILL OPEN ─────────────────────────────────────────
-  go-aheads recorded: 14
+── OPERATOR GATES STILL OPEN ──
+  go-aheads recorded: 16
   grants recorded:    0  (0 is fine if that was decided)
   --> list tickets waiting on a human gate with the tracker, and put the FORM URL in RESUME
 
@@ -148,19 +126,11 @@ Pasted from `wind-down/reference/wd-audit` at 02:26 MST, paths elided (public re
 
 ## 7 · THE BOARD
 
-- **Complete tonight:** T-9, T-10 (routed), T-15 (pushed `a1c6400`), T-16 (pushed `89a6546`; all 12
-  stages passed, every gate cleared).
-- **Filed tonight:** T-16 (polish), T-17..T-23 (T-9's and T-10's epics), T-30 (the build freezes the
-  extension host on a large repo), T-40..T-44 (T-16's splits).
-- **In flight:** T-17 `build`, T-21 `auto-review`. **Waiting:** T-14, T-18, T-19, T-20, T-22, T-23,
-  T-30, T-40..T-44 at `intake`.
-- **Pushed to `origin/main`:** `c9de1b4` (01:09), `a1c6400` (01:54), `89a6546` (02:24). Final
-  full suite on `89a6546` by the foreman: typecheck, lint, build clean; **1303 unit; 75 host + 10
-  screen vscode-test, exit 0**, headless.
+- **Landed today, on GitHub's `main`:** T-21 (`08884ee`), T-30 (`76bb37b`), T-17 (`dea3fc7`), T-44 (`382fa2e`), T-42 (`21896a2`), T-43 (`3dbbbc9`), T-19 (`964ce97`), T-41 (`35f805c`).
+- **The foreman's full suite on `35f805c`:** typecheck, lint, build clean; **1741 unit; 82 host + 22 screen vscode-test, exit 0**, headless under `xvfb-run -a`.
+- **Filed today:** T-50, T-51, T-52, T-60, T-61, T-70, T-71, T-72, T-73, T-80, T-81.
+- **In flight:** T-22 at `build`, on its branch. **Waiting:** T-14, T-18, T-20, T-23, T-40 at `intake`.
 
 ## 8 · WHAT THIS RUN LEARNED THAT IS NOT IN A TICKET
 
-A press that changes nothing on screen is invisible to every review that inspects one frame, and
-this repo has now paid for it three times (T-15 twice, T-16's below-the-fold verdict). Compare
-consecutive states, at the layer the person sees. And a reconcile is not paperwork: re-deriving
-a "shipped" ticket on main is how T-15 turned out not to be done.
+A fix can introduce the defect the next reviewer finds: T-17's blind re-review of its own fixes found a real regression that every green test had passed. And a foreman's message to a seat is a keystroke: a paste into a seat with an open permission prompt answers the prompt, so check the seat's state before typing anything into it.

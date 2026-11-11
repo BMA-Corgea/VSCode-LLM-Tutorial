@@ -406,6 +406,8 @@ export const CANCEL_BUTTON_LABEL = 'Cancel';
  *  because what it does is delete somebody's own words off their own disk and the verb should
  *  say so. */
 export const CLEAR_BUTTON_LABEL = 'Forget this conversation';
+/** What that button says after one press (T-43, code review F1): it sits on the keyboard route into the box, so one stray key must not delete anybody's words. */
+export const CLEAR_CONFIRM_LABEL = 'Press again to forget it';
 
 /**
  * The two speakers, named on the page rather than distinguished by colour alone.
@@ -598,8 +600,10 @@ const PAGE_CSS = `
 .notice-only { padding:20px 16px; }
 .notice-only .notice { opacity:0.85; margin:0; }
 main { max-width:640px; margin:0 auto; padding:20px 24px 40px; }
-.step-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:18px; }
-.step-head h1 { font-size:16px; margin:0; max-width:70%; }
+.step-head { margin-bottom:18px; }
+.step-head h1 { font-size:16px; margin:0; }
+/* T-41: the skin picker's place. A control used about once does not get the panel's second row. */
+.panel-foot { margin-top:20px; }
 section { margin-bottom:20px; }
 section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 8px; }
 .options { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px; }
@@ -689,7 +693,8 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 .detour-waiting { color:var(--muted); font-size:12px; }
 .tutor-unreachable { color:var(--muted); font-size:12px; margin:0 0 8px; }
 .tutor-ask { display:flex; flex-direction:column; gap:8px; }
-.tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); color:inherit; resize:vertical; }
+.tutor-input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--field-edge); border-radius:var(--radius); background:var(--field-bg); color:var(--ink); resize:vertical; }
+.tutor-input:focus { outline:1px solid var(--focus); outline-offset:-1px; }
 .tutor-input:disabled { opacity:0.6; }
 .tutor-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .tutor-thinking { color:var(--muted); font-size:12px; }
@@ -715,23 +720,37 @@ main, section, .option { min-width:0; }
 .tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint,
 .options-refused, .options-diverged, .options-replanning { overflow-wrap:anywhere; }
 
-/* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, the
-   title and the skin picker stop competing for one line and 48px of horizontal padding
-   stops eating a sixth of the width. */
+/* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, 48px of
+   horizontal padding stops eating a sixth of the width. */
 @media (max-width: 480px) {
   main { padding:16px 12px 32px; }
-  .step-head { flex-direction:column; gap:8px; }
-  .step-head h1 { max-width:100%; }
   fieldset.dial label { margin-right:12px; }
 }
 
 /* T-16, native polish. Additions only, so the rules above read as they did.
-   F-03: under System the taken option's highlight is the editor's translucent search-match
-   colour, and muted text on it measured 4.09:1 in Dark Modern. Inside the highlight, the
-   consequence takes the full ink colour; the badge, border and background still set the taken
-   option apart from the others. Unscoped on purpose: in a named skin, ink on the highlight is
-   only ever more contrast. Coupled to the option markup's class names. */
+   F-03: muted text on the marked option's highlight measured 4.09:1 in Dark Modern. Inside the
+   highlight, the consequence takes the full ink colour; the badge, border and background still
+   set the marked option apart from the others. Unscoped on purpose: in a named skin, ink on the
+   highlight is only ever more contrast. Coupled to the option markup's class names. */
 .option-taken .option-consequence { color:var(--ink); }
+/* T-44, the owner's call: under System the road this step is on reads as SELECTED, in the
+   editor's own words, not as a search hit, which is what the highlight above says. Its
+   background is the theme's inactive-selection colour, with the foreground that goes with it.
+   The outline is the edge a high-contrast theme asks for: both default high-contrast themes set
+   that colour and neither default dark nor light does, and an unset colour draws no outline. No
+   fallback to the search colour: a theme with no selection colour marks the row with its edge
+   and the blue border instead. A named skin keeps its palette. */
+:root:not([data-theme]) .option-taken {
+  background:var(--vscode-list-inactiveSelectionBackground);
+  color:var(--vscode-list-inactiveSelectionForeground, var(--ink));
+  outline:1px solid var(--vscode-contrastActiveBorder);
+}
+:root:not([data-theme]) .option-taken .option-consequence { color:var(--vscode-list-inactiveSelectionForeground, var(--ink)); }
+/* On that row a badge takes the editor's own badge colours and edge, as VS Code's badges do: the
+   accent on its translucent fill measured 3.69:1 on the selection background in Dark Modern and
+   4.03:1 in Light Modern. The edge keeps its pill's shape in high contrast, where its fill is
+   the page's black. */
+:root:not([data-theme]) .option-taken .badge { background:var(--vscode-badge-background); color:var(--vscode-badge-foreground); outline:1px solid var(--vscode-contrastBorder); outline-offset:-1px; }
 /* F-02: status roles. Under System, --kw and --str resolve to symbolIcon colours that every
    default theme sets to plain foreground, so a pass, a fail and every "news" line rendered as
    body text. The text keeps its colour; a MARKER (a left rule) carries the status, in VS Code's
@@ -759,6 +778,15 @@ main, section, .option { min-width:0; }
   border-left:2px solid var(--status-news); padding-left:8px;
 }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
+/* T-43 (F-08): the input background is the theme's, so its text is too. A named skin keeps its own ink. */
+:root:not([data-theme]) .tutor-input { color:var(--vscode-input-foreground, var(--ink)); }
+/* The placeholder is the only place the Enter / Shift+Enter rule is written, and the browser's own
+   grey measured 2.82:1 on Dark Modern's input background (T-43's visual review). */
+:root:not([data-theme]) .tutor-input::placeholder { color:var(--vscode-input-placeholderForeground, var(--muted)); }
+/* T-43 (F-09): the foot of the conversation, away from Ask. */
+.tutor-foot { margin:0 0 12px; }
+/* With Forget gone from the row, the detour button sat flush against Ask. */
+.detour { margin-top:8px; }
 /* F-11: where in the plan this step sits. */
 .step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
 /* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
@@ -1267,14 +1295,15 @@ function tutorHtml(state: StepViewState): string {
   const controls = thinking
     ? `<span class="tutor-thinking" id="tutor-thinking">${escapeHtml(waitingMessage(tutor?.stage))}</span>`
       + `<button type="button" class="btn" id="btn-tutor-cancel">${escapeHtml(CANCEL_BUTTON_LABEL)}</button>`
-    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`
-      + clearButtonHtml(state);
+    : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
 
   return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
     + transcriptHtml(state.transcript)
     + note
     + unreachable
     + elsewhereHtml(state)
+    // After the lines about the conversation, so a failed question's reason stays next to it.
+    + (thinking ? '' : clearButtonHtml(state))
     + `<div class="tutor-ask" id="outcome-tutor">${input}<div class="tutor-controls">${controls}</div></div>`
     + spendHtml(tutor?.spend)
     + detourHtml(state)
@@ -1375,7 +1404,9 @@ function detourHtml(state: StepViewState): string {
 function clearButtonHtml(state: StepViewState): string {
   const turns = Array.isArray(state.transcript) ? state.transcript.length : 0;
   if (turns === 0) return '';
-  return `<button type="button" class="btn btn-quiet" id="btn-tutor-clear">${escapeHtml(CLEAR_BUTTON_LABEL)}</button>`;
+  // At the foot of the conversation, not in the row with *Ask* (T-43, F-09): a control that deletes
+  // somebody's own words does not belong beside the one they press most.
+  return `<div class="tutor-foot"><button type="button" class="btn btn-quiet" id="btn-tutor-clear">${escapeHtml(CLEAR_BUTTON_LABEL)}</button></div>`;
 }
 
 /**
@@ -1499,7 +1530,6 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   ${count ? `<p class="step-count">${escapeHtml(count)}</p>` : ''}
   <div class="step-head">
     <h1>${escapeHtml(planText(step.decision.question))}</h1>
-    ${pickerHtml(skins.SKINS, state.skin)}
   </div>
 
   <section>
@@ -1541,6 +1571,8 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   ${reproduceHtml(state.reproduce)}
 
   ${tutorHtml(state)}
+
+  <div class="panel-foot">${pickerHtml(skins.SKINS, state.skin)}</div>
 </main>`;
 }
 
@@ -1782,7 +1814,26 @@ const CLIENT_SCRIPT = `
   // The same message from the line about an ask on ANOTHER step: the host's cancel goes
   // through the ledger and stops every live request, so one message is the whole control.
   on('btn-tutor-cancel-elsewhere', 'click', function () { reveal('tutor'); post('tutor:cancel', {}); });
-  on('btn-tutor-clear', 'click', function () { reveal('tutor'); post('tutor:clear', {}); });
+  // T-43 (code review F1): this button is now on the keyboard route into the box, and it deletes
+  // somebody's own words with no way back. So the first press asks, by changing what the button
+  // says, and the second does it; leaving the button takes the question back.
+  var forgetArmed = false;
+  on('btn-tutor-clear', 'click', function () {
+    var button = document.getElementById('btn-tutor-clear');
+    if (!forgetArmed) {
+      forgetArmed = true;
+      if (button) { button.textContent = ${JSON.stringify(CLEAR_CONFIRM_LABEL)}; }
+      return;
+    }
+    forgetArmed = false;
+    reveal('tutor');
+    post('tutor:clear', {});
+  });
+  on('btn-tutor-clear', 'blur', function () {
+    forgetArmed = false;
+    var button = document.getElementById('btn-tutor-clear');
+    if (button) { button.textContent = ${JSON.stringify(CLEAR_BUTTON_LABEL)}; }
+  });
 
   // ── T-7: the detour ───────────────────────────────────────────────────────────────────
 

@@ -252,7 +252,7 @@ the one function you actually came to learn — per step, without restarting any
 
 Every webview here inlines repo-tour's own `baseCss()` + `alternateCss()` UNCHANGED — the exact
 stylesheets its web pages use — plus a small bridge sheet mapping repo-tour's base tokens to VS
-Code's theme variables. Pick **System** in the corner picker and the page follows your editor's
+Code's theme variables. Pick **System** in the picker at the foot of the panel and the page follows your editor's
 active colour theme in real time; pick a named skin (Dark, Gunmetal, Titanium, Classic, JRPG, …)
 and it looks the same here as it does on repo-tour's own pages. The choice is remembered per
 person and stamped into the page before the first paint, so there is no flash of the wrong theme.

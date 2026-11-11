@@ -26,6 +26,8 @@ import { stepDial } from '../../src/walk/model.js';
 import type { StepViewState } from '../../src/walk/step-protocol.js';
 import { renderNoticeHtml, renderStepHtml, stepRenderKey } from '../../src/walk/step-view.js';
 import { renderNarratorHtml, type NarratorViewState } from '../../src/detour/narrator.js';
+import { renderStartHtml } from '../../src/start/view.js';
+import { emptyRequest } from '../../src/start/request.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const FAKE_SKINS: SkinsModule = {
@@ -103,6 +105,188 @@ suite('T-16 F-03 — the taken option keeps its text readable on its highlight',
     const css = cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
     const decls = declarationsFor(css, '.option-taken .option-consequence');
     assert.match(decls, /color:var\(--ink\)/, 'muted text on the search-match orange is 4.09:1 in Dark Modern');
+  });
+});
+
+// ── T-44 ──────────────────────────────────────────────────────────────────────────────────
+
+suite('T-44 — under System the road a step is on reads as selected, not found', () => {
+  const css = (): string => cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
+  const SYSTEM = ':root:not([data-theme]) .option-taken';
+
+  test('the row is drawn with the selection background and the foreground that goes with it', () => {
+    const decls = declarationsFor(css(), SYSTEM);
+    assert.match(decls, /(^|;)background:var\(--vscode-list-inactiveSelectionBackground\)(;|$)/, 'the selection colour, in the editor\'s own vocabulary');
+    assert.match(decls, /(^|;)color:var\(--vscode-list-inactiveSelectionForeground,var\(--ink\)\)(;|$)/, 'its foreground, or the body ink where a theme sets none');
+  });
+
+  test('its edge is the high-contrast theme\'s own, drawn only where a theme sets that colour', () => {
+    assert.match(declarationsFor(css(), SYSTEM), /(^|;)outline:1pxsolidvar\(--vscode-contrastActiveBorder\)(;|$)/, 'an unset variable makes this outline invalid, so dark and light draw none');
+  });
+
+  test('the search-match colour is gone from the System row, with no fallback that could bring it back', () => {
+    const decls = declarationsFor(css(), SYSTEM);
+    assert.ok(decls.length > 0, 'discriminates: the rule exists');
+    assert.ok(!decls.includes('--hl'), 'a theme with no selection colour marks the row with its edge, never the search colour');
+  });
+
+  test('the consequence line takes the same foreground, so a theme that sets one never mixes two', () => {
+    assert.match(declarationsFor(css(), `${SYSTEM} .option-consequence`), /color:var\(--vscode-list-inactiveSelectionForeground,var\(--ink\)\)/);
+  });
+
+  test('a badge on that row takes the editor\'s badge colours, so it stays readable on the new background', () => {
+    const decls = declarationsFor(css(), `${SYSTEM} .badge`);
+    assert.match(decls, /background:var\(--vscode-badge-background\)/, 'the accent on its translucent fill is 3.69:1 on the selection colour');
+    assert.match(decls, /color:var\(--vscode-badge-foreground\)/);
+  });
+
+  test('that badge keeps its shape in high contrast, with the theme\'s own edge', () => {
+    assert.match(declarationsFor(css(), `${SYSTEM} .badge`), /outline:1pxsolidvar\(--vscode-contrastBorder\)/, 'its fill is black on hc\'s black page');
+  });
+
+  test('those are the only rules that style the marked row, and none is inside an at-rule (re-review of T-44)', () => {
+    // The pins above read each rule's text, so they cannot see a later rule that overrides one, or a
+    // wrapper that stops one applying. This reads the sheet's own structure, by brace depth.
+    const sheet = cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
+    const rules: Array<{ selector: string; depth: number }> = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < sheet.length; i++) {
+      if (sheet[i] === '{') { rules.push({ selector: sheet.slice(start, i), depth }); depth += 1; start = i + 1; }
+      if (sheet[i] === '}') { depth -= 1; start = i + 1; }
+    }
+    assert.ok(rules.length > 20, 'discriminates: the sheet was read');
+    const marked = rules.filter((rule) => rule.selector.includes('.option-taken'));
+    assert.deepEqual(marked.map((rule) => rule.selector).sort(), [
+      '.option-taken',
+      '.option-taken.option-consequence',
+      ':root:not([data-theme]).option-taken',
+      ':root:not([data-theme]).option-taken.badge',
+      ':root:not([data-theme]).option-taken.option-consequence',
+    ].sort());
+    assert.deepEqual(marked.filter((rule) => rule.depth !== 0), [], 'a rule inside an @media or @supports may never apply');
+  });
+
+  test('a named skin keeps its own highlight and the blue edge stays for every skin', () => {
+    const base = declarationsFor(css(), '.option-taken');
+    assert.match(base, /background:var\(--hl\)/, 'the rule a named skin still uses');
+    assert.match(base, /border-color:var\(--accent\)/, 'the marked row keeps its edge whichever skin draws it');
+  });
+});
+
+// ── T-43 ──────────────────────────────────────────────────────────────────────────────────
+
+suite('T-43 — the tutor box looks like an input, and Forget is away from Ask', () => {
+  const page = (over: Partial<StepViewState> = {}): string => renderStepHtml(stateAt('st-2-file-parse', over), FAKE_SKINS);
+  const turn = { role: 'user', content: 'why is this its own module?' } as const;
+
+  test('F-08: the box is drawn from the input tokens, not the panel\'s', () => {
+    const decls = declarationsFor(cssOf(page()), '.tutor-input');
+    assert.match(decls, /border:1pxsolidvar\(--field-edge\)/, 'the input border, which is what hc shows as its edge');
+    assert.match(decls, /background:var\(--field-bg\)/);
+    assert.ok(!/var\(--line\)|background:var\(--bg\)/.test(decls), 'the panel tokens are gone');
+  });
+
+  test('F-08: a keyboard focus shows an outline in the theme\'s focus colour', () => {
+    assert.match(declarationsFor(cssOf(page()), '.tutor-input:focus'), /outline:1pxsolidvar\(--focus\)/);
+  });
+
+  test('F-08: under System its text is the theme\'s input foreground; a named skin keeps its own ink', () => {
+    const css = cssOf(page());
+    assert.match(declarationsFor(css, ':root:not([data-theme]) .tutor-input'), /color:var\(--vscode-input-foreground,var\(--ink\)\)/);
+    assert.match(declarationsFor(css, '.tutor-input'), /color:var\(--ink\)/, 'the unscoped rule stays on the skin\'s ink');
+  });
+
+  test('F-09: Forget is not in the row with Ask; it is the last thing after the log', () => {
+    const html = page({ transcript: [turn] });
+    const askRow = /<div class="tutor-controls">([\s\S]*?)<\/div>/.exec(html.slice(html.indexOf('id="outcome-tutor"')))?.[1] ?? '';
+    assert.ok(askRow.includes('id="btn-tutor-ask"'), 'discriminates: this is the ask row');
+    assert.ok(!askRow.includes('id="btn-tutor-clear"'), 'a control that deletes the conversation does not sit beside Ask');
+    const log = html.indexOf('</ul>', html.indexOf('class="tutor-log"'));
+    const forget = html.indexOf('id="btn-tutor-clear"');
+    const ask = html.indexOf('id="outcome-tutor"');
+    assert.ok(log >= 0 && log < forget && forget < ask, 'after the conversation, before the box');
+  });
+
+  test('F-08: the focus outline is inset, so it does not grow the box', () => {
+    assert.match(declarationsFor(cssOf(page()), '.tutor-input:focus'), /outline-offset:-1px/);
+  });
+
+  test('F-09: Forget stays a quiet button, and its press brings the tutor section back into view', () => {
+    const html = page({ transcript: [turn] });
+    assert.match(html, /<button type="button" class="btn btn-quiet" id="btn-tutor-clear">/);
+    const dom = runStepScript(html);
+    dom.elements.get('btn-tutor-clear')!.dispatch('click');
+    dom.elements.get('btn-tutor-clear')!.dispatch('click');
+    assert.equal((dom.states[dom.states.length - 1] as { reveal?: string }).reveal, 'tutor');
+  });
+
+  test('F-08: the placeholder, the only place the Enter rule is written, is the theme\'s own colour', () => {
+    assert.match(declarationsFor(cssOf(page()), ':root:not([data-theme]) .tutor-input::placeholder'), /color:var\(--vscode-input-placeholderForeground,var\(--muted\)\)/);
+  });
+
+  test('F-09: a failed question keeps its reason beside it; Forget comes after that line', () => {
+    const html = page({ transcript: [turn], tutor: { thinking: false, note: 'the tutor did not answer' } });
+    const reason = html.indexOf('the tutor did not answer');
+    const forget = html.indexOf('id="btn-tutor-clear"');
+    assert.ok(reason > html.indexOf('</ul>', html.indexOf('class="tutor-log"')), 'discriminates: the reason follows the log');
+    assert.ok(reason < forget, 'the reason, then Forget');
+    assert.ok(forget < html.indexOf('id="outcome-tutor"'), 'and Forget still comes before the box');
+  });
+
+  test('the detour row sits clear of Ask', () => {
+    assert.match(declarationsFor(cssOf(page()), '.detour'), /margin-top:8px/);
+  });
+
+  test('F-09: Forget is still there only when there is a conversation, and never mid-ask', () => {
+    assert.ok(!page().includes('id="btn-tutor-clear"'), 'no conversation, no control');
+    assert.ok(!page({ transcript: [turn], tutor: { thinking: true } }).includes('id="btn-tutor-clear"'), 'never while an answer is landing');
+  });
+});
+
+// ── T-41 ──────────────────────────────────────────────────────────────────────────────────
+
+suite('T-41 — the skin picker is at the foot of the panel, not on the title row', () => {
+  const startPage = (): string => renderStartHtml({ request: emptyRequest(), problems: {}, skin: 'system', building: false, refusedInARow: 0 }, FAKE_SKINS);
+  const stepPage = (over: Partial<StepViewState> = {}): string => renderStepHtml(stateAt('st-4-symbol-render', over), FAKE_SKINS);
+
+  /** The id of every control in the page's `<main>`, in document order. */
+  function controlsInMain(html: string): string[] {
+    const main = /<main[\s\S]*<\/main>/.exec(html)?.[0] ?? '';
+    assert.ok(main.length > 0, 'the page has a <main>');
+    return [...main.matchAll(/<(?:button|select|textarea|input)\b[^>]*\bid="([^"]+)"/g)].map((m) => m[1]!);
+  }
+
+  for (const [surface, page, head] of [
+    ['the Current Step panel', stepPage, 'step-head'],
+    ['the Start form', startPage, 'start-head'],
+  ] as const) {
+    test(`${surface}: the picker is the last control in the page`, () => {
+      const controls = controlsInMain(page());
+      assert.ok(controls.length > 3, `discriminates: the page has other controls, found ${JSON.stringify(controls)}`);
+      assert.equal(controls.at(-1), 'skinpick');
+      assert.equal(controls.filter((id) => id === 'skinpick').length, 1, 'one picker, moved, not a second one added');
+    });
+
+    test(`${surface}: the title row holds only the heading`, () => {
+      const row = new RegExp(`<div class="${head}">([\\s\\S]*?)</div>`).exec(page())?.[1] ?? '';
+      assert.match(row.trim(), /^<h1>[^<]*<\/h1>$/, `the row is the heading and nothing else, found ${row}`);
+    });
+
+    test(`${surface}: the picker still has its label for assistive technology`, () => {
+      assert.match(page(), /<select class="skinpick" id="skinpick" name="skin" aria-label="Skin">/);
+    });
+  }
+
+  test('the Start form\'s picker is outside the form: inside it, a change would count as editing the request', () => {
+    const html = startPage();
+    assert.ok(html.indexOf('id="skinpick"') > html.indexOf('</form>'), 'a change inside the form posts form:changed and wipes the note under the button');
+  });
+
+  test('the heading takes the full width: no layout left over from sharing the row', () => {
+    const css = cssOf(stepPage());
+    assert.ok(!/max-width:70%/.test(declarationsFor(css, '.step-head h1')), 'the room made for the picker is gone');
+    assert.ok(!/display:flex/.test(declarationsFor(css, '.step-head')), 'and so is the row that shared it');
   });
 });
 
