@@ -18,7 +18,7 @@ import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import type { PlanLike, Progress } from '../src/walk/model.js';
 import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, REPLAN_NOTHING_FOLLOWS, type Replanner } from '../src/walk/session.js';
-import { CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE } from '../src/walk/step-view.js';
+import { CHOOSE_LABEL, CHOSEN_BADGE, NOT_REPLANNED_NOTE } from '../src/walk/step-view.js';
 import { Screen, sleep, stale, type Frame } from './support/screen.js';
 import { repoTourShapedPlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
@@ -176,7 +176,9 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     const after = await until(read, (o) => (o?.on[0] ?? '') === 'stream', 'the learner\'s choice is where the author\'s was');
     assert.deepEqual(after?.yours, ['stream'], `and marked "${CHOSEN_BADGE}"`);
     assert.deepEqual(after?.choosable, [`author:${CHOOSE_LABEL}`, `template-string:${CHOOSE_LABEL}`], 'the author\'s road is choosable again; the learner\'s own is not a control');
-    assert.equal(after?.note, DIVERGED_NOTE, 'and the panel says the rest of the walk has not changed');
+    // T-22's code review, SF4: this stand-in re-plans nothing at a symbol step, and something does stand on it,
+    // so the true line is that the walk was not re-planned, not that nothing depended on it.
+    assert.equal(after?.note, NOT_REPLANNED_NOTE, 'and the panel says the walk was not re-planned from it');
 
     const onDisk = JSON.parse(fs.readFileSync(progressFile, 'utf8')) as Progress;
     assert.equal(onDisk.steps[STEP]?.chosen, 'stream', 'recorded beside the plan');
@@ -189,7 +191,7 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     await vscode.commands.executeCommand('buildTutorials.step.focus');
     api._walk.session()!.goTo(STEP);
     const reloaded = await until(read, (o) => (o?.on[0] ?? '') === 'stream', 'a reload forgot the learner\'s road');
-    assert.equal(reloaded?.note, DIVERGED_NOTE);
+    assert.equal(reloaded?.note, NOT_REPLANNED_NOTE);
 
     // Latest wins: back to the author's road, and the line goes with it.
     await pressNow(`document.querySelector(${JSON.stringify(choose('author'))}).click()`);
