@@ -41,7 +41,8 @@ export default tseslint.config(
     },
   },
   {
-    files: ['*.mjs', 'scripts/**/*.mjs'],
+    // `.mocharc.cjs` is CommonJS so that it can hand mocha an absolute path (T-81).
+    files: ['*.mjs', 'scripts/**/*.mjs', '.mocharc.cjs'],
     languageOptions: {
       globals: { ...globals.node },
     },

@@ -4,6 +4,12 @@
 // With no `--label`, vscode-test runs BOTH configurations below, one test host after the other;
 // `node scripts/run-tests.mjs --label screen` runs one.
 import { defineConfig } from '@vscode/test-cli';
+import { vscodeTestEnv } from './scripts/test-tmp.mjs';
+
+// T-81 (review F2): the hosts' temp folder is this run's own however vscode-test was started.
+// Through scripts/run-tests.mjs (`npm test`) that script already owns it and this adds nothing;
+// a bare `npx vscode-test` gets a folder of its own, removed when vscode-test exits.
+const env = vscodeTestEnv();
 
 const mocha = {
   // Loading four tree-sitter grammars and shelling out to `claude --version` both take
@@ -18,6 +24,7 @@ export default defineConfig([
     // (`npm run test:unit`, no `vscode` import anywhere in it), and dist/test/screen/ has a test
     // host of its own below — this one only ever picks up the files directly under dist/test/.
     files: 'dist/test/*.test.js',
+    env,
     mocha,
   },
   {
@@ -31,6 +38,7 @@ export default defineConfig([
     // with other users. Never in anything that ships: this file is excluded from the .vsix
     // (.vscodeignore), and test/unit/screen-port.test.ts fails if the flag reaches what does ship.
     launchArgs: ['--remote-debugging-port=0'],
+    env,
     mocha,
   },
 ]);
