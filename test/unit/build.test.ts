@@ -19,10 +19,11 @@ import {
   buildDir, buildFromRequest, coreFor, completionMessage, costLine, detectUnsupportedLanguages,
   GIT_KILL_GRACE_MS, gitRunnerWith, gitTimedOut, gitTimeoutMs, GIT_TIMEOUT_MS, GitTimeoutError,
   languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, resolveRepo,
-  realGit, resumeIfMarked, writeJsonAtomic,
-  type BuildContext, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
+  realGit, resumeIfMarked, stoppableRunner, writeJsonAtomic,
+  type BuildContext, type ModelProvider, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
   type ExecFileLike, type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
+import { offThreadCore } from '../../src/start/off-thread.js';
 import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
@@ -330,6 +331,96 @@ suite('the write-ahead marker (AC4)', () => {
     const marker = readMarker(target);
     assert.ok(marker, 'an unexpected failure should leave the marker for a later Resume');
     assert.equal(marker.phase, 'digest');
+  });
+});
+
+// ── T-70: Cancel during "asking about each decision…" stops the model calls ────────────────────
+
+suite('T-70: Cancel stops the model calls of the interpret phase', () => {
+  /** A provider that answers at once (`hold` false), or holds each call until its signal fires. */
+  function fakeProvider(onCall: (opts: { model: string; cwd: string; timeoutMs: number; signal?: AbortSignal }) => void, hold: boolean) {
+    const calls: Array<{ prompt: string; model: string; cwd: string; timeoutMs: number; signal?: AbortSignal }> = [];
+    const provider: ModelProvider = {
+      run: (prompt, opts) => {
+        calls.push({ prompt, ...opts });
+        onCall(opts);
+        if (!hold) return Promise.resolve({ text: 'the reply', inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
+        return new Promise((_resolve, reject) => {
+          const cap = setTimeout(() => reject(new Error('the call was never ended: its signal did not fire')), 5_000);
+          opts.signal?.addEventListener('abort', () => { clearTimeout(cap); reject(new Error('aborted')); }, { once: true });
+        });
+      },
+    };
+    return { provider, calls };
+  }
+
+  test('with no Cancel it is runLlm exactly: the same provider, model, cwd and timeout, and the reply passed through', async () => {
+    const { provider, calls } = fakeProvider(() => undefined, false);
+    const seen: string[] = [];
+    const runner = stoppableRunner((id) => { seen.push(id); return provider; }, () => false);
+    const reply = await runner.run('a prompt', { provider: 'claude', model: 'a-model' }, '/some/where', 1234);
+    assert.deepEqual(reply, { text: 'the reply', inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
+    assert.deepEqual(seen, ['claude']);
+    assert.equal(calls.length, 1);
+    assert.deepEqual({ ...calls[0], signal: undefined }, { prompt: 'a prompt', model: 'a-model', cwd: '/some/where', timeoutMs: 1234, signal: undefined });
+    await runner.run('again', { provider: 'claude', model: 'a-model' }, '/x');
+    assert.equal(calls[1]?.timeoutMs, 300_000, "runLlm's own default timeout");
+    assert.equal(runner.stopped(), false);
+  });
+
+  test('a call after Cancel never reaches the provider, and the call in flight is ended within a few polls', async () => {
+    let cancelled = false;
+    const { provider, calls } = fakeProvider(() => undefined, true);
+    const runner = stoppableRunner(() => provider, () => cancelled, 20);
+    const inFlight = runner.run('one', { provider: 'claude', model: 'm' }, '/x');
+    const pressedAt = Date.now();
+    cancelled = true;
+    await assert.rejects(inFlight, /aborted/);
+    assert.ok(Date.now() - pressedAt < 2_000, 'the call in flight outlived Cancel');
+    assert.equal(calls[0]?.signal?.aborted, true);
+    await assert.rejects(runner.run('two', { provider: 'claude', model: 'm' }, '/x'), (e: unknown) => (e as { modelCallStopped?: boolean }).modelCallStopped === true);
+    assert.equal(calls.length, 1, 'a call made after Cancel reached the provider');
+    assert.equal(runner.stopped(), true);
+  });
+
+  test("the cores the extension builds with hand the runner on: coreFor from repo-tour's llm module, and offThreadCore from coreFor", async () => {
+    const { provider, calls } = fakeProvider(() => undefined, false);
+    const { loaded } = await loadCore(CORE_ROOT);
+    const inProcess = coreFor({ ...loaded, llm: { providerById: () => provider } });
+    const viaCoreFor = inProcess.runnerFor?.(() => false);
+    assert.ok(viaCoreFor, 'coreFor gave no runner although the llm module was loaded');
+    await viaCoreFor.run('p', { provider: 'claude', model: 'm' }, '/x');
+    // The core every build uses (src/extension.ts): the worker's, which keeps the model calls on the host.
+    const viaOffThread = offThreadCore({ workerFile: '/nowhere/build-worker.js', coreRoot: '/nowhere', inProcess }).runnerFor?.(() => false);
+    assert.ok(viaOffThread, 'offThreadCore, which every build uses, dropped the runner');
+    await viaOffThread.run('p', { provider: 'claude', model: 'm' }, '/x');
+    assert.equal(calls.length, 2, "both runners must ask the llm module's provider");
+    assert.equal(coreFor({ ...loaded, llm: undefined }).runnerFor?.(() => false), undefined);
+  });
+
+  test('THE REAL interpret loop: Cancel during the first file ends that call, no other file reaches the model, and the build says where it stopped', async () => {
+    // repo-tour's own interpretPlan, with a provider of the test's: no model is ever asked, and if the
+    // runner were not passed, repo-tour's own runLlm would find no claude CLI and spawn nothing.
+    const savedBin = process.env.REPO_TOUR_CLAUDE_BIN;
+    process.env.REPO_TOUR_CLAUDE_BIN = path.join(tmpDir('build-tutorials-no-claude-'), 'no-such-claude');
+    try {
+      let cancelled = false;
+      const { provider, calls } = fakeProvider(() => { cancelled = true; }, true); // Cancel is pressed during the first call
+      const core: BuildCore = {
+        ...realCore,
+        defaultCacheDir: () => tmpDir('build-tutorials-interpret-cache-'), // never the shared cache
+        runnerFor: (isCancelled) => stoppableRunner(() => provider, isCancelled, 20),
+      };
+      const target = tmpDir('build-tutorials-target-');
+      const outcome = await buildFromRequest(requestFor(makeTsFixture(), target), baseContext({ core, cachedOnly: false, isCancelled: () => cancelled }));
+      assert.equal(calls.length, 1, `${calls.length} calls reached the model; only the one in flight at Cancel may`);
+      assert.equal(calls[0]?.signal?.aborted, true, 'the call in flight at Cancel was not ended');
+      assert.deepEqual({ ok: outcome.ok, cancelled: outcome.cancelled, reason: outcome.reason }, { ok: false, cancelled: true, reason: 'build cancelled while asking about each decision' });
+      assert.equal(readMarker(target), null, 'a cancel leaves nothing to resume');
+    } finally {
+      if (savedBin === undefined) delete process.env.REPO_TOUR_CLAUDE_BIN;
+      else process.env.REPO_TOUR_CLAUDE_BIN = savedBin;
+    }
   });
 });
 

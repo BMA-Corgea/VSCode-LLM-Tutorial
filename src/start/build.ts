@@ -66,6 +66,78 @@ export interface BuildCore {
   /** Lets go of anything this core holds for the build that just ended. Absent on a core that
    *  holds nothing. Called on every path out of `buildFromRequest`; must not throw. */
   release?(): void;
+  /** The model runner `interpretPlan` is given, one that Cancel stops (T-70). Absent on a core
+   *  with no `llm` module, which then asks the model through repo-tour's own `runLlm`. */
+  runnerFor?(isCancelled: () => boolean): StoppableRunner;
+}
+
+// ── the model calls of "asking about each decision…", and Cancel (T-70) ────────────────────────
+
+/** repo-tour's `runLlm` shape: what `interpretPlan`'s `runner` option is called with. */
+export type ModelRunner = (prompt: string, choice: { provider: string; model: string }, cwd: string, timeoutMs?: number) => Promise<unknown>;
+
+/** A repo-tour provider, as far as a call to it goes (`RunOpts` in repo-tour's `llm.ts`). */
+export interface ModelProvider {
+  run(prompt: string, opts: { model: string; cwd: string; timeoutMs: number; signal?: AbortSignal }): Promise<unknown>;
+}
+
+export interface StoppableRunner {
+  run: ModelRunner;
+  /** Whether Cancel refused a call or ended one in flight. */
+  stopped(): boolean;
+}
+
+/** How often a call in flight looks for a Cancel: at most this long after one, its child is ended. */
+export const STOP_POLL_MS = 100;
+
+/** What a call refused by Cancel throws. repo-tour records it as that file's failure and moves on. */
+export class ModelCallStopped extends Error {
+  readonly modelCallStopped = true;
+  constructor() {
+    super('cancelled, so this model call was not made');
+    this.name = 'ModelCallStopped';
+  }
+}
+
+/**
+ * repo-tour's `runLlm`, with a stop (T-70). Pressing Cancel during "asking about each decision…" used
+ * to change nothing until the phase ended: repo-tour's `interpretStops` makes one call per file and
+ * takes no signal, so every remaining file's call still ran and was paid for. It does take a
+ * `runner`, it records a call that throws as that file's failure and goes on to the next, and its
+ * providers end their model's child when the call's signal fires. So:
+ *
+ *   - a call that would START after Cancel is refused before it reaches the provider: no spend;
+ *   - the call IN FLIGHT gets a signal that fires within `pollMs` of Cancel: its child is ended.
+ *
+ * Without a Cancel it is `runLlm` exactly: the same provider, model, cwd and timeout, and the reply
+ * as the provider gave it.
+ */
+export function stoppableRunner(
+  providerById: (id: string) => ModelProvider | null,
+  isCancelled: () => boolean,
+  pollMs: number = STOP_POLL_MS,
+): StoppableRunner {
+  let stopped = false;
+  const run: ModelRunner = async (prompt, choice, cwd, timeoutMs = 300_000) => {
+    if (isCancelled()) {
+      stopped = true;
+      throw new ModelCallStopped();
+    }
+    const provider = providerById(choice.provider);
+    if (!provider) throw new Error(`no such provider: ${choice.provider}`);
+    const controller = new AbortController();
+    const watch = setInterval(() => {
+      if (!isCancelled()) return;
+      stopped = true;
+      controller.abort();
+    }, pollMs);
+    try {
+      return await provider.run(prompt, { model: choice.model, cwd, timeoutMs, signal: controller.signal });
+    } finally {
+      clearInterval(watch);
+    }
+  };
+  return { run, stopped: () => stopped };
 }
 
 /**
@@ -92,11 +164,14 @@ export function coreFor(loaded: Partial<Record<string, unknown>>): BuildCore {
   const digestMod = loaded['digest'] as { digest: BuildCore['digest'] };
   const buildMod = loaded['build'] as { buildPlan: BuildCore['buildPlan']; interpretPlan: BuildCore['interpretPlan'] };
   const interpretMod = loaded['interpret'] as { defaultCacheDir: BuildCore['defaultCacheDir'] };
+  const llmMod = loaded['llm'] as { providerById?: (id: string) => ModelProvider | null } | undefined;
+  const providerById = llmMod?.providerById;
   return {
     digest: digestMod.digest,
     buildPlan: buildMod.buildPlan,
     interpretPlan: buildMod.interpretPlan,
     defaultCacheDir: interpretMod.defaultCacheDir,
+    ...(typeof providerById === 'function' ? { runnerFor: (isCancelled: () => boolean) => stoppableRunner(providerById, isCancelled) } : {}),
   };
 }
 
@@ -663,6 +738,8 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
   if (ctx.isCancelled?.()) return cancel(target, 'before asking about each decision');
   runPhase(target, marker, 'interpret', ctx);
 
+  // T-70: Cancel reaches the model calls themselves, not only the gap after the last of them.
+  const runner = ctx.isCancelled ? ctx.core.runnerFor?.(ctx.isCancelled) : undefined;
   let interpreted: InterpretPlanResultLike;
   try {
     ctx.onProgress?.('asking about each decision…');
@@ -673,11 +750,14 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
       cacheDir: ctx.core.defaultCacheDir(),
       cachedOnly: ctx.cachedOnly,
       onProgress: ctx.onProgress,
+      ...(runner ? { runner: runner.run } : {}),
     });
   } catch (err) {
+    if (runner?.stopped()) return cancel(target, 'while asking about each decision');
     return fail(err);
   }
 
+  if (runner?.stopped()) return cancel(target, 'while asking about each decision');
   if (ctx.isCancelled?.()) return cancel(target, 'before writing the plan');
   runPhase(target, marker, 'write', ctx);
 

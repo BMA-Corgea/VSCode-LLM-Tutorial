@@ -205,6 +205,8 @@ export function offThreadCore(deps: OffThreadDeps): BuildCore {
     },
     interpretPlan: (plan, digestResult, opts) => deps.inProcess.interpretPlan(plan, digestResult, opts),
     defaultCacheDir: () => deps.inProcess.defaultCacheDir(),
+    // The model calls stay on the host with `interpretPlan`, and so does what stops them (T-70).
+    ...(deps.inProcess.runnerFor ? { runnerFor: (isCancelled: () => boolean) => deps.inProcess.runnerFor!(isCancelled) } : {}),
     release: stopWorker,
   };
 }
