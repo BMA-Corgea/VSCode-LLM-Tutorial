@@ -2109,9 +2109,11 @@ export class WalkSession {
    *     runner now does send after its grace period, so a stale lock went from impossible to
    *     merely rare — and telling every stopped-git learner to delete a file inside `.git/` on
    *     the strength of the rare case is still the wrong trade. Nothing is lost by dropping it:
-   *     when a lock really does survive, git's own next message says so in full — *"remove the
-   *     file manually to continue"* — and the runner passes git's stderr through verbatim, so
-   *     that advice arrives from git, at the moment it is true, down the branch below.
+   *     when a lock really does survive, the next commit's reason says so, naming the file and
+   *     what to do, down the branch below. That advice is this extension's, given only when the
+   *     files are really there (`staleLockAdvice`, `src/dial/commit.ts`, T-82). It no longer comes
+   *     from git: 2.43 printed "remove the file manually to continue", 2.54 and later do not, and
+   *     git's words are translated.
    *   - **Anything else** — a stale lock, a `pre-commit` hook, a detached HEAD — keeps the
    *     wording it has always had, and carries git's own words with it.
    */

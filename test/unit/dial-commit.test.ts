@@ -47,6 +47,7 @@ import {
   ensureRepo,
   ensureTranscriptIgnored,
   identityConfigured,
+  staleLockAdvice,
   TUTORIAL_DIR_IGNORE,
   TUTORIAL_IGNORE_HEADER,
 } from '../../src/dial/commit.js';
@@ -822,10 +823,12 @@ suite('T-13 — a timed-out git is never mistaken for git answering', () => {
   /**
    * The other end of the sentence that was removed from `src/walk/session.ts` (finding 2): a
    * stale `.git/index.lock` is rare rather than impossible, and when it happens the learner is
-   * told what to do — by GIT, verbatim, because the runner passes its stderr through. Nothing
-   * in this extension has to guess at the advice, which is why it no longer offers it blind.
+   * told what to do. Not by git any more (T-82): git 2.43 said "remove the file manually to
+   * continue", git 2.54 and later do not, and GitHub's runner has 2.56, so this test failed there from
+   * 2026-09-08 while passing on every machine with an older git. The advice is now this
+   * extension's, given when the lock file is really there.
    */
-  test('a stale `.git/index.lock` comes back carrying git’s OWN advice about it', async () => {
+  test('a stale `.git/index.lock` comes back naming the file, with what to do about it (git’s words differ by version: T-82)', async () => {
     const target = tmpDir();
     await ensureRepo(target, realGit);
     await setLocalIdentity(target, 'A Learner', 'learner@example.com');
@@ -837,9 +840,115 @@ suite('T-13 — a timed-out git is never mistaken for git answering', () => {
     assert.equal(result.committed, false);
     assert.equal(result.refusal, 'git-failed', 'git answered — nothing here was stopped by us');
     assert.match(result.reason ?? '', /index\.lock/, 'git names the file');
-    assert.match(result.reason ?? '', /remove the file manually/i,
-      'and gives the advice itself, at the moment it is true. That is why `commitNotice` no longer gives it '
-      + 'to every stopped git on a premise that, driven, does not hold');
+    // What to do, said by this extension (T-82): git 2.43 adds "remove the file manually", git 2.54
+    // and later do not, and this assertion must hold on every git, not only on the machine's own.
+    assert.ok(result.reason?.endsWith(` — ${staleLockAdvice([path.join(target, '.git', 'index.lock')])}`),
+      `the learner is not told what to do about the lock, whatever this git said: ${result.reason}`);
+  });
+
+  test('T-82: a stale `.git/index.lock` gets the advice whatever git prints about it: 2.43’s words, 2.56’s, or nothing', async () => {
+    // Driven from git's own source (lockfile.c, unable_to_lock_message) at v2.43.0 and v2.56.0.
+    const shapes: Array<[string, string]> = [
+      ['git 2.43', "fatal: Unable to create '<lock>': File exists.\n\nAnother git process seems to be running in this repository, e.g.\n"
+        + "an editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\n"
+        + 'may have crashed in this repository earlier:\nremove the file manually to continue.'],
+      ['git 2.56', "fatal: Unable to create '<lock>': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale"],
+      ['git 2.56, from a pid file', "fatal: Unable to create '<lock>': File exists.\n\nLock was held by process 4242, which is no longer running; the lock file appears to be stale"],
+      ['a git that says nothing', ''],
+    ];
+    // `git add` takes the index lock before `commit` does, so the stand-in answers for both.
+    const saysOnly = (message: string): GitRunner => async (args, cwd) => {
+      if (args[0] === 'add' || args[0] === 'commit') throw new Error(message);
+      return realGit(args, cwd);
+    };
+    for (const [shape, words] of shapes) {
+      const target = tmpDir();
+      await ensureRepo(target, realGit);
+      await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+      writeFile(target, 'seed.ts');
+      const lock = path.join(target, '.git', 'index.lock');
+      fs.writeFileSync(lock, '');
+      const result = await commitStep(target, fixtureStep(), ['seed.ts'], saysOnly(words.replace('<lock>', lock)));
+      assert.equal(result.refusal, 'git-failed', shape);
+      assert.ok(result.reason?.endsWith(staleLockAdvice([lock])), `${shape}: the learner is not told what to do: ${JSON.stringify(result.reason)}`);
+      assert.ok(result.reason?.startsWith(words.replace('<lock>', lock)), `${shape}: what git said must still come first`);
+      if (words === '') assert.equal(result.reason, staleLockAdvice([lock]), 'a git that says nothing: the advice alone, not a dangling dash');
+    }
+  });
+
+  test('T-82: a target in a SUBFOLDER of a repository: the advice names the lock where git keeps it', async () => {
+    const repoRoot = tmpDir();
+    await ensureRepo(repoRoot, realGit);
+    await setLocalIdentity(repoRoot, 'A Learner', 'learner@example.com');
+    const target = path.join(repoRoot, 'tutorial');
+    fs.mkdirSync(target);
+    writeFile(target, 'seed.ts');
+    fs.writeFileSync(path.join(repoRoot, '.git', 'index.lock'), '');
+    // git answers with real paths: compare with the real path (macOS's temp folder is behind a link).
+    const lock = path.join(fs.realpathSync(repoRoot), '.git', 'index.lock');
+    const result = await commitStep(target, fixtureStep(), ['seed.ts'], realGit);
+    assert.equal(result.refusal, 'git-failed');
+    assert.ok(result.reason?.endsWith(staleLockAdvice([lock])), `the advice should name ${lock}: ${result.reason}`);
+  });
+
+  test('T-82 review F2: the advice in its own words, for one lock and for several', () => {
+    assert.equal(staleLockAdvice(['/r/.git/index.lock']),
+      'if no other git is running in this repository (an editor that `git commit` opened, a terminal, another window), '
+      + 'a git that stopped earlier left /r/.git/index.lock behind: delete that one file, and the next step you complete commits as usual');
+    assert.equal(staleLockAdvice(['/r/.git/HEAD.lock', '/r/.git/index.lock', '/r/.git/refs/heads/main.lock']),
+      'if no other git is running in this repository (an editor that `git commit` opened, a terminal, another window), '
+      + 'a git that stopped earlier left /r/.git/HEAD.lock, /r/.git/index.lock and /r/.git/refs/heads/main.lock behind: '
+      + 'delete those files, and the next step you complete commits as usual');
+  });
+
+  test('T-82 review F1, F8: a commit stopped part-way leaves several locks, and the advice names every one', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+    writeFile(target, 'seed.ts');
+    const gitDir = path.join(target, '.git');
+    const branch = (await realGit(['symbolic-ref', '-q', 'HEAD'], target)).trim(); // refs/heads/<the default branch>
+    const left = ['HEAD.lock', 'index.lock', 'index~pid.lock', 'next-index-4242.lock'].map((n) => path.join(gitDir, n));
+    const refLock = `${path.join(gitDir, ...branch.split('/'))}.lock`;
+    fs.mkdirSync(path.dirname(refLock), { recursive: true });
+    for (const f of [...left, refLock]) fs.writeFileSync(f, '');
+    const result = await commitStep(target, fixtureStep(), ['seed.ts'], realGit);
+    assert.equal(result.refusal, 'git-failed');
+    for (const f of [...left, refLock]) assert.ok(result.reason?.includes(f), `the advice does not name ${f}: ${result.reason}`);
+    assert.match(result.reason ?? '', /delete those files, and the next step you complete commits as usual$/);
+  });
+
+  test('T-82 review F3: a target that is a linked worktree: the lock named is the worktree\'s own, not the main checkout\'s', async () => {
+    const main = tmpDir();
+    await ensureRepo(main, realGit);
+    await setLocalIdentity(main, 'A Learner', 'learner@example.com');
+    writeFile(main, 'first.ts');
+    await realGit(['add', '--', 'first.ts'], main);
+    await realGit(['commit', '-q', '-m', 'first'], main);
+    const wt = path.join(tmpDir(), 'wt');
+    await realGit(['worktree', 'add', '-q', '-b', 'tutorial', wt], main);
+    writeFile(wt, 'seed.ts');
+    const ownGitDir = path.resolve(wt, (await realGit(['rev-parse', '--git-dir'], wt)).trim());
+    assert.notEqual(ownGitDir, path.join(fs.realpathSync(main), '.git'), 'a linked worktree keeps its own git dir');
+    const lock = path.join(ownGitDir, 'index.lock');
+    fs.writeFileSync(lock, '');
+    const result = await commitStep(wt, fixtureStep(), ['seed.ts'], realGit);
+    assert.equal(result.refusal, 'git-failed');
+    assert.ok(result.reason?.endsWith(staleLockAdvice([lock])), `the advice should name the worktree's own lock ${lock}: ${result.reason}`);
+  });
+
+  test('T-82: the advice is given only when a lock file is really there, and not for a git this extension stopped', async () => {
+    const target = tmpDir();
+    await ensureRepo(target, realGit);
+    await setLocalIdentity(target, 'A Learner', 'learner@example.com');
+    writeFile(target, 'seed.ts');
+    const hook = await commitStep(target, fixtureStep(), ['seed.ts'], failingOn('commit', 'the pre-commit hook said no'));
+    assert.equal(hook.reason, 'the pre-commit hook said no', 'no lock file, no advice about one');
+    fs.writeFileSync(path.join(target, '.git', 'index.lock'), '');
+    const stopped = await commitStep(target, fixtureStep(), ['seed.ts'], timingOutOn('add'));
+    assert.equal(stopped.refusal, 'git-stopped');
+    assert.doesNotMatch(stopped.reason ?? '', /delete that one file/,
+      "a git stopped at this extension's bound keeps its own notice; the next commit reports a lock that is really left");
   });
 
   test('a stopped `rev-parse --git-dir` inside ensureTranscriptIgnored is still swallowed', async () => {
