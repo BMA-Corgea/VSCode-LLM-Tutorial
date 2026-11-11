@@ -482,8 +482,9 @@ export interface ReplanHooks {
 /** T-22: the engine and the file writer a press needs, wired in `src/extension.ts`. */
 export interface Replanner {
   diverge(input: DivergeInput, hooks: ReplanHooks): Promise<DivergeOutcome>;
-  /** `store.ts`'s `saveDivergedPlan`: may throw, and the session says so */
-  savePlan(target: string, plan: PlanLike): void;
+  /** `store.ts`'s `saveDivergedPlan`: may throw, and the session says so. `derivedFrom` is the plan the press was
+   *  derived from: the store refuses to replace a plan that has changed on disk since (code review N6). */
+  savePlan(target: string, plan: PlanLike, derivedFrom: PlanLike): void;
 }
 
 /** A press being re-planned. Identity is the point: anything finishing late checks it is still THE job. */
@@ -975,7 +976,7 @@ export class WalkSession {
     );
     if (this.replan !== job) return;
     // On the chain: nothing else may be reading the plan while it is swapped.
-    this.enqueue(() => { this.landReplan(job, outcome, replanner, request); });
+    this.enqueue(() => { this.landReplan(job, outcome, replanner, request, plan); });
     await this.work;
   }
 
@@ -992,7 +993,7 @@ export class WalkSession {
    * there, and D otherwise. No dial is applied (T-23): a landing is not an arrival, and the
    * learner's own files are not touched by it.
    */
-  private landReplan(job: ReplanJob, outcome: DivergeOutcome, replanner: Replanner, request: ResolvedRequest): void {
+  private landReplan(job: ReplanJob, outcome: DivergeOutcome, replanner: Replanner, request: ResolvedRequest, derivedFrom: PlanLike): void {
     if (this.replan !== job) return;
     if (!outcome.ok) {
       this.replanRefused(job, replanRefusedText(outcome.reason));
@@ -1006,7 +1007,7 @@ export class WalkSession {
       return;
     }
     try {
-      replanner.savePlan(this.target, outcome.plan);
+      replanner.savePlan(this.target, outcome.plan, derivedFrom);
     } catch (err) {
       this.replanRefused(job, replanRefusedText(`the new plan could not be saved: ${messageOf(err)}`));
       return;

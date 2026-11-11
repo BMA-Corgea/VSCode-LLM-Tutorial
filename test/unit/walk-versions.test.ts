@@ -145,3 +145,72 @@ suite('saveDivergedPlan — a crash at any point (AC4)', () => {
     });
   }
 });
+
+// T-22's security review, F1: a repository can ship its own `.repo-tour/`, and git recreates a link on
+// clone. A write through a planted link lands wherever it points (`kb/wiki/lessons.md`: "A lexical path
+// check is not a filesystem check", three times).
+suite('saveDivergedPlan — nothing is written through a link (security review F1)', () => {
+  test('a versions folder that is a link to somewhere else: refused, and nothing lands there or in the plan', () => {
+    const { target, planFile, bytes } = setup();
+    const outside = tempDir('ver-outside-');
+    fs.symlinkSync(outside, versionsOf(target));
+    assert.throws(() => saveDivergedPlan(target, planNaming('k/new')), /versions folder is a link to somewhere else/);
+    assert.deepEqual(fs.readdirSync(outside), [], 'nothing was written where the link points');
+    assert.equal(fs.readFileSync(planFile, 'utf8'), bytes, 'and the plan is as it was');
+  });
+
+  test('a versions folder that is a link leading nowhere: refused', () => {
+    const { target, planFile, bytes } = setup();
+    fs.symlinkSync(path.join(tempDir('ver-gone-'), 'nothing-here'), versionsOf(target));
+    assert.throws(() => saveDivergedPlan(target, planNaming('k/new')), /versions folder is a link/);
+    assert.equal(fs.readFileSync(planFile, 'utf8'), bytes);
+  });
+
+  test('a build folder that is itself a link: refused, and the plan it points at is not touched', () => {
+    const target = tempDir('ver-target-');
+    const elsewhere = tempDir('ver-elsewhere-');
+    const bytes = oddlyWritten(planNaming(undefined));
+    fs.writeFileSync(path.join(elsewhere, 'plan.json'), bytes);
+    fs.mkdirSync(path.join(target, '.repo-tour'));
+    fs.symlinkSync(elsewhere, buildDir(target));
+    assert.equal(loadPlan(target).steps.length, planNaming(undefined).steps.length, 'discriminates: the plan reads through the link');
+    assert.throws(() => saveDivergedPlan(target, planNaming('k/new')), /build folder is a link to somewhere else/);
+    assert.deepEqual(fs.readdirSync(elsewhere), ['plan.json'], 'no versions folder was made there');
+    assert.equal(fs.readFileSync(path.join(elsewhere, 'plan.json'), 'utf8'), bytes, 'and the plan there was not replaced');
+  });
+});
+
+// T-22's code review, N5: `Number` on a name of digits past 2^53 rounds, and two divergences then shared a number.
+suite('saveDivergedPlan — a version is never overwritten, whatever is planted (code review N5)', () => {
+  test('a version named past 2^53 does not make two divergences write the same number', () => {
+    const { target } = setup();
+    fs.mkdirSync(versionsOf(target));
+    fs.writeFileSync(path.join(versionsOf(target), '9007199254740993.json'), '{}');
+    const first = saveDivergedPlan(target, planNaming('k/one'));
+    const second = saveDivergedPlan(target, planNaming('k/two'));
+    assert.notEqual(first, second, 'a later divergence stacks another version, never overwrites one');
+    assert.ok(Number.isSafeInteger(first) && Number.isSafeInteger(second), `numbers that name one file each: ${first}, ${second}`);
+    assert.equal(fs.readFileSync(path.join(versionsOf(target), '9007199254740993.json'), 'utf8'), '{}', 'and the planted file is not touched');
+  });
+});
+
+// T-22's code review, N6: the version must be the plan the press was derived from. If the plan on disk
+// changed meanwhile (the folder open in a second window), replacing it would drop that change silently.
+suite('saveDivergedPlan — the plan the press was derived from (code review N6)', () => {
+  test('a plan that changed on disk since the press is not replaced, and no version is written', () => {
+    const before = planNaming(undefined);
+    const { target, planFile } = setup(before);
+    const changed = oddlyWritten(planNaming('k/elsewhere'));
+    fs.writeFileSync(planFile, changed);
+    assert.throws(() => saveDivergedPlan(target, planNaming('k/new'), realFsWriteOps, before), /the plan on disk changed while this re-planned/);
+    assert.equal(fs.readFileSync(planFile, 'utf8'), changed, 'the other change stands');
+    assert.equal(fs.existsSync(versionsOf(target)), false, 'and nothing was versioned');
+  });
+
+  test('the plan as it was at the press is replaced, and versioned byte for byte', () => {
+    const before = planNaming(undefined);
+    const { target, bytes } = setup(before);
+    assert.equal(saveDivergedPlan(target, planNaming('k/new'), realFsWriteOps, before), 1);
+    assert.equal(fs.readFileSync(path.join(versionsOf(target), '1.json'), 'utf8'), bytes);
+  });
+});

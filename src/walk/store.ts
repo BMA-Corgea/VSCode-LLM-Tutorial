@@ -245,16 +245,77 @@ export function loadRequest(target: string, derivedLookup?: DerivedLookup): Reso
  * worst a crash can leave is a version identical to the current plan, which undo reads as a no-op.
  * Returns the version number written.
  */
-export function saveDivergedPlan(target: string, plan: PlanLike, ops: FsWriteOps = realFsWriteOps): number {
-  const before = fs.readFileSync(planPath(target));
-  const dir = path.join(buildDir(target), 'versions');
+export function saveDivergedPlan(target: string, plan: PlanLike, ops: FsWriteOps = realFsWriteOps, derivedFrom?: PlanLike): number {
+  const build = provenBuildDir(target);
+  const planFile = path.join(build, 'plan.json');
+  const before = fs.readFileSync(planFile);
+  // The version must be the plan the press was derived from (code review N6): replacing a plan that
+  // changed on disk meanwhile, the folder open in a second window, would drop that change unseen.
+  if (derivedFrom !== undefined && JSON.stringify(JSON.parse(before.toString('utf8'))) !== JSON.stringify(derivedFrom)) {
+    throw new Error('the plan on disk changed while this re-planned (is this folder open in another window?), so it was not replaced');
+  }
+  const dir = provenVersionsDir(build);
   const version = nextVersion(dir);
-  writeBytesAtomic(path.join(dir, `${version}.json`), before, ops);
-  writeJsonAtomic(planPath(target), plan, ops);
+  const file = path.join(dir, `${version}.json`);
+  // Never written over, and never through a link planted at the number (`lstat`, which sees a dangling one).
+  if (lstatOrNull(file) !== null) throw new Error(`version ${version} already exists, and a version is never overwritten`);
+  writeBytesAtomic(file, before, ops);
+  writeJsonAtomic(planFile, plan, ops);
   return version;
 }
 
-/** One past the highest numbered version in `dir`, so a version is never overwritten. */
+function lstatOrNull(file: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(file);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `<target>/.repo-tour/build`, proved a real folder with no link in it below the learner's own folder,
+ * or a throw that says why. A repository can ship a `.repo-tour/` of its own, and git recreates a link
+ * on clone, so a write through `build` (or `.repo-tour`) as a link lands wherever it points (T-22's
+ * security review, F1; `kb/wiki/lessons.md`: "A lexical path check is not a filesystem check"). The
+ * learner's folder itself may be a link: that one is theirs.
+ */
+function provenBuildDir(target: string): string {
+  const expected = path.join(fs.realpathSync(target), '.repo-tour', 'build');
+  let real: string;
+  try {
+    real = fs.realpathSync(buildDir(target));
+  } catch {
+    throw new Error('the tutorial\'s build folder could not be found');
+  }
+  if (real !== expected) throw new Error('the tutorial\'s build folder is a link to somewhere else, so nothing is written through it');
+  if (lstatOrNull(expected)?.isDirectory() !== true) throw new Error('the tutorial\'s build folder is not a folder');
+  return expected;
+}
+
+/** `versions/` inside a proved build folder, made if it is not there, and proved the same way. */
+function provenVersionsDir(build: string): string {
+  const dir = path.join(build, 'versions');
+  try {
+    // Safe before the proof: `mkdir` over a link (dangling or not) fails, and creates nothing through it.
+    fs.mkdirSync(dir);
+  } catch {
+    /* there already, or the proof below says why not */
+  }
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    throw new Error('the versions folder is a link that leads nowhere, so no version is written');
+  }
+  if (real !== dir) throw new Error('the versions folder is a link to somewhere else, so no version is written through it');
+  if (lstatOrNull(dir)?.isDirectory() !== true) throw new Error('the versions folder is not a folder');
+  return dir;
+}
+
+/**
+ * One past the highest numbered version in `dir`, so a version is never overwritten. Only a number that
+ * names one file counts: past 2^53 `Number` rounds, and two divergences would share a name (code review N5).
+ */
 function nextVersion(dir: string): number {
   let names: string[];
   try {
@@ -264,10 +325,12 @@ function nextVersion(dir: string): number {
   }
   return names.reduce((top, name) => {
     const match = /^(\d+)\.json$/.exec(name);
-    return match === null ? top : Math.max(top, Number(match[1]) + 1);
+    if (match === null) return top;
+    const next = Number(match[1]) + 1;
+    return Number.isSafeInteger(next) && String(next - 1) === match[1] ? Math.max(top, next) : top;
   }, 1);
 }
 
 export function saveProgress(target: string, progress: Progress): void {
-  writeJsonAtomic(progressPath(target), progress);
+  writeJsonAtomic(path.join(provenBuildDir(target), 'progress.json'), progress);
 }

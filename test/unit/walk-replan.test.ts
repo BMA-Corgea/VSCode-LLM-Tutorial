@@ -146,7 +146,7 @@ function harness(options: Options = {}): Harness {
     diverge: (input, hooks) => new Promise((resolve, reject) => {
       pending.push({ input, hooks, finish: resolve, fail: reject });
     }),
-    savePlan: options.savePlan ?? ((t, p) => { saveDivergedPlan(t, p); }),
+    savePlan: options.savePlan ?? ((t, p, before) => { saveDivergedPlan(t, p, undefined, before); }),
   };
   const adapters: WalkAdapters = {
     setTree: (v) => { views.push(v); },

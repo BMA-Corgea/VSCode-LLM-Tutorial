@@ -685,7 +685,7 @@ async function replannerFor(context: vscode.ExtensionContext, target: string): P
       dialCore,
       target,
     }),
-    savePlan: (t, plan) => { saveDivergedPlan(t, plan); },
+    savePlan: (t, plan, derivedFrom) => { saveDivergedPlan(t, plan, undefined, derivedFrom); },
   };
 }
 
