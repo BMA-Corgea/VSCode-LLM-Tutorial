@@ -9,6 +9,10 @@
  * halo with no outline, where VS Code's inputs (and the tutor box) draw a 1 px `focusBorder` outline.
  *
  * Under System only: a named skin keeps the look its own sheet gives its fields.
+ *
+ * The rules are read with `./css-rules.ts`, which keeps a selector's descendant spaces: the first version
+ * of this file squeezed them out, and a typo that made the rules match no element still passed (T-52's
+ * review, F1). The real host reads the computed result as well (`test/start-fields-screen.test.ts`).
  */
 
 import * as assert from 'node:assert/strict';
@@ -16,6 +20,7 @@ import { renderStartHtml, type SkinsModule } from '../../src/start/view.js';
 import { emptyRequest } from '../../src/start/request.js';
 import { renderStepHtml } from '../../src/walk/step-view.js';
 import { stepDial } from '../../src/walk/model.js';
+import { cssOf, declarationsFor } from './css-rules.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const FAKE_SKINS: SkinsModule = {
@@ -41,23 +46,6 @@ function tutorBoxPage(): string {
   return renderStepHtml({ plan, progress, step, fileExists: true, dial: stepDial(progress, step.id), skin: 'system', transcript: [], detour: { generating: false } }, FAKE_SKINS);
 }
 
-/** Every `<style>` block of a page, joined, comments dropped and whitespace squeezed out. */
-function cssOf(html: string): string {
-  return [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, '');
-}
-
-/** The declarations of every rule whose selector list contains `selector` exactly. */
-function declarationsFor(css: string, selector: string): string {
-  const squeezed = selector.replace(/\s+/g, '');
-  const out: string[] = [];
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    const selectors = m[1]!.split(',').map((s) => s.trim());
-    if (selectors.includes(squeezed)) out.push(m[2]!);
-  }
-  return out.join(';');
-}
-
 suite('T-52: the Start form\'s fields, as VS Code draws its own inputs', () => {
   test('under System a field\'s placeholder is the theme\'s input.placeholderForeground, not the browser\'s grey', () => {
     const css = cssOf(startPage());
@@ -71,19 +59,23 @@ suite('T-52: the Start form\'s fields, as VS Code draws its own inputs', () => {
     const css = cssOf(startPage());
     for (const field of FIELDS) {
       const decls = declarationsFor(css, `${SYSTEM} ${field}:focus`);
-      assert.match(decls, /outline:1pxsolidvar\(--focus\)/, `${field}: the outline`);
+      assert.match(decls, /outline:1px solid var\(--focus\)/, `${field}: the outline`);
       assert.match(decls, /outline-offset:-1px/, `${field}: inset`);
     }
   });
 
-  test('the same two properties as the tutor box\'s, so the two inputs on this extension\'s pages match', () => {
+  test('the same two properties as the tutor box\'s, on every field, so the inputs on this extension\'s pages match', () => {
     const box = cssOf(tutorBoxPage());
     const form = cssOf(startPage());
     const placeholder = (d: string): string | undefined => /color:([^;]+)/.exec(d)?.[1];
-    assert.equal(placeholder(declarationsFor(form, `${SYSTEM} .field textarea::placeholder`)),
-      placeholder(declarationsFor(box, `${SYSTEM} .tutor-input::placeholder`)), 'the placeholder colour');
     const outline = (d: string): string => [/outline:([^;]+)/.exec(d)?.[1], /outline-offset:([^;]+)/.exec(d)?.[1]].join(' ');
-    assert.equal(outline(declarationsFor(form, `${SYSTEM} .field textarea:focus`)), outline(declarationsFor(box, '.tutor-input:focus')), 'the focus outline');
+    const boxPlaceholder = placeholder(declarationsFor(box, `${SYSTEM} .tutor-input::placeholder`));
+    const boxOutline = outline(declarationsFor(box, '.tutor-input:focus'));
+    assert.ok(boxPlaceholder && boxOutline.trim(), 'discriminates: the tutor box\'s own rules were found');
+    for (const field of FIELDS) {
+      assert.equal(placeholder(declarationsFor(form, `${SYSTEM} ${field}::placeholder`)), boxPlaceholder, `${field}: the placeholder colour`);
+      assert.equal(outline(declarationsFor(form, `${SYSTEM} ${field}:focus`)), boxOutline, `${field}: the focus outline`);
+    }
   });
 
   test('a named skin keeps its own: the new rules are all under System, none unscoped', () => {
