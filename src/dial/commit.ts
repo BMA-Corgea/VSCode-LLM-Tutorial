@@ -413,6 +413,21 @@ function resolveFiles(target: string, files: readonly string[]): string[] {
  * `exclude` instead of a tracked `.gitignore`. So "nothing of yours was edited" holds; "it
  * writes nothing" did not, and is not what is claimed here.
  */
+/**
+ * What to do about a lock file a git left behind (T-82), said by this extension whatever git says.
+ *
+ * git 2.43 ended its message about a stale `index.lock` with "remove the file manually to
+ * continue". git 2.56, as on GitHub's runners, says only that the lock "may be stale", and adds no
+ * next step. Both are translated, and a git can also fail and say nothing at all. So this extension
+ * never relies on git's words for the advice: it looks at whether the lock file is there, and when
+ * it is, says what to do and names the file.
+ */
+export function staleLockAdvice(lock: string): string {
+  return 'if no other git is running in this folder (an editor that `git commit` opened, a terminal, '
+    + `another window), a git that stopped earlier left ${lock} behind: delete that one file, and the `
+    + 'next step you complete commits as usual';
+}
+
 export async function commitStep(
   target: string,
   step: StepLike,
@@ -438,10 +453,25 @@ export async function commitStep(
     // `gitTimedOut` reads the runner's own property, never the message — the message contains
     // `commitSubject(step)`, which is the plan's text, and classifying on it is the defect
     // review finding 3 drove. This is the only place the two are told apart.
-    return {
-      committed: false,
-      reason: err instanceof Error ? err.message : String(err),
-      refusal: gitTimedOut(err) ? 'git-stopped' : 'git-failed',
-    };
+    const refusal = gitTimedOut(err) ? 'git-stopped' : 'git-failed';
+    const said = err instanceof Error ? err.message : String(err);
+    // T-82: when the lock file is really there, say what to do about it, whatever git said. A git
+    // this extension stopped keeps its own notice; if it left a lock, the next commit says so here.
+    const lock = refusal === 'git-failed' ? await indexLockLeft(target, git) : null;
+    const reason = lock === null ? said : said ? `${said} — ${staleLockAdvice(lock)}` : staleLockAdvice(lock);
+    return { committed: false, reason, refusal };
+  }
+}
+
+/** The index lock of the repository `target` is in, when that file is there now; `null` otherwise. */
+async function indexLockLeft(target: string, git: GitRunner): Promise<string | null> {
+  try {
+    // `--git-dir`, as `ensureTranscriptIgnored` does: right for a subdirectory, a worktree and a submodule.
+    const raw = (await git(['rev-parse', '--git-dir'], target)).trim();
+    if (raw === '') return null;
+    const lock = path.resolve(target, raw, 'index.lock');
+    return fs.existsSync(lock) ? lock : null;
+  } catch {
+    return null;
   }
 }
