@@ -18,7 +18,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { BUILD_DIR, MARKER_FILE, parseGithubUrl, type BuildRequest } from './request.js';
+import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, parseGithubUrl, type BuildRequest } from './request.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
 // repo-tour's real types — see src/core.ts's header for why the boundary is typed this loosely). ──
@@ -431,11 +431,13 @@ export interface BuildMarker {
   phase: BuildPhase;
   request: BuildRequest;
   /**
-   * The extension host that ran this build (T-71). A press on a folder that holds only this marker
-   * builds there again when that host is this one or is gone, and not while it may still be running
-   * in another window (`unfinishedBuildIn`). Absent on a marker written before T-71.
+   * Rewritten every `HEARTBEAT_MS` while the build runs (T-71, review F1 and F4), so that a folder
+   * holding only this marker is built in again once its build has stopped, and not while it may
+   * still be running, in this window or another (`unfinishedBuildIn`). Absent before T-71.
    */
-  pid?: number;
+  heartbeatAt?: string;
+  /** Written as a build that kept its marker (a failure) leaves: it is not running any more. */
+  endedAt?: string;
 }
 
 /** How long an interrupted build stays worth offering to resume (plan step 6e). */
@@ -520,6 +522,21 @@ function deleteMarker(target: string): void {
   } catch {
     /* already gone — fine */
   }
+  // With it, what an unfinished build of ours left beside it (T-71 review F2): the temp file of an
+  // atomic write a crash cut short, and, unless there is a finished plan, the request it wrote
+  // first. Otherwise the folder stayed "not empty" with nothing in it to resume.
+  try {
+    const dir = buildDir(target);
+    if (fs.lstatSync(dir).isDirectory()) {
+      const names = fs.readdirSync(dir);
+      for (const name of names) {
+        if (ATOMIC_TMP.test(name)) fs.rmSync(path.join(dir, name), { force: true });
+      }
+      if (!names.includes('plan.json')) fs.rmSync(path.join(dir, 'request.json'), { force: true });
+    }
+  } catch {
+    /* no build folder, or one this cannot read: nothing of ours to tidy */
+  }
   // And the folders the marker needed, when nothing else is in them (T-30). `validateTarget` refuses
   // a folder with anything in it, so an empty `.repo-tour/build/` left by a cancel or a refusal
   // turned the next press on the very same form into "not empty — pick an empty or new folder".
@@ -583,22 +600,40 @@ export interface BuildOutcome {
 /** Advances the marker to `phase`, durably (write-ahead), before that phase's own work runs. */
 function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: BuildContext): void {
   marker.phase = phase;
+  marker.heartbeatAt = new Date().toISOString();
   writeMarker(target, marker, ctx.writeOps ?? realFsWriteOps);
   ctx.onPhase?.(phase);
 }
 
 export async function buildFromRequest(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
+  const target = request.target;
+  const marker: BuildMarker = { startedAt: new Date().toISOString(), phase: 'digest', request };
+  // T-71 review F1: this host is building this folder until the build is over, however it started.
+  const key = path.resolve(target);
+  BUILDING_NOW.add(key);
+  const heartbeat = setInterval(() => {
+    // Only a marker this build already wrote: never one made before its first phase, or after its end.
+    if (readMarker(target)?.startedAt !== marker.startedAt) return;
+    marker.heartbeatAt = new Date().toISOString();
+    try { writeMarker(target, marker, ctx.writeOps ?? realFsWriteOps); } catch { /* the next beat tries again */ }
+  }, HEARTBEAT_MS);
+  heartbeat.unref?.();
   try {
-    return await runThePhases(request, ctx);
+    return await runThePhases(request, ctx, marker);
   } finally {
+    clearInterval(heartbeat);
+    BUILDING_NOW.delete(key);
+    // A build that kept its marker (a failure) says, as it leaves, that it is not running any more.
+    if (readMarker(target)?.startedAt === marker.startedAt) {
+      try { writeMarker(target, { ...marker, endedAt: new Date().toISOString() }, ctx.writeOps ?? realFsWriteOps); } catch { /* stale in 90 s */ }
+    }
     ctx.core.release?.(); // a refusal after the digest, a failure, a cancel: nothing may keep a worker alive
   }
 }
 
-async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
+async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: BuildMarker): Promise<BuildOutcome> {
   const target = request.target;
   const git = ctx.git ?? realGit;
-  const marker: BuildMarker = { startedAt: new Date().toISOString(), phase: 'digest', request, pid: process.pid };
 
   let repoRoot: string;
   try {
@@ -716,8 +751,11 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
   // the same form was refused as "not empty — pick an empty or new folder", which threw away what had
   // been cached. A folder holding only this build's marker is now built in again (`unfinishedBuildIn`).
   function fail(err: unknown): BuildOutcome {
-    const said = (err instanceof Error ? err.message : String(err)).replace(/[\s.]+$/, '');
-    return { ok: false, reason: `${said} — ${TRY_AGAIN}` };
+    // One final full stop and trailing space go, never a path's own dots (review F3).
+    const said = (err instanceof Error ? err.message : String(err)).replace(/\s+$/, '').replace(/\.$/, '');
+    // A failure that pressing again cannot cure says only what it says (review F3).
+    if ((err as { retryWontHelp?: unknown } | null)?.retryWontHelp === true) return { ok: false, reason: said };
+    return { ok: false, reason: `${said || 'the build stopped without saying why'} — ${TRY_AGAIN}` };
   }
   function cancel(t: string, when: string): BuildOutcome {
     deleteMarker(t); // an explicit user cancel — not a crash — so there is nothing to resume
@@ -758,6 +796,9 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
   if (!marker) return undefined;
 
   const answer = await ctx.confirm(`A build for ${target} was interrupted (in progress: ${marker.phase}). Resume it?`);
+  // The answer can come long after the question (review F1): a build may have started there since,
+  // from the form. Then neither resume nor discard: that build owns the folder and its marker now.
+  if (BUILDING_NOW.has(path.resolve(target)) || readMarker(target)?.startedAt !== marker.startedAt) return undefined;
   if (answer === 'Discard') {
     deleteMarker(target);
     return undefined;

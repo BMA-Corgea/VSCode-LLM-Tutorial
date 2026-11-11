@@ -312,7 +312,19 @@ suite('a worker that cannot answer is a sentence, never a hang (T-30 AC8)', func
   test('running out of memory ends the worker, not this process', async () => {
     await endsWithASentence(stubCore({
       'digest.js': `export async function digest() { const keep = []; for (;;) keep.push(new Array(10000).fill({ a: 1 })); }\n`,
-    }), /^reading the repository stopped unexpectedly/, { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
+    }), /^reading the repository stopped: this repository is too large to read here \(the build's worker reached its memory limit\)$/,
+    { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
+  });
+
+  test('T-71 review F3: the memory limit and a missing worker are failures pressing again cannot cure, and say so by a property', async () => {
+    const outOfMemory = await endsWithASentence(stubCore({
+      'digest.js': `export async function digest() { const keep = []; for (;;) keep.push(new Array(10000).fill({ a: 1 })); }\n`,
+    }), /./, { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
+    assert.doesNotMatch(outOfMemory.reason ?? '', /try again/, 'the same repository reaches the same limit');
+    const missing = await endsWithASentence(stubCore({ 'digest.js': OK_DIGEST }), /./, { workerFile: path.join(tmp('t30-empty-'), 'build-worker.js') });
+    assert.doesNotMatch(missing.reason ?? '', /try again/, 'its own words already say to reinstall');
+    const ordinary = await endsWithASentence(stubCore({ 'digest.js': `export async function digest() { throw new Error('a blip'); }\n` }), /a blip/);
+    assert.match(ordinary.reason ?? '', /try again/, 'an ordinary failure still says what to do next');
   });
 
   /** A digest that answers, and then its thread dies a moment later: the gap between two phases. */

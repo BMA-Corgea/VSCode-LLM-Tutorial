@@ -27,7 +27,20 @@ import path from 'node:path';
 export const BUILD_DIR = ['.repo-tour', 'build'] as const;
 export const MARKER_FILE = 'building.json';
 /** The temp file of an atomic write (`writeJsonAtomic`: `<name>.<12 hex>.tmp`) that a crash cut short. */
-const ATOMIC_TMP = /^(?:building|request|plan)\.json\.[0-9a-f]{12}\.tmp$/;
+export const ATOMIC_TMP = /^(?:building|request|plan)\.json\.[0-9a-f]{12}\.tmp$/;
+
+/**
+ * The targets this extension host is building right now, resolved (T-71 review F1). A build adds its
+ * target for as long as it runs, whether a press or a Resume started it: the panel's own "a build
+ * is running" flag knows nothing of a Resume.
+ */
+export const BUILDING_NOW = new Set<string>();
+/** How often a running build rewrites its marker's `heartbeatAt`, so that another window can tell. */
+export const HEARTBEAT_MS = 30_000;
+/** A heartbeat older than this belongs to a build that is not running any more (a reload, a crash). */
+export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS;
+/** A marker with no heartbeat (one written before T-71) is taken as a build in progress for this long. */
+const NO_HEARTBEAT_STALE_MS = 6 * 60 * 60 * 1000;
 const PHASES = ['digest', 'plan', 'interpret', 'write'];
 
 export type Dial = 'manual' | 'scaffolded' | 'automated';
@@ -127,6 +140,8 @@ function validateTarget(target: string): string | null {
   const trimmed = target.trim();
   if (!trimmed) return 'pick an empty or new folder';
   if (!path.isAbsolute(trimmed)) return 'pick an absolute path for the target folder';
+  // First, and whatever the folder holds yet: a Resume still cloning has written nothing (review F1).
+  if (BUILDING_NOW.has(path.resolve(trimmed))) return `a build is running in ${trimmed} now — wait for it to finish, or pick an empty or new folder`;
   if (!fs.existsSync(trimmed)) return null; // a new folder — created when the build starts
   if (!fs.statSync(trimmed).isDirectory()) return `${trimmed} is not a folder`;
   if (fs.readdirSync(trimmed).length === 0) return null;
@@ -136,7 +151,7 @@ function validateTarget(target: string): string | null {
   const unfinished = unfinishedBuildIn(trimmed);
   if (unfinished === 'build-again') return null;
   if (unfinished === 'maybe-running') {
-    return `${trimmed} holds another build, which may still be running in another window — wait for it, or pick an empty or new folder`;
+    return `${trimmed} holds a build that was still working a moment ago, perhaps in another window — wait for it to finish, or pick an empty or new folder`;
   }
   return `${trimmed} is not empty — pick an empty or new folder`;
 }
@@ -150,16 +165,15 @@ function validateTarget(target: string): string | null {
  * real directories and files, never a link, because the next build writes through them. No
  * `plan.json`: that is a FINISHED tutorial, and building over it would replace it.
  *
- * Again only when the marker's build cannot still be running: its extension host is this one (and
- * nothing is building here, which `form:submit` checks before it validates), or is gone (a reload,
- * a crash). A host alive elsewhere, or a marker that names none (one written before T-71), may be a
- * build in progress in another window, and two builds in one folder would race each other's writes.
+ * Again only when the marker's build cannot still be running, because two builds in one folder
+ * would race each other's writes (review F1, F4). A running build rewrites `heartbeatAt` every
+ * `HEARTBEAT_MS`, and one that ended writes `endedAt` as it leaves. So: ended, or a heartbeat older
+ * than `HEARTBEAT_STALE_MS` (its window reloaded or crashed, on this machine or another): build
+ * again. A fresh heartbeat: maybe running, perhaps in another window. A marker with no heartbeat
+ * (written before T-71): maybe running for 6 hours from its start, then not. A build of THIS host
+ * is refused before this is asked (`BUILDING_NOW`, in `validateTarget`).
  */
-export function unfinishedBuildIn(
-  target: string,
-  self: number = process.pid,
-  alive: (pid: number) => boolean = processAlive,
-): 'build-again' | 'maybe-running' | null {
+export function unfinishedBuildIn(target: string, now: number = Date.now()): 'build-again' | 'maybe-running' | null {
   const isDir = (p: string): boolean => fs.lstatSync(p, { throwIfNoEntry: false })?.isDirectory() === true;
   const isFile = (p: string): boolean => fs.lstatSync(p, { throwIfNoEntry: false })?.isFile() === true;
   try {
@@ -177,24 +191,17 @@ export function unfinishedBuildIn(
     }
     const marker = JSON.parse(fs.readFileSync(path.join(build, MARKER_FILE), 'utf8')) as unknown;
     if (typeof marker !== 'object' || marker === null) return null;
-    const { startedAt, phase, request, pid } = marker as Record<string, unknown>;
+    const { startedAt, phase, request, heartbeatAt, endedAt } = marker as Record<string, unknown>;
     if (typeof startedAt !== 'string' || typeof phase !== 'string' || !PHASES.includes(phase) || typeof request !== 'object' || request === null) {
       return null;
     }
-    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return 'maybe-running';
-    return pid === self || !alive(pid) ? 'build-again' : 'maybe-running';
+    if (typeof endedAt === 'string') return 'build-again';
+    const beat = typeof heartbeatAt === 'string' ? Date.parse(heartbeatAt) : Number.NaN;
+    if (!Number.isNaN(beat)) return now - beat < HEARTBEAT_STALE_MS ? 'maybe-running' : 'build-again';
+    const started = Date.parse(startedAt);
+    return Number.isNaN(started) || now - started < NO_HEARTBEAT_STALE_MS ? 'maybe-running' : 'build-again';
   } catch {
     return null; // unreadable, or a marker that does not parse: not something to build over
-  }
-}
-
-/** Whether a process with this id exists. EPERM means it does, under another user. */
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 

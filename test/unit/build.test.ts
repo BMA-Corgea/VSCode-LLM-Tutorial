@@ -348,11 +348,76 @@ suite('the write-ahead marker (AC4)', () => {
       assert.ok(outcome.reason?.endsWith(` — ${TRY_AGAIN}`), `the reason does not say what to do next: ${outcome.reason}`);
       assert.doesNotMatch(outcome.reason ?? '', /\. —/, 'a reason that ends in a full stop gets one, not two');
       assert.equal(readMarker(target)?.phase, phase);
-      assert.equal(readMarker(target)?.pid, process.pid, "the marker must name the host whose build it is");
+      assert.equal(typeof readMarker(target)?.heartbeatAt, 'string', 'a running build beats');
+      assert.equal(typeof readMarker(target)?.endedAt, 'string', 'and a build that kept its marker says, as it leaves, that it ended');
       // The very next press, on the unedited form: accepted, where it used to be "not empty".
       assert.deepEqual(validateRequest(request).problems, {}, 'the same form was refused after a failure that keeps its marker');
     });
   }
+
+  test('T-71 review F1: while a build runs, its folder is refused, however that build started; once it has failed, the same form builds again', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held: BuildCore = { ...realCore, digest: async () => { await gate; throw new Error('the network blinked'); } };
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    const running = buildFromRequest(request, baseContext({ core: held })); // a Resume runs exactly this
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(validateRequest(request).problems.target, `a build is running in ${target} now — wait for it to finish, or pick an empty or new folder`);
+    release?.();
+    const outcome = await running;
+    assert.equal(outcome.ok, false);
+    assert.deepEqual(validateRequest(request).problems, {}, 'the same form is built again once that build is over');
+  });
+
+  test('T-71 review F1: a Resume or a Discard answered after a build has started there since does nothing to it', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let digests = 0;
+    const counted: BuildCore = { ...realCore, digest: async (...args) => { digests += 1; await gate; return realCore.digest(...args); } };
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    fs.mkdirSync(path.dirname(markerPath(target)), { recursive: true });
+    fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'interpret', request }));
+    for (const answer of ['Resume', 'Discard'] as const) {
+      let answerNow: (() => void) | undefined;
+      const asked = new Promise<void>((resolve) => { answerNow = resolve; });
+      const prompt = resumeIfMarked(target, { ...baseContext({ core: counted }), confirm: async () => { await asked; return answer; } });
+      const fromTheForm = buildFromRequest(request, baseContext({ core: counted })); // pressed while the prompt is open
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const theirs = readMarker(target)?.startedAt;
+      answerNow?.();
+      assert.equal(await prompt, undefined, `${answer} after a build started there must do nothing`);
+      assert.equal(readMarker(target)?.startedAt, theirs, `${answer} touched the running build's marker`);
+      assert.equal(digests, answer === 'Resume' ? 1 : 2, 'only the form\'s builds ran');
+      release?.();
+      await fromTheForm;
+    }
+  });
+
+  test('T-71 review F2: a cancelled retry of a build that failed in its write leaves the folder empty, not "not empty"', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const repo = makeTsFixture();
+    const failingPlanWrite: FsWriteOps = { ...realFsWriteOps, renameSync: (from, to) => { if (to.endsWith('plan.json')) throw new Error('disk full'); realFsWriteOps.renameSync(from, to); } };
+    const failed = await buildFromRequest(requestFor(repo, target), baseContext({ writeOps: failingPlanWrite }));
+    assert.equal(failed.ok, false);
+    assert.ok(fs.existsSync(path.join(buildDir(target), 'request.json')), 'the failed write left request.json, as the scenario needs');
+    const cancelled = await buildFromRequest(requestFor(repo, target), baseContext({ isCancelled: () => true }));
+    assert.equal(cancelled.cancelled, true);
+    assert.deepEqual(fs.readdirSync(target), [], 'the cancelled retry left the folder as it found nothing');
+  });
+
+  test('T-71 review F3: no "try again" where pressing again cannot help, plain words for a silent error, and a path keeps its dots', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const repo = makeTsFixture();
+    const wontHelp = Object.assign(new Error('could not start the build: the build worker is missing from this install (x); reinstalling the extension should restore it'), { retryWontHelp: true });
+    const missing = await buildFromRequest(requestFor(repo, target), baseContext({ core: { ...realCore, digest: () => Promise.reject(wontHelp) } }));
+    assert.equal(missing.reason, wontHelp.message, 'a failure pressing again cannot cure says only what it says');
+    const silent = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('')) } }));
+    assert.equal(silent.reason, `the build stopped without saying why — ${TRY_AGAIN}`);
+    const dotted = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('could not read /work/my.project')) } }));
+    assert.equal(dotted.reason, `could not read /work/my.project — ${TRY_AGAIN}`);
+  });
 
   test("T-71: the language refusal keeps its own words (no \"try again\": the same repository fails the same way)", async () => {
     const target = tmpDir('build-tutorials-target-');

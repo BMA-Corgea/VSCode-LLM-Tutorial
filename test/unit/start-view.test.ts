@@ -415,6 +415,8 @@ suite('a press always changes something on the page (T-15)', () => {
     assert.deepEqual([failedInARowAfter(3, 'built'), failedInARowAfter(3, 'cancelled')], [0, 0]);
     const edited = await handleStartMessage(state({ ended: 'failed', failedInARow: 2 }), { type: 'form:changed', payload: { request: emptyRequest() } }, effects());
     assert.equal(edited.state.failedInARow, 0, 'an edit must reset the count');
+    const picked = await handleStartMessage(state({ ended: 'failed', failedInARow: 2 }), { type: 'pick:target' }, { ...effects(), pickFolder: () => Promise.resolve('/a/folder') });
+    assert.equal(picked.state.failedInARow, 0, 'a folder pick must reset the count');
   });
 
   test('a SECOND press with no edit changes the WORDS on screen, not an attribute nobody sees (review finding 3, AC2)', async () => {
