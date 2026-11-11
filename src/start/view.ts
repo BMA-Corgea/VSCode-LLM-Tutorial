@@ -44,6 +44,20 @@ export const SUBMIT_NOTES = {
   cancelled: 'Build cancelled.',
 } as const;
 
+/**
+ * The note for the second failure in a row and after (T-71), `{n}` the count: a failure that repeats
+ * itself still changes the WORDS on screen, as a repeated refusal's "Still … Tried N times." does.
+ */
+export const FAILED_AGAIN = 'The build failed again — {n} times in a row. The reason is under Reference repo.';
+
+/** What the note says on a fresh render, in words: see `noteKind`. */
+export function noteText(state: PanelState): string {
+  const kind = noteKind(state);
+  if (kind === '') return '';
+  if (kind === 'failed' && (state.failedInARow ?? 0) > 1) return FAILED_AGAIN.replace('{n}', String(state.failedInARow));
+  return SUBMIT_NOTES[kind];
+}
+
 const PAGE_CSS = `
 .start-head { margin-bottom:18px; }
 .start-head h1 { font-size:16px; margin:0; }
@@ -131,7 +145,7 @@ function bodyHtml(state: PanelState, skins: SkinsModule): string {
          what to fix, a repeated refusal says "Still" and how many times, an accepted press says
          the build is running and where its progress is, and the end of a build says how it
          ended. The build's own progress notification is in the corner, not here. -->
-    <p class="submit-note" id="submit-note" role="status" aria-live="polite" data-kind="${noteKind(state)}">${noteKind(state) ? escapeHtml(SUBMIT_NOTES[noteKind(state) as keyof typeof SUBMIT_NOTES]) : ''}</p>
+    <p class="submit-note" id="submit-note" role="status" aria-live="polite" data-kind="${noteKind(state)}">${escapeHtml(noteText(state))}</p>
   </form>
 
   <div class="panel-foot">${pickerHtml(skins.SKINS, state.skin)}</div>
@@ -179,6 +193,7 @@ const CLIENT_SCRIPT = `
   // WORDS differ: September's fix moved an invisible data-press attribute instead, and a person
   // pressing twice saw nothing change at all (review finding 3, re-driven 2026-11-05).
   var NOTES = ${JSON.stringify(SUBMIT_NOTES).replace(/</g, '\\u003c')};
+  var FAILED_AGAIN = ${JSON.stringify(FAILED_AGAIN).replace(/</g, '\\u003c')};
   var FIELD_NAMES = { idea: 'the idea', repo: 'the reference repo', target: 'the folder to build in' };
   var buildBtn = document.getElementById('build-btn');
   var building = !!(buildBtn && buildBtn.disabled);
@@ -272,6 +287,9 @@ const CLIENT_SCRIPT = `
       setBuilding(false);
       var ended = msg.payload && msg.payload.ended;
       var said = (ended === 'built' || ended === 'failed' || ended === 'cancelled') ? NOTES[ended] : '';
+      // T-71: a failure that repeats itself still changes the words.
+      var inARow = msg.payload && typeof msg.payload.inARow === 'number' ? msg.payload.inARow : 0;
+      if (ended === 'failed' && inARow > 1) { said = FAILED_AGAIN.replace('{n}', String(inARow)); }
       setNote(ended, said);
     } else if (msg.type === 'field:set') {
       var el = document.getElementById(msg.payload.field);

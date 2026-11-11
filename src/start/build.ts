@@ -18,7 +18,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { parseGithubUrl, type BuildRequest } from './request.js';
+import { BUILD_DIR, MARKER_FILE, parseGithubUrl, type BuildRequest } from './request.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
 // repo-tour's real types — see src/core.ts's header for why the boundary is typed this loosely). ──
@@ -430,17 +430,23 @@ export interface BuildMarker {
   startedAt: string;
   phase: BuildPhase;
   request: BuildRequest;
+  /**
+   * The extension host that ran this build (T-71). A press on a folder that holds only this marker
+   * builds there again when that host is this one or is gone, and not while it may still be running
+   * in another window (`unfinishedBuildIn`). Absent on a marker written before T-71.
+   */
+  pid?: number;
 }
 
 /** How long an interrupted build stays worth offering to resume (plan step 6e). */
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 export function buildDir(target: string): string {
-  return path.join(target, '.repo-tour', 'build');
+  return path.join(target, ...BUILD_DIR);
 }
 
 export function markerPath(target: string): string {
-  return path.join(buildDir(target), 'building.json');
+  return path.join(buildDir(target), MARKER_FILE);
 }
 
 /**
@@ -592,7 +598,7 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
 async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
   const target = request.target;
   const git = ctx.git ?? realGit;
-  const marker: BuildMarker = { startedAt: new Date().toISOString(), phase: 'digest', request };
+  const marker: BuildMarker = { startedAt: new Date().toISOString(), phase: 'digest', request, pid: process.pid };
 
   let repoRoot: string;
   try {
@@ -705,15 +711,22 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
   // transient git or model error, or a full disk are not guaranteed to fail the same way
   // again, and digest + buildPlan cost nothing to redo while interpretPlan's finished stops
   // are cached by content hash either way — so a later Resume can retry for close to free.
+  //
+  // So the reason also says the next step (T-71). It used to be the error alone, and the next press on
+  // the same form was refused as "not empty — pick an empty or new folder", which threw away what had
+  // been cached. A folder holding only this build's marker is now built in again (`unfinishedBuildIn`).
   function fail(err: unknown): BuildOutcome {
-    const reason = err instanceof Error ? err.message : String(err);
-    return { ok: false, reason };
+    const said = (err instanceof Error ? err.message : String(err)).replace(/[\s.]+$/, '');
+    return { ok: false, reason: `${said} — ${TRY_AGAIN}` };
   }
   function cancel(t: string, when: string): BuildOutcome {
     deleteMarker(t); // an explicit user cancel — not a crash — so there is nothing to resume
     return { ok: false, cancelled: true, reason: `build cancelled ${when}` };
   }
 }
+
+/** What a failure that leaves its marker says after its reason (T-71): the next press builds again. */
+export const TRY_AGAIN = 'nothing is lost: press Build the plan to try again.';
 
 /** The human-readable line spec §5.2's "cost is shown on completion" asks for. */
 export function costLine(cost: InterpretCostLike): string {

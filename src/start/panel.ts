@@ -16,7 +16,7 @@ import * as vscode from 'vscode';
 import { readSkin, writeSkin } from '../skins.js';
 import { emptyRequest, type BuildRequest, type RequestField } from './request.js';
 import {
-  handleStartMessage, parseInboundMessage, type BuildEnding, type OutboundMessage, type PanelState, type PickTarget,
+  failedInARowAfter, handleStartMessage, parseInboundMessage, type BuildEnding, type OutboundMessage, type PanelState, type PickTarget,
   type StartEffects,
 } from './protocol.js';
 import { renderStartHtml, type SkinsModule } from './view.js';
@@ -160,8 +160,9 @@ export class StartPanel {
     StartPanel.running = false;
     const open = StartPanel.current;
     if (!open) return undefined;
-    open.state = { ...open.state, building: false, refusedInARow: 0, ended };
-    const post: OutboundMessage = { type: 'form:idle', payload: { ended } };
+    const failedInARow = failedInARowAfter(open.state.failedInARow, ended);
+    open.state = { ...open.state, building: false, refusedInARow: 0, ended, failedInARow };
+    const post: OutboundMessage = { type: 'form:idle', payload: { ended, inARow: failedInARow } };
     void open.panel.webview.postMessage(post);
     return post;
   }

@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import {
-  BuildPhaseCancelled, buildFromRequest, coreFor, markerPath, phaseCancelled, readMarker,
+  BuildPhaseCancelled, buildFromRequest, coreFor, markerPath, phaseCancelled, readMarker, TRY_AGAIN,
   type BuildContext, type BuildCore, type BuildOutcome, type BuildPhase, type DigestResultLike,
 } from '../../src/start/build.js';
 import { BUILD_WORKER_HEAP_MB, offThreadCore, type OffThreadDeps } from '../../src/start/off-thread.js';
@@ -249,7 +249,7 @@ suite('a failure in the worker comes back in the same words (T-30 AC7)', functio
   test('digest throwing: the same reason, and the marker left for a resume, as in-process', async () => {
     const repo = mixedFixture();
     const inProcess = await buildFromRequest(requestFor(repo, tmp('t30-target-')), contextFor({ ...realCore, digest: () => Promise.reject(new Error('disk exploded')) }));
-    assert.equal(inProcess.reason, 'disk exploded', 'the comparison this test is built on');
+    assert.equal(inProcess.reason, `disk exploded — ${TRY_AGAIN}`, 'the comparison this test is built on');
 
     const target = tmp('t30-target-');
     const stub = stubCore({ 'digest.js': `export async function digest() { throw new Error('disk exploded'); }\n` });
@@ -268,7 +268,7 @@ suite('a failure in the worker comes back in the same words (T-30 AC7)', functio
       'build.js': `export async function buildPlan() { throw new Error('no order to be had'); }\n`,
     });
     const outcome = await buildFromRequest(requestFor(repo, target), contextFor(offThreadCore(harness({ coreRoot: stub }).deps)));
-    assert.equal(outcome.reason, 'no order to be had');
+    assert.equal(outcome.reason, `no order to be had — ${TRY_AGAIN}`);
     assert.equal(readMarker(target)?.phase, 'plan');
   });
 });

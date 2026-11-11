@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  DEFAULT_DIAL, IDEA_FIRST_MESSAGE, emptyRequest, parseGithubUrl, validateRequest,
+  BUILD_DIR, DEFAULT_DIAL, IDEA_FIRST_MESSAGE, MARKER_FILE, emptyRequest, parseGithubUrl, unfinishedBuildIn, validateRequest,
 } from '../../src/start/request.js';
 
 function tmpEmptyDir(): string {
@@ -124,6 +124,85 @@ suite('validateRequest', () => {
     const target = tmpEmptyDir();
     const result = validateRequest({ idea: '', recreate: true, repo, target, dial: DEFAULT_DIAL });
     assert.deepEqual(result, { ok: true, problems: {} });
+  });
+});
+
+suite('T-71: a target that holds nothing but an unfinished build', () => {
+  const DEAD = 2 ** 22 + 12_345; // above Linux's default pid_max: no process has this id
+  const alive = (pid: number): boolean => pid !== DEAD;
+
+  /** A target as a build that failed partway leaves it, with `marker` (or the real shape) and `extra` files in build/. */
+  function leftBy(marker: unknown, extra: string[] = []): string {
+    const target = tmpEmptyDir();
+    const build = path.join(target, ...BUILD_DIR);
+    fs.mkdirSync(build, { recursive: true });
+    fs.writeFileSync(path.join(build, MARKER_FILE), typeof marker === 'string' ? marker : JSON.stringify(marker));
+    for (const name of extra) fs.writeFileSync(path.join(build, name), '{}');
+    return target;
+  }
+  const MARKER = (pid?: number): Record<string, unknown> => ({
+    startedAt: new Date().toISOString(), phase: 'interpret', request: { ...emptyRequest(), recreate: true }, ...(pid === undefined ? {} : { pid }),
+  });
+  const target = (t: string): string | undefined =>
+    validateRequest({ ...emptyRequest(), recreate: true, repo: tmpEmptyDir(), target: t }).problems.target;
+
+  test('a marker this host left: the next press builds there again (it used to be "not empty")', () => {
+    const t = leftBy(MARKER(process.pid));
+    assert.equal(unfinishedBuildIn(t), 'build-again');
+    assert.equal(target(t), undefined);
+  });
+
+  test("a marker whose host is gone (a reload, a crash): builds again; with request.json and an atomic write's temp file too", () => {
+    const t = leftBy(MARKER(DEAD), ['request.json', 'plan.json.0123456789ab.tmp']);
+    assert.equal(unfinishedBuildIn(t, process.pid, alive), 'build-again');
+    assert.equal(unfinishedBuildIn(t), 'build-again', 'the real liveness check agrees: no process has that id');
+  });
+
+  test('a marker whose host is ALIVE elsewhere, or that names none: refused, saying it may still be running', () => {
+    for (const marker of [MARKER(process.ppid), MARKER()]) {
+      const t = leftBy(marker);
+      assert.equal(unfinishedBuildIn(t), 'maybe-running');
+      assert.equal(target(t), `${t} holds another build, which may still be running in another window — wait for it, or pick an empty or new folder`);
+    }
+  });
+
+  test('anything else in the folder, a finished plan, or a marker that does not parse: "not empty", as before', () => {
+    const cases: Array<[string, string]> = [];
+    const withFile = leftBy(MARKER(process.pid));
+    fs.writeFileSync(path.join(withFile, 'notes.md'), 'mine');
+    cases.push(['a file of the learner beside it', withFile]);
+    const inRepoTour = leftBy(MARKER(process.pid));
+    fs.mkdirSync(path.join(inRepoTour, BUILD_DIR[0], 'cache'));
+    cases.push(['another folder in .repo-tour', inRepoTour]);
+    cases.push(['a finished plan', leftBy(MARKER(process.pid), ['request.json', 'plan.json'])]);
+    cases.push(['a stray file in build/', leftBy(MARKER(process.pid), ['notes.json'])]);
+    cases.push(['a marker that does not parse', leftBy('{ not json')]);
+    cases.push(['a marker of the wrong shape', leftBy({ startedAt: 'x', phase: 'somewhere', request: {}, pid: process.pid })]);
+    const noMarker = leftBy(MARKER(process.pid));
+    fs.rmSync(path.join(noMarker, ...BUILD_DIR, MARKER_FILE));
+    fs.writeFileSync(path.join(noMarker, ...BUILD_DIR, 'request.json'), '{}');
+    cases.push(['request.json with no marker', noMarker]);
+    for (const [what, t] of cases) {
+      assert.equal(unfinishedBuildIn(t), null, what);
+      assert.equal(target(t), `${t} is not empty — pick an empty or new folder`, what);
+    }
+  });
+
+  test('a link anywhere on the way is refused: the next build would write through it', () => {
+    const elsewhere = leftBy(MARKER(process.pid));
+    const viaRepoTour = tmpEmptyDir();
+    fs.symlinkSync(path.join(elsewhere, BUILD_DIR[0]), path.join(viaRepoTour, BUILD_DIR[0]));
+    const viaBuild = tmpEmptyDir();
+    fs.mkdirSync(path.join(viaBuild, BUILD_DIR[0]));
+    fs.symlinkSync(path.join(elsewhere, ...BUILD_DIR), path.join(viaBuild, ...BUILD_DIR));
+    const viaMarker = tmpEmptyDir();
+    fs.mkdirSync(path.join(viaMarker, ...BUILD_DIR), { recursive: true });
+    fs.symlinkSync(path.join(elsewhere, ...BUILD_DIR, MARKER_FILE), path.join(viaMarker, ...BUILD_DIR, MARKER_FILE));
+    for (const [what, t] of [['.repo-tour', viaRepoTour], ['build', viaBuild], ['the marker', viaMarker]] as const) {
+      assert.equal(unfinishedBuildIn(t), null, `${what} as a link`);
+      assert.match(target(t) ?? '', /is not empty/, `${what} as a link`);
+    }
+    assert.equal(unfinishedBuildIn(elsewhere), 'build-again', 'the real folder the links point at is the accepted shape');
   });
 });
 

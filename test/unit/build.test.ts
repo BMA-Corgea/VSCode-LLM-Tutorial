@@ -19,11 +19,11 @@ import {
   buildDir, buildFromRequest, coreFor, completionMessage, costLine, detectUnsupportedLanguages,
   GIT_KILL_GRACE_MS, gitRunnerWith, gitTimedOut, gitTimeoutMs, GIT_TIMEOUT_MS, GitTimeoutError,
   languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, resolveRepo,
-  realGit, resumeIfMarked, writeJsonAtomic,
+  realGit, resumeIfMarked, TRY_AGAIN, writeJsonAtomic,
   type BuildContext, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
   type ExecFileLike, type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
-import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
+import { emptyRequest, validateRequest, type BuildRequest } from '../../src/start/request.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
 
@@ -330,6 +330,35 @@ suite('the write-ahead marker (AC4)', () => {
     const marker = readMarker(target);
     assert.ok(marker, 'an unexpected failure should leave the marker for a later Resume');
     assert.equal(marker.phase, 'digest');
+  });
+
+  // T-71: what the learner is told after a build that fails partway, and what the next press does.
+  // Made inside each test: `realCore` is only assigned in suiteSetup, after this loop has run.
+  const failing: Array<[BuildPhase, (core: BuildCore) => BuildCore]> = [
+    ['digest', (core) => ({ ...core, digest: () => Promise.reject(new Error('disk exploded.')) })],
+    ['plan', (core) => ({ ...core, buildPlan: () => Promise.reject(new Error('no order to be had')) })],
+  ];
+  for (const [phase, failingAt] of failing) {
+    test(`T-71: a build that fails at ${phase} says the next step, its marker names this host, and the SAME form builds again`, async () => {
+      const repo = makeTsFixture();
+      const target = tmpDir('build-tutorials-target-');
+      const request = requestFor(repo, target);
+      const outcome = await buildFromRequest(request, baseContext({ core: failingAt(realCore) }));
+      assert.equal(outcome.ok, false);
+      assert.ok(outcome.reason?.endsWith(` — ${TRY_AGAIN}`), `the reason does not say what to do next: ${outcome.reason}`);
+      assert.doesNotMatch(outcome.reason ?? '', /\. —/, 'a reason that ends in a full stop gets one, not two');
+      assert.equal(readMarker(target)?.phase, phase);
+      assert.equal(readMarker(target)?.pid, process.pid, "the marker must name the host whose build it is");
+      // The very next press, on the unedited form: accepted, where it used to be "not empty".
+      assert.deepEqual(validateRequest(request).problems, {}, 'the same form was refused after a failure that keeps its marker');
+    });
+  }
+
+  test("T-71: the language refusal keeps its own words (no \"try again\": the same repository fails the same way)", async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const outcome = await buildFromRequest(requestFor(makeGoFixture(), target), baseContext());
+    assert.equal(outcome.ok, false);
+    assert.doesNotMatch(outcome.reason ?? '', /try again/);
   });
 });
 

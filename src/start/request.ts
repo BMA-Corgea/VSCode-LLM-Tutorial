@@ -19,6 +19,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/**
+ * Where a build keeps its own files inside the target, `<target>/.repo-tour/build/`, and the name of
+ * its write-ahead marker there. Here rather than in `build.ts`, which imports this file, so that
+ * `validateTarget` can recognise a folder holding nothing but an unfinished build (T-71).
+ */
+export const BUILD_DIR = ['.repo-tour', 'build'] as const;
+export const MARKER_FILE = 'building.json';
+/** The temp file of an atomic write (`writeJsonAtomic`: `<name>.<12 hex>.tmp`) that a crash cut short. */
+const ATOMIC_TMP = /^(?:building|request|plan)\.json\.[0-9a-f]{12}\.tmp$/;
+const PHASES = ['digest', 'plan', 'interpret', 'write'];
+
 export type Dial = 'manual' | 'scaffolded' | 'automated';
 
 export const DIALS: readonly Dial[] = ['manual', 'scaffolded', 'automated'];
@@ -118,8 +129,73 @@ function validateTarget(target: string): string | null {
   if (!path.isAbsolute(trimmed)) return 'pick an absolute path for the target folder';
   if (!fs.existsSync(trimmed)) return null; // a new folder — created when the build starts
   if (!fs.statSync(trimmed).isDirectory()) return `${trimmed} is not a folder`;
-  if (fs.readdirSync(trimmed).length > 0) return `${trimmed} is not empty — pick an empty or new folder`;
-  return null;
+  if (fs.readdirSync(trimmed).length === 0) return null;
+  // T-71: a folder holding nothing but a build of ours that failed or was interrupted is not in use.
+  // The press builds there again, as Resume would (it re-runs from the start, and the model's answers
+  // already paid for are cached), instead of sending the learner to find another folder.
+  const unfinished = unfinishedBuildIn(trimmed);
+  if (unfinished === 'build-again') return null;
+  if (unfinished === 'maybe-running') {
+    return `${trimmed} holds another build, which may still be running in another window — wait for it, or pick an empty or new folder`;
+  }
+  return `${trimmed} is not empty — pick an empty or new folder`;
+}
+
+/**
+ * Whether `target` holds NOTHING but one of this extension's own unfinished builds (T-71), and if it
+ * does, whether a press here may build there again.
+ *
+ * Nothing but: `.repo-tour/` holding only `build/`, holding only the marker, the `request.json` a
+ * write that got that far left, and the temp file of an atomic write a crash cut short. All of them
+ * real directories and files, never a link, because the next build writes through them. No
+ * `plan.json`: that is a FINISHED tutorial, and building over it would replace it.
+ *
+ * Again only when the marker's build cannot still be running: its extension host is this one (and
+ * nothing is building here, which `form:submit` checks before it validates), or is gone (a reload,
+ * a crash). A host alive elsewhere, or a marker that names none (one written before T-71), may be a
+ * build in progress in another window, and two builds in one folder would race each other's writes.
+ */
+export function unfinishedBuildIn(
+  target: string,
+  self: number = process.pid,
+  alive: (pid: number) => boolean = processAlive,
+): 'build-again' | 'maybe-running' | null {
+  const isDir = (p: string): boolean => fs.lstatSync(p, { throwIfNoEntry: false })?.isDirectory() === true;
+  const isFile = (p: string): boolean => fs.lstatSync(p, { throwIfNoEntry: false })?.isFile() === true;
+  try {
+    const repoTour = path.join(target, BUILD_DIR[0]);
+    const build = path.join(repoTour, BUILD_DIR[1]);
+    const top = fs.readdirSync(target);
+    if (top.length !== 1 || top[0] !== BUILD_DIR[0] || !isDir(repoTour)) return null;
+    const middle = fs.readdirSync(repoTour);
+    if (middle.length !== 1 || middle[0] !== BUILD_DIR[1] || !isDir(build)) return null;
+    const names = fs.readdirSync(build);
+    if (!names.includes(MARKER_FILE)) return null;
+    for (const name of names) {
+      if (name !== MARKER_FILE && name !== 'request.json' && !ATOMIC_TMP.test(name)) return null;
+      if (!isFile(path.join(build, name))) return null;
+    }
+    const marker = JSON.parse(fs.readFileSync(path.join(build, MARKER_FILE), 'utf8')) as unknown;
+    if (typeof marker !== 'object' || marker === null) return null;
+    const { startedAt, phase, request, pid } = marker as Record<string, unknown>;
+    if (typeof startedAt !== 'string' || typeof phase !== 'string' || !PHASES.includes(phase) || typeof request !== 'object' || request === null) {
+      return null;
+    }
+    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return 'maybe-running';
+    return pid === self || !alive(pid) ? 'build-again' : 'maybe-running';
+  } catch {
+    return null; // unreadable, or a marker that does not parse: not something to build over
+  }
+}
+
+/** Whether a process with this id exists. EPERM means it does, under another user. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 export function validateRequest(req: BuildRequest): ValidationResult {
