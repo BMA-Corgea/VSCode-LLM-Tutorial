@@ -336,17 +336,24 @@ suite('the write-ahead marker (AC4)', () => {
 
 // ── T-70: Cancel during "asking about each decision…" stops the model calls ────────────────────
 
-suite('T-70: Cancel stops the model calls of the interpret phase', () => {
-  /** A provider that answers at once (`hold` false), or holds each call until its signal fires. */
-  function fakeProvider(onCall: (opts: { model: string; cwd: string; timeoutMs: number; signal?: AbortSignal }) => void, hold: boolean) {
+suite('T-70: Cancel stops the model calls of the interpret phase', function () {
+  // Above every fake's 5 s cap, so a call that is never ended fails in its own words, not mocha's (review F2).
+  this.timeout(20_000);
+
+  /** A provider that answers at once (`hold` false), answers after `hold` ms (a number), or holds each
+   *  call until its signal fires (`hold` true). A call whose signal fires rejects at once, as a real one does. */
+  function fakeProvider(onCall: (opts: { model: string; cwd: string; timeoutMs: number; signal?: AbortSignal }) => void, hold: boolean | number) {
     const calls: Array<{ prompt: string; model: string; cwd: string; timeoutMs: number; signal?: AbortSignal }> = [];
+    const reply = () => ({ text: 'the reply', inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
     const provider: ModelProvider = {
       run: (prompt, opts) => {
         calls.push({ prompt, ...opts });
         onCall(opts);
-        if (!hold) return Promise.resolve({ text: 'the reply', inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
-        return new Promise((_resolve, reject) => {
-          const cap = setTimeout(() => reject(new Error('the call was never ended: its signal did not fire')), 5_000);
+        if (hold === false) return Promise.resolve(reply());
+        return new Promise((resolve, reject) => {
+          const cap = typeof hold === 'number'
+            ? setTimeout(() => resolve(reply()), hold)
+            : setTimeout(() => reject(new Error('the call was never ended: its signal did not fire')), 5_000);
           opts.signal?.addEventListener('abort', () => { clearTimeout(cap); reject(new Error('aborted')); }, { once: true });
         });
       },
@@ -354,16 +361,25 @@ suite('T-70: Cancel stops the model calls of the interpret phase', () => {
     return { provider, calls };
   }
 
-  test('with no Cancel it is runLlm exactly: the same provider, model, cwd and timeout, and the reply passed through', async () => {
-    const { provider, calls } = fakeProvider(() => undefined, false);
+  test('with no Cancel it is runLlm exactly: the provider and model the learner chose, the same cwd and timeout, the reply passed through, and a call that outlives many polls left alone', async () => {
+    // A real call runs for seconds and sees a poll every 100 ms, so this one is held for many polls: a
+    // fake that answered at once ran no poll, and could not see a runner that ends a call nobody
+    // cancelled. And not claude, the provider a runner that ignored the learner's choice would also pick (review F1).
+    const pollMs = 20;
+    const { provider, calls } = fakeProvider(() => undefined, 15 * pollMs);
     const seen: string[] = [];
-    const runner = stoppableRunner((id) => { seen.push(id); return provider; }, () => false);
-    const reply = await runner.run('a prompt', { provider: 'claude', model: 'a-model' }, '/some/where', 1234);
+    let polls = 0;
+    const runner = stoppableRunner((id) => { seen.push(id); return provider; }, () => { polls += 1; return false; }, pollMs);
+    const reply = await runner.run('a prompt', { provider: 'codex', model: 'gpt-5-codex' }, '/some/where', 1234)
+      .catch((err: unknown) => assert.fail(`a call nobody cancelled was ended: ${err instanceof Error ? err.message : String(err)}`));
     assert.deepEqual(reply, { text: 'the reply', inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
-    assert.deepEqual(seen, ['claude']);
+    assert.ok(polls > 5, `the call saw ${polls - 1} polls, too few for this test to prove anything`);
+    assert.equal(calls[0]?.signal?.aborted, false, 'a call nobody cancelled had its signal fired');
+    assert.deepEqual(seen, ['codex'], 'the runner asked for a provider the learner did not choose');
     assert.equal(calls.length, 1);
-    assert.deepEqual({ ...calls[0], signal: undefined }, { prompt: 'a prompt', model: 'a-model', cwd: '/some/where', timeoutMs: 1234, signal: undefined });
-    await runner.run('again', { provider: 'claude', model: 'a-model' }, '/x');
+    assert.deepEqual({ ...calls[0], signal: undefined }, { prompt: 'a prompt', model: 'gpt-5-codex', cwd: '/some/where', timeoutMs: 1234, signal: undefined },
+      "the provider was not given the learner's model, the cwd and the timeout");
+    await runner.run('again', { provider: 'codex', model: 'gpt-5-codex' }, '/x');
     assert.equal(calls[1]?.timeoutMs, 300_000, "runLlm's own default timeout");
     assert.equal(runner.stopped(), false);
   });
@@ -420,6 +436,38 @@ suite('T-70: Cancel stops the model calls of the interpret phase', () => {
     } finally {
       if (savedBin === undefined) delete process.env.REPO_TOUR_CLAUDE_BIN;
       else process.env.REPO_TOUR_CLAUDE_BIN = savedBin;
+    }
+  });
+
+  test('a call refused BETWEEN two calls marks the build stopped: Cancel after the first answer, and the build says it stopped while asking', async () => {
+    // A Cancel that lands after a call has answered, before the next poll, is caught only by the next
+    // call's refusal. That refusal has to mark the build stopped, or it ends "before writing the plan" (review F3).
+    const saved = { claude: process.env.REPO_TOUR_CLAUDE_BIN, codex: process.env.REPO_TOUR_CODEX_BIN };
+    const nowhere = tmpDir('build-tutorials-no-cli-');
+    process.env.REPO_TOUR_CLAUDE_BIN = path.join(nowhere, 'no-such-claude');
+    process.env.REPO_TOUR_CODEX_BIN = path.join(nowhere, 'no-such-codex');
+    try {
+      let cancelled = false;
+      const { provider, calls } = fakeProvider(() => undefined, false);
+      // Cancel is pressed as the first answer comes back. No poll can run in between, so nothing is in flight to end.
+      const answersThenCancel: ModelProvider = { run: async (prompt, opts) => { const answer = await provider.run(prompt, opts); cancelled = true; return answer; } };
+      const core: BuildCore = {
+        ...realCore,
+        defaultCacheDir: () => tmpDir('build-tutorials-interpret-cache-'), // never the shared cache
+        runnerFor: (isCancelled) => stoppableRunner(() => answersThenCancel, isCancelled),
+      };
+      const target = tmpDir('build-tutorials-target-');
+      const outcome = await buildFromRequest(requestFor(makeTsFixture(), target), baseContext({ core, cachedOnly: false, isCancelled: () => cancelled }));
+      assert.equal(calls.length, 1, `${calls.length} calls reached the model; the one after Cancel must be refused`);
+      assert.equal(calls[0]?.signal?.aborted, false, 'the first call was ended in flight, so this test proved nothing about the refusal');
+      assert.deepEqual({ ok: outcome.ok, cancelled: outcome.cancelled, reason: outcome.reason }, { ok: false, cancelled: true, reason: 'build cancelled while asking about each decision' },
+        'a call refused by Cancel did not mark the build stopped');
+      assert.equal(readMarker(target), null, 'a cancel leaves nothing to resume');
+    } finally {
+      if (saved.claude === undefined) delete process.env.REPO_TOUR_CLAUDE_BIN;
+      else process.env.REPO_TOUR_CLAUDE_BIN = saved.claude;
+      if (saved.codex === undefined) delete process.env.REPO_TOUR_CODEX_BIN;
+      else process.env.REPO_TOUR_CODEX_BIN = saved.codex;
     }
   });
 });

@@ -545,6 +545,62 @@ suite('Cancel while a phase is running (T-30 AC4, AC5, AC6)', function () {
   });
 });
 
+suite('T-70: Cancel reaches the model calls of the build the extension makes', function () {
+  this.timeout(60_000);
+
+  test('the core built as src/extension.ts builds it, with the shipped polls: Cancel during the first call ends it within 2 s, and no other call reaches the model', async () => {
+    // Real, as in every build: offThreadCore over coreFor over repo-tour's own modules, the worker's read
+    // and plan, the default polls, repo-tour's interpretPlan, cachedOnly false. The test's own: the
+    // provider repo-tour's llm module hands out, and where answers are kept. A pin that brings its own
+    // runner or its own poll cannot see this chain undo T-70 (review F2). And no model CLI can be found
+    // while it runs, so had the runner gone missing, repo-tour's own runLlm would spawn nothing.
+    const saved = { claude: process.env.REPO_TOUR_CLAUDE_BIN, codex: process.env.REPO_TOUR_CODEX_BIN };
+    const nowhere = tmp('t70-no-cli-');
+    process.env.REPO_TOUR_CLAUDE_BIN = path.join(nowhere, 'no-such-claude');
+    process.env.REPO_TOUR_CODEX_BIN = path.join(nowhere, 'no-such-codex');
+    try {
+      let cancelled = false;
+      let pressedAt = 0;
+      const calls: Array<{ file: string; endedAt?: number }> = [];
+      const provider = {
+        // Holds each call until its signal fires, or for 3 s: well inside this test's timeout, so a call
+        // that is never ended fails below in its own words.
+        run: (prompt: string, opts: { signal?: AbortSignal }): Promise<unknown> => new Promise((_resolve, reject) => {
+          const call: { file: string; endedAt?: number } = { file: /File: (\S+)/.exec(prompt)?.[1] ?? '?' };
+          calls.push(call);
+          if (calls.length === 1) { cancelled = true; pressedAt = Date.now(); } // Cancel, pressed during the first call
+          const cap = setTimeout(() => reject(new Error('never ended: its signal did not fire')), 3_000);
+          opts.signal?.addEventListener('abort', () => { call.endedAt = Date.now(); clearTimeout(cap); reject(new Error('aborted')); }, { once: true });
+        }),
+      };
+      const cache = tmp('t70-interpret-cache-');
+      const inProcess = coreFor({
+        ...loaded.loaded,
+        llm: { providerById: () => provider },
+        interpret: { ...(loaded.loaded['interpret'] as object), defaultCacheDir: () => cache }, // never the shared cache
+      });
+      const target = tmp('t30-target-');
+      const outcome = await buildFromRequest(requestFor(mixedFixture(), target),
+        contextFor(offThreadCore(harness({ inProcess }).deps), { cachedOnly: false, isCancelled: () => cancelled }));
+
+      assert.ok(calls.length > 0, `the build never reached its first model call: ${JSON.stringify(outcome.reason ?? outcome.cost?.['failures'])}`);
+      assert.equal(calls.length, 1, `${calls.length} calls reached the model; only the one in flight at Cancel may (${calls.map((c) => c.file).join(', ')})`);
+      const first = calls[0]!;
+      assert.notEqual(first.endedAt, undefined, 'the call in flight at Cancel was never ended');
+      const endedMs = first.endedAt! - pressedAt;
+      assert.ok(endedMs < 2_000, `the call in flight outlived Cancel by ${endedMs} ms`);
+      assert.deepEqual({ ok: outcome.ok, cancelled: outcome.cancelled, reason: outcome.reason }, { ok: false, cancelled: true, reason: 'build cancelled while asking about each decision' });
+      assertTargetClean(target);
+      assert.deepEqual(fs.readdirSync(cache), [], 'a cancelled build wrote an answer');
+    } finally {
+      if (saved.claude === undefined) delete process.env.REPO_TOUR_CLAUDE_BIN;
+      else process.env.REPO_TOUR_CLAUDE_BIN = saved.claude;
+      if (saved.codex === undefined) delete process.env.REPO_TOUR_CODEX_BIN;
+      else process.env.REPO_TOUR_CODEX_BIN = saved.codex;
+    }
+  });
+});
+
 suite('every build goes through it (T-30 AC10)', () => {
   test('buildContextFor is the one producer of the build\'s core, and it builds it off-thread', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'extension.ts'), 'utf8');

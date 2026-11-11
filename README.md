@@ -85,8 +85,9 @@ rest of the window keeps working however large the repository is. *Cancel* ends 
 and leaves the folder you chose empty, so you can press *Build the plan* again; a `git` command
 or a read already running finishes on its own, unwatched. Nothing is written into the reference
 repository. Once the build is asking the model about each decision,
-*Cancel* takes effect only when that phase ends, so the model calls in that phase are still made
-and paid for.
+*Cancel* ends the call in flight and starts no more. The answers that came back before it are
+kept, so the next build does not pay for them again. One exception for now: with the Codex CLI
+installed through npm, *Cancel* stops only its launcher, and the call in flight runs to its end.
 
 ---
 

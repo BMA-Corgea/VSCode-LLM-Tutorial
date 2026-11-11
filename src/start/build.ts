@@ -107,7 +107,10 @@ export class ModelCallStopped extends Error {
  * providers end their model's child when the call's signal fires. So:
  *
  *   - a call that would START after Cancel is refused before it reaches the provider: no spend;
- *   - the call IN FLIGHT gets a signal that fires within `pollMs` of Cancel: its child is ended.
+ *   - the call IN FLIGHT gets a signal that fires within `pollMs` of Cancel, and its provider ends
+ *     the child it started. With the Codex CLI installed through npm, that child is a launcher: it
+ *     dies, and the call it started runs to its end, until repo-tour's providers end the whole
+ *     process group rather than the one child (README, "Start a tutorial").
  *
  * Without a Cancel it is `runLlm` exactly: the same provider, model, cwd and timeout, and the reply
  * as the provider gave it.
@@ -631,9 +634,9 @@ export interface BuildContext {
   onProgress?: (msg: string) => void;
   /** Fires once per phase transition, right after the marker is durably written — a test hook. */
   onPhase?: (phase: BuildPhase) => void;
-  /** Polled between phases, and while `digest` and `buildPlan` run on a worker (T-30); returning
-   *  true stops the build (cancelled from the progress notification). `interpretPlan` is not
-   *  stopped by it, only followed by it: see T-70. */
+  /** Polled between phases, while `digest` and `buildPlan` run on a worker (T-30), and before and
+   *  during each of `interpretPlan`'s model calls, by the runner `runnerFor` makes (T-70); returning
+   *  true stops the build (cancelled from the progress notification). */
   isCancelled?: () => boolean;
   /** Swappable filesystem writes — a test makes `renameSync` fail exactly where a crash
    *  would hurt most and asserts what is left on disk. Defaults to `realFsWriteOps`. */
