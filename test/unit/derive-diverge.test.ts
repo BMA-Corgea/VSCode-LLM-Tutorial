@@ -372,4 +372,67 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.ok(!out.ok);
     assert.match(out.reason, /no step provides/);
   });
+
+  // T-22's live run (AC12): asked to write "Scan the ranges one by one" with the plan's reason for
+  // the author's binary search beside it, the real model wrote the binary search.
+  test('the road the learner chose is not argued for with the reason for the author\'s road (AC1, the live run)', async () => {
+    const { plan, root, gs, target } = setup();
+    const AUTHORS_REASON = 'The author wanted a tokenizer of its own, so it could be tested alone.';
+    stepNamed(plan, 's-parse')!.decision.why = AUTHORS_REASON;
+    const m = model();
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(m.run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const code = m.asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/parse.ts');
+    assert.ok(code, 'discriminates: the decision\'s own code was asked for');
+    const node = code.input['node'] as { chosen: { label: string }; why: string };
+    assert.equal(node.chosen.label, 'Another road', 'the code is asked for on the learner\'s road');
+    assert.ok(!node.why.includes(AUTHORS_REASON), `and not with the reason for the author's road beside it: ${JSON.stringify(node.why)}`);
+    const replan = m.asked.find((a) => a.task === 'replan');
+    assert.ok(replan, 'discriminates: the steps that follow were re-planned');
+    const decision = replan.input['decision'] as { chosen: string; why: string };
+    assert.equal(decision.chosen, 'alt-1');
+    assert.ok(!decision.why.includes(AUTHORS_REASON), `nor is the re-plan told that reason for the learner's road: ${JSON.stringify(decision.why)}`);
+    const replacing = replan.input['replacing'] as Array<{ path: string; why: string }>;
+    assert.equal(replacing.find((r) => r.path === 'src/api/routes.ts')?.why, 'because', 'a step on the road its reason was written for keeps that reason');
+  });
+
+  test('the files written after the press are told the road the decision takes now, not the one it had', async () => {
+    const { plan, root, gs, target } = setup();
+    const m = model();
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(m.run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const routes = m.asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/api/routes.ts');
+    assert.ok(routes, 'discriminates: the file that follows was written');
+    const parse = (routes.input['dependencies'] as Array<{ path: string; chosen: { label: string } }>).find((dep) => dep.path === 'src/parse.ts');
+    assert.equal(parse?.chosen.label, 'Another road', `the decision it stands on is on the learner's road; it was shown ${JSON.stringify(parse)}`);
+
+    const again = setup();
+    const atShape = model();
+    const shaped = await divergePlan(input(again.plan, again.root, 's-api'), depsFor(atShape.run, again.gs, again.target));
+    if (!shaped.ok || !shaped.changed) assert.fail(shaped.ok ? 'nothing changed' : shaped.reason);
+    const inChapter = atShape.asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path.startsWith('src/api/'));
+    assert.ok(inChapter, 'discriminates: a file in the chapter was written');
+    assert.equal((inChapter.input['chapter'] as { chosen: { label: string } }).chosen.label, 'Another road', 'and a chapter decided differently is described on its new road');
+  });
+
+  test('a new step that imports a kept file stands on that file\'s step, not on one of its symbol steps', async () => {
+    const { plan, root, gs, target } = setup();
+    plan.steps.push(step('s-app', 11, 'src', 'file', 'src/app.ts', ['s-routes', 's-store']));
+    fs.writeFileSync(path.join(root, 'src/app.ts'), "import { handle } from './api/routes';\nimport { STORE } from './store';\n\nexport const app = (): number => handle('x') + STORE;\n");
+    const out = await divergePlan(input(plan, root, 's-store'), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const fresh = out.plan.steps.find((s) => s.target.file === 'src/app.ts' && s.id !== 's-app');
+    assert.ok(fresh, 'discriminates: the file that imports the decision was re-derived');
+    assert.ok(fresh.dependsOn.includes('s-routes'), `it depends on routes.ts's own step; it names ${JSON.stringify(fresh.dependsOn)}`);
+    assert.ok(!fresh.dependsOn.some((id) => id === 's-handle' || id === 's-status'), `and on none of that file's symbol steps: ${JSON.stringify(fresh.dependsOn)}`);
+    assert.ok(fresh.dependsOn.includes('s-store'), 'and on the decision');
+  });
+
+  test('a refusal of the model\'s answer says it was the model\'s answer: its "step 1" is not the walk\'s', async () => {
+    const { plan, root, gs, target } = setup();
+    const oneRoad = model(undefined, () => ({ steps: [{ kind: 'file', chapter: 'c2', path: 'src/api/routes.ts', question: 'q?', options: options().slice(0, 1), recommended: 'author', why: 'w', dependsOn: ['src/parse.ts'] }] }));
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(oneRoad.run, gs, target));
+    assert.ok(!out.ok, 'discriminates: the answer is refused');
+    assert.match(out.reason, /^in the model's answer, step 1 offers 1 option/);
+  });
 });

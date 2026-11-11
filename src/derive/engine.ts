@@ -46,7 +46,7 @@ import { askOnce, newTally, type AskTally, type DeriveAskDeps } from './ask.js';
 import { assemblePlan, lineCountOf, stepIdFor, type DeriveCost, type DerivedPlan, type ExtractLike } from './assemble.js';
 import { ancestorsOf, externalDependencies, insertInOrder, keptBy } from './graph.js';
 import {
-  codePrompt, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, quote, replanPrompt, unsoundCodeText, validatePlan, withChapterEdges,
+  codePrompt, outlinePrompt, parseChapter, parseCodeReply, parseNode, parseOutlineReply, parseReplanReply, quote, replanPrompt, unsoundCodeText, validatePlan, whyForRoad, withChapterEdges,
   type DecisionForPrompt, type DependencyForPrompt, type ReplanReply, type ShownStep,
 } from './prompt.js';
 import { PYTHON_STDLIB_MODULES } from './python-stdlib.js';
@@ -121,15 +121,21 @@ function effectiveOption(node: DerivedNode, answers: Readonly<Record<string, str
   return node.options.find((o) => o.id === answer) ?? node.options.find((o) => o.id === node.recommended)!;
 }
 
+/** A node's `why` is the reason for its recommended option: beside another one it is not sent (`whyForRoad`). */
+function whyOn(node: DerivedNode, chosenId: string): string {
+  return whyForRoad(node.why, chosenId, node.recommended, node.options.find((o) => o.id === node.recommended)?.label);
+}
+
 function decisionOf(node: DerivedNode, answers: Readonly<Record<string, string>>): DecisionForPrompt {
   const chosen = effectiveOption(node, answers);
-  return { path: node.path, question: node.question, chosen: { label: chosen.label, consequence: chosen.consequence }, why: node.why };
+  return { path: node.path, question: node.question, chosen: { label: chosen.label, consequence: chosen.consequence }, why: whyOn(node, chosen.id) };
 }
 
 function shownStepOf(node: DerivedNode, answers: Readonly<Record<string, string>>): ShownStep {
+  const chosen = effectiveOption(node, answers).id;
   return {
     kind: node.kind, chapter: node.chapter, path: node.path, question: node.question, options: node.options,
-    chosen: effectiveOption(node, answers).id, why: node.why, dependsOn: node.dependsOn,
+    chosen, why: whyOn(node, chosen), dependsOn: node.dependsOn,
   };
 }
 

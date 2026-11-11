@@ -33,7 +33,7 @@ import { boilerplateRanges, lineCountOf, loadBearingRanges, stepIdFor, type Deri
 import { costOf, extractAll, REPO_IMPORTS, refusalForFile, thrownSentence, type ImportRules } from './engine.js';
 import { ancestorsOf, downstreamOf, externalDependencies, insertInOrder, keptBy, type GraphNode } from './graph.js';
 import {
-  codePrompt, parseCodeReply, parseReplanReply, replanPrompt,
+  codePrompt, parseCodeReply, parseReplanReply, replanPrompt, whyForRoad,
   type DecisionForPrompt, type DependencyForPrompt, type PathRules, type ReplanReply, type ShownStep,
 } from './prompt.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
@@ -101,6 +101,14 @@ function graphOf(steps: readonly StepLike[]): GraphNode[] {
   });
 }
 
+/**
+ * A judgment of the model's reply, said as one. T-17's parsers number the reply's own steps ("step 1
+ * offers 1 option"), and the page that shows a refusal is a walk with a step 1 of its own.
+ */
+function ofTheAnswer<T>(value: T | DeriveRefusal): T | DeriveRefusal {
+  return isDeriveRefusal(value) ? { refused: `in the model's answer, ${value.refused}` } : value;
+}
+
 function nameOf(plan: PlanLike): string {
   const source = plan.source as { root?: unknown; text?: unknown; url?: unknown };
   const named = [source.root, source.url].find((v): v is string => typeof v === 'string' && v.length > 0);
@@ -160,6 +168,13 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const pathRules: PathRules = { chapterDir, extensions: extensionsFor(language), maxSegments: REPO_MAX_PATH_SEGMENTS };
     const keyOf = (s: StepLike): string => (s.kind === 'shape' ? aliases.get(s.chapter) ?? s.chapter : s.target.file);
     const onRoad = (s: StepLike): string => s.decision.chosen ?? s.decision.authorChoice;
+    // Every question this press asks is about the plan after it: D is on the learner's road there,
+    // whatever this plan still says, and a file written after D is shown D on that road.
+    const roadOf = (s: StepLike): string => (s.id === d.id ? answer : onRoad(s));
+    // A step's `why` is the reason for its author's road: beside another road it is not sent (`whyForRoad`).
+    const whyOn = (s: StepLike, chosen: string): string => whyForRoad(
+      s.decision.why, chosen, s.decision.authorChoice, s.decision.options.find((o) => o.id === s.decision.authorChoice)?.label,
+    );
     const shown = (s: StepLike, chosen: string): ShownStep => ({
       kind: s.kind === 'shape' ? 'shape' : 'file',
       chapter: aliases.get(s.chapter) ?? s.chapter,
@@ -167,12 +182,12 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       question: s.decision.question,
       options: s.decision.options.map((o) => ({ id: o.id, label: o.label, consequence: o.consequence })),
       chosen,
-      why: s.decision.why,
+      why: whyOn(s, chosen),
       dependsOn: s.dependsOn.flatMap((id) => { const dep = byId.get(id); return dep === undefined ? [] : [keyOf(dep)]; }),
     });
     const decisionOf = (s: StepLike, chosen: string): DecisionForPrompt => {
       const option = s.decision.options.find((o) => o.id === chosen) ?? s.decision.options[0];
-      return { path: keyOf(s), question: s.decision.question, chosen: { label: option?.label ?? '', consequence: option?.consequence ?? '' }, why: s.decision.why };
+      return { path: keyOf(s), question: s.decision.question, chosen: { label: option?.label ?? '', consequence: option?.consequence ?? '' }, why: whyOn(s, option?.id ?? chosen) };
     };
 
     const contentOf = (file: string): string => {
@@ -214,13 +229,13 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
         entry: '',
         chapters: plan.chapters.map((c) => ({ key: aliases.get(c.key) ?? c.key, title: c.title, subtitle: c.subtitle })),
         decision: { ...shown(decisionStep, answer), recommended: d.decision.authorChoice },
-        shown: steps.filter((s) => showIds.has(s.id) && s.kind !== 'symbol').map((s) => shown(s, onRoad(s))),
-        replacing: asked.map((s) => shown(s, onRoad(s))),
+        shown: steps.filter((s) => showIds.has(s.id) && s.kind !== 'symbol').map((s) => shown(s, roadOf(s))),
+        replacing: asked.map((s) => shown(s, roadOf(s))),
       });
       const owedKeys = [keyOf(owner), ...externals.flatMap((id) => { const e = byId.get(id); return e === undefined ? [] : [keyOf(e)]; })];
       const reply = await askOnce(deps, `derive:diverge:${d.id}`, prompt, (t) => {
         const parsed = parseReplanReply(t, language, pathRules);
-        return isDeriveRefusal(parsed) ? parsed : mergeReply(parsed, { steps, replaced, aliases, keyOf, owedKeys, ownFile });
+        return ofTheAnswer(isDeriveRefusal(parsed) ? parsed : mergeReply(parsed, { steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId: d.id }));
       }, tally);
       if (isDeriveRefusal(reply)) return fail(reply.refused);
       merged = reply;
@@ -235,7 +250,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     ]);
     const shapeDecision = (chapter: string): DecisionForPrompt => {
       const shape = steps.find((s) => s.kind === 'shape' && s.chapter === chapter);
-      if (shape !== undefined) return decisionOf(shape, onRoad(shape));
+      if (shape !== undefined) return decisionOf(shape, roadOf(shape));
       return { path: chapter, question: `Where does ${chapter} belong?`, chosen: { label: 'its own folder', consequence: '' }, why: '' };
     };
     const judged = async (file: string, content: string, allowed: ReadonlySet<string>): Promise<DeriveRefusal | null> => {
@@ -247,8 +262,9 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const writeFile = async (file: string, ticket: string, chapter: DecisionForPrompt, node: DecisionForPrompt, dependencies: DependencyForPrompt[], allowed: ReadonlySet<string>): Promise<DeriveRefusal | null> => {
       const code = await askOnce(deps, ticket, codePrompt({ idea: `The application in the repository "${nameOf(plan)}".`, title: nameOf(plan), language: asCodeLanguage(languageOf(file)) ?? language, chapter, node: { ...node, isEntry: false }, dependencies }), async (t) => {
         const reply = parseCodeReply(t, file);
-        if (isDeriveRefusal(reply)) return reply;
-        return (await judged(file, reply.content, allowed)) ?? reply;
+        if (isDeriveRefusal(reply)) return ofTheAnswer(reply);
+        const refused = await judged(file, reply.content, allowed);
+        return refused === null ? reply : ofTheAnswer(refused);
       }, tally);
       if (isDeriveRefusal(code)) return code;
       written.set(file, code.content);
@@ -258,7 +274,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     if (ownFile !== null) {
       deps.onProgress?.(`writing ${ownFile}…`);
       const fileDeps = owner.dependsOn.flatMap((id) => { const dep = byId.get(id); return dep?.kind === 'file' ? [dep] : []; });
-      const dependencies: DependencyForPrompt[] = fileDeps.map((dep) => ({ ...decisionOf(dep, onRoad(dep)), content: contentOf(dep.target.file) }));
+      const dependencies: DependencyForPrompt[] = fileDeps.map((dep) => ({ ...decisionOf(dep, roadOf(dep)), content: contentOf(dep.target.file) }));
       const refused = await writeFile(ownFile, `derive:code:${d.id}`, shapeDecision(d.chapter), { ...decisionOf(d, answer), path: ownFile }, dependencies, new Set(fileDeps.map((dep) => dep.target.file)));
       if (refused !== null) return fail(refused.refused);
     }
@@ -271,7 +287,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
         const earlier = freshById.get(id);
         if (dep?.kind === 'file' || dep?.kind === 'symbol') {
           allowed.add(dep.target.file);
-          dependencies.push({ ...decisionOf(dep, onRoad(dep)), content: written.get(dep.target.file) ?? contentOf(dep.target.file) });
+          dependencies.push({ ...decisionOf(dep, roadOf(dep)), content: written.get(dep.target.file) ?? contentOf(dep.target.file) });
         } else if (earlier !== undefined && earlier.node.kind === 'file') {
           allowed.add(earlier.node.path);
           dependencies.push({ path: earlier.node.path, question: earlier.node.question, chosen: { label: earlier.node.options[0]?.label ?? '', consequence: '' }, why: earlier.node.why, content: written.get(earlier.node.path) ?? '' });
@@ -387,6 +403,8 @@ interface MergeContext {
   keyOf: (s: StepLike) => string;
   owedKeys: readonly string[];
   ownFile: string | null;
+  /** the step the road changed at, which owns `ownFile` once this lands */
+  decisionId: string;
 }
 
 /**
@@ -394,7 +412,7 @@ interface MergeContext {
  * (`askOnce`'s `parse`), so a reply this refuses is never cached.
  */
 function mergeReply(reply: ReplanReply, ctx: MergeContext): Merged | DeriveRefusal {
-  const { steps, replaced, aliases, keyOf, owedKeys, ownFile } = ctx;
+  const { steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId } = ctx;
   const known = new Set([...aliases.values(), ...aliases.keys()]);
   const newKeys = new Set<string>();
   for (const c of reply.chapters) {
@@ -403,8 +421,14 @@ function mergeReply(reply: ReplanReply, ctx: MergeContext): Merged | DeriveRefus
   }
   const kept = steps.filter((s) => !replaced.has(s.id));
   const keptKeys = new Map(kept.filter((s) => s.kind !== 'symbol').map((s) => [keyOf(s).toLowerCase(), s.id] as const));
-  const allKeys = new Map(kept.map((s) => [keyOf(s), s.id] as const));
-  if (ownFile !== null) keptKeys.set(ownFile.toLowerCase(), 'decision');
+  // What a new step names is a file or a chapter, and what stands for it is that file's own step: a
+  // symbol step shares its file's key, and Mode B's edges run file to file (T-22's live run found a
+  // new lookup.js standing on one of lookup-data.js's variables). The re-derived file is D's now.
+  const allKeys = new Map(kept.filter((s) => s.kind !== 'symbol').map((s) => [keyOf(s), s.id] as const));
+  if (ownFile !== null) {
+    keptKeys.set(ownFile.toLowerCase(), 'decision');
+    allKeys.set(ownFile, decisionId);
+  }
 
   const fresh: FreshNode[] = [];
   const freshKeys = new Map<string, string>();
