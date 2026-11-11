@@ -798,17 +798,23 @@ export function atEndMessage(end: 'first' | 'last', presses: number): string {
  * Code greys out that end's title-bar arrow and leaves its command out of the palette.
  */
 function setEndsContext(view: WalkView | undefined): void {
+  // Every move reaches here (a command, the panel's own buttons, a click in the tree), so this is where a
+  // move resets the end-of-plan count; a refresh of the same step does not.
+  if (!view || atEndPresses.step !== view.step.id) atEndPresses = { step: '', end: '', count: 0 };
   const ends = view ? planEnds(view.plan, view.progress) : { atFirst: false, atLast: false };
   void vscode.commands.executeCommand('setContext', 'buildTutorials.atFirstStep', ends.atFirst);
   void vscode.commands.executeCommand('setContext', 'buildTutorials.atLastStep', ends.atLast);
 }
 
-/** Presses at one end of one step, counted so the repeat says something new (`atEndMessage`); any move resets it. */
-let atEndPresses = { key: '', count: 0 };
+/** Presses at one end of one step, counted so the repeat says something new (`atEndMessage`). Any move
+ *  resets it, by whatever path it came (`setEndsContext`, which every view push reaches). */
+let atEndPresses: { step: string; end: string; count: number } = { step: '', end: '', count: 0 };
 
 function sayAtEnd(end: 'first' | 'last'): void {
-  const key = `${end}:${walkSession?.getView()?.step.id ?? ''}`;
-  atEndPresses = atEndPresses.key === key ? { key, count: atEndPresses.count + 1 } : { key, count: 1 };
+  const step = walkSession?.getView()?.step.id ?? '';
+  atEndPresses = atEndPresses.step === step && atEndPresses.end === end
+    ? { step, end, count: atEndPresses.count + 1 }
+    : { step, end, count: 1 };
   void vscode.window.showInformationMessage(atEndMessage(end, atEndPresses.count));
 }
 
@@ -830,13 +836,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     // T-51: at the end a step command cannot move past, it says so rather than doing nothing.
     vscode.commands.registerCommand('buildTutorials.nextStep', () => {
       if (!walkSession?.getView()) { sayNoWalkOpen(); return; }
-      if (walkSession.next()) atEndPresses = { key: '', count: 0 };
-      else sayAtEnd('last');
+      if (!walkSession.next()) sayAtEnd('last');
     }),
     vscode.commands.registerCommand('buildTutorials.prevStep', () => {
       if (!walkSession?.getView()) { sayNoWalkOpen(); return; }
-      if (walkSession.prev()) atEndPresses = { key: '', count: 0 };
-      else sayAtEnd('first');
+      if (!walkSession.prev()) sayAtEnd('first');
     }),
     // The tree hands this the step's own id. `unknown`, and checked: the command is also
     // reachable by hand (it is hidden from the palette, not from `executeCommand`), and

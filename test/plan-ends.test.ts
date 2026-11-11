@@ -93,4 +93,20 @@ suite('T-51: Previous step and Next step at the ends of the plan', function () {
     }
     assert.deepEqual(said, [atEndMessage('last', 1), atEndMessage('last', 1)]);
   }));
+
+  test('a move made another way (the panel\'s buttons, the tree) resets the count too', () => atStep(LAST, async (api) => {
+    const session = api._walk.session()!;
+    const { said, restore } = recordingNotices();
+    try {
+      await vscode.commands.executeCommand('buildTutorials.nextStep');
+      session.goTo('st-3-symbol-handle'); // what a press of the panel's Previous or a click in the tree does
+      await session.settled();
+      session.goTo(LAST);
+      await session.settled();
+      await vscode.commands.executeCommand('buildTutorials.nextStep');
+    } finally {
+      restore();
+    }
+    assert.deepEqual(said, [atEndMessage('last', 1), atEndMessage('last', 1)], 'back at the end after a move, the first press is the first again');
+  }));
 });
