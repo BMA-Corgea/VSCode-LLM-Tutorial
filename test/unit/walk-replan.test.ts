@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { DeriveCost } from '../../src/derive/assemble.js';
 import type { DivergeInput, DivergeOutcome } from '../../src/derive/diverge.js';
+import type { LlmReply } from '../../src/tutor/core.js';
 import { setCurrent, setDial, markDone, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import {
   CHOICE_ALREADY_REPLANNING, CHOICE_ALREADY_TAKEN, REPLAN_CANCELLED_BILLED, REPLAN_CANCELLED_UNSENT, REPLAN_NOTHING_FOLLOWS,
@@ -95,6 +96,10 @@ interface Options {
   /** the plan that is on disk, when not the fixture */
   plan?: PlanLike;
   savePlan?: Replanner['savePlan'];
+  /** how the replanner loads: at once by default; a test holds it to cancel while it loads */
+  replannerLoad?: (replanner: Replanner) => Promise<Replanner | undefined>;
+  /** the dial core's load: at once and absent by default; a test holds it to keep the chain busy */
+  core?: () => Promise<undefined>;
 }
 
 /** Every file under `root` with its contents, except what is under `skip`. */
@@ -150,12 +155,14 @@ function harness(options: Options = {}): Harness {
     saveProgress,
     loadRequest: (t, p) => loadRequest(t, { plan: p, store }),
     reportError: (m) => { errors.push(m); },
-    core: () => { coreCalls += 1; return Promise.resolve(undefined); },
+    core: () => { coreCalls += 1; return options.core?.() ?? Promise.resolve(undefined); },
     readText: () => undefined,
     confirmOverwrite: () => Promise.resolve(false),
     git: () => Promise.reject(new Error('no git here')),
     commitPerStep: () => false,
-    ...(options.noReplanner === true ? {} : { replanner: () => Promise.resolve(options.replannerMissing === true ? undefined : replanner) }),
+    ...(options.noReplanner === true ? {} : {
+      replanner: () => options.replannerLoad?.(replanner) ?? Promise.resolve(options.replannerMissing === true ? undefined : replanner),
+    }),
   };
   const session = WalkSession.open(target, adapters);
   coreCalls = 0;
@@ -175,6 +182,11 @@ async function reachedEngine(h: Harness, count = 1): Promise<Pending> {
   const job = h.pending[count - 1];
   assert.ok(job, 'the press reached the engine');
   return job;
+}
+
+/** Lets every promise already in motion take its next steps. */
+async function turns(count = 10): Promise<void> {
+  for (let i = 0; i < count; i += 1) await new Promise((r) => { setImmediate(r); });
 }
 
 /** Finishes the press in flight with this outcome and waits for the walk to be done reacting. */
@@ -469,14 +481,23 @@ suite('cancel — it stops, and says what that cost (T-22, AC6, AC11)', () => {
     const h = harness();
     h.session.choose(D, ANSWER);
     const job = await reachedEngine(h);
-    const never = (): Promise<never> => new Promise(() => undefined);
-    const core = { availability: () => Promise.resolve({ ok: true as const }), resolveTutorChoice: (_: unknown, build: unknown) => build, resolveChoice: (c: unknown) => c, runLlm: never };
+    // A question still with the model, which ends when this test does. One that never ends holds
+    // its deadline open (a deadline is never `unref`ed: `src/tutor/ask.ts`), and the test process
+    // with it, for the whole minute.
+    let end: (() => void) | undefined;
+    const running = (): Promise<LlmReply> => new Promise((resolve) => {
+      end = () => { resolve({ text: 'too late', inputTokens: 0, outputTokens: 0, usd: 0, metered: false }); };
+    });
+    const core = { availability: () => Promise.resolve({ ok: true as const }), resolveTutorChoice: (_: unknown, build: unknown) => build, resolveChoice: (c: unknown) => c, runLlm: running };
     const ticket = job.hooks.ledger.open('derive:diverge:x');
-    ticket.sendPrompt({ core, provider: 'p', model: 'm', timeoutMs: 60_000, run: never } as never, 'a question');
+    ticket.sendPrompt({ core, provider: 'p', model: 'm', timeoutMs: 60_000, run: running } as never, 'a question');
     assert.equal(ticket.phase, 'sending');
     h.session.cancelReplan();
     assert.equal(h.view().choiceNote, REPLAN_CANCELLED_BILLED);
     assert.equal(ticket.abandoned, true);
+    await turns();
+    assert.ok(end, 'discriminates: the question really went to the model');
+    end();
     await finish(h, job, FAILED);
   });
 
@@ -510,6 +531,69 @@ suite('cancel — it stops, and says what that cost (T-22, AC6, AC11)', () => {
     h.session.choose(D, ANSWER);
     await finish(h, await reachedEngine(h, 2), landed(h.plan, h.tree));
     assert.deepEqual(loadPlan(h.target), replanned(h.plan));
+  });
+});
+
+// The two gaps a cancel can fall into, each guarded by one line of `session.ts` (the sweep's
+// `load-guard-removed` and `land-guard-removed`): before the engine is reached, and after it has
+// finished but before its landing has had its turn on the chain.
+suite('cancel — in the gaps before the engine and before the landing (T-22, AC11)', () => {
+  test('a cancel while the replanner is still loading: the engine is never asked, and nothing moves', async () => {
+    const loads: Array<() => void> = [];
+    const h = harness({ replannerLoad: (replanner) => new Promise((resolve) => { loads.push(() => { resolve(replanner); }); }) });
+    const before = h.bytes();
+    h.session.choose(D, ANSWER);
+    assert.equal(loads.length, 1, 'discriminates: the press is waiting on the replanner');
+    h.session.cancelReplan();
+    assert.equal(h.view().choiceNote, REPLAN_CANCELLED_UNSENT);
+    loads[0]!();
+    await turns();
+    await h.session.settled();
+    assert.equal(h.pending.length, 0, 'a press cancelled before the engine was reached never reaches it: the engine reads the whole repository before its first question');
+    assert.equal(h.view().choiceNote, REPLAN_CANCELLED_UNSENT, 'and the page still says it was cancelled');
+    assert.deepEqual(h.bytes(), before);
+  });
+
+  test('a cancel while the replanner is still loading, then a second press: only the second reaches the engine, and it lands', async () => {
+    const loads: Array<() => void> = [];
+    const h = harness({ replannerLoad: (replanner) => new Promise((resolve) => { loads.push(() => { resolve(replanner); }); }) });
+    h.session.choose(D, ANSWER);
+    h.session.cancelReplan();
+    h.session.choose(D, ANSWER);
+    assert.equal(loads.length, 2, 'discriminates: both presses are waiting on the replanner');
+    loads[0]!();
+    loads[1]!();
+    const job = await reachedEngine(h);
+    await turns();
+    assert.equal(h.pending.length, 1, 'the cancelled press is not one of them');
+    assert.equal(job.hooks.isCancelled(), false, 'the press the engine hears about is the live one');
+    await finish(h, job, landed(h.plan, h.tree));
+    assert.deepEqual(loadPlan(h.target), replanned(h.plan));
+  });
+
+  test('a cancel after the engine has finished, while its landing waits its turn: it does not land, and nothing moves', async () => {
+    let holding = false;
+    const releases: Array<() => void> = [];
+    const h = harness({ core: () => (holding ? new Promise((resolve) => { releases.push(() => { resolve(undefined); }); }) : Promise.resolve(undefined)) });
+    await h.session.settled();
+    const before = h.bytes();
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    // Something else holds the chain: a check, waiting on the core (an Overwrite prompt does the same).
+    holding = true;
+    h.session.runCheck();
+    await turns();
+    assert.equal(releases.length, 1, 'discriminates: the check holds the chain');
+    job.finish(landed(h.plan, h.tree));
+    await turns();
+    assert.ok(h.view().replanning, 'discriminates: the engine has finished and the press has not landed yet');
+    h.session.cancelReplan();
+    assert.equal(h.view().choiceNote, REPLAN_CANCELLED_UNSENT);
+    releases[0]!();
+    await h.session.settled();
+    assert.deepEqual(h.bytes(), before, 'a press cancelled before it landed does not land: not the plan, not a version, not the choice');
+    assert.deepEqual(h.view().plan.steps.map((s) => s.id), h.plan.steps.map((s) => s.id), 'and the walk shows the plan it had');
+    assert.equal(h.view().choiceNote, REPLAN_CANCELLED_UNSENT, 'and the page still says it was cancelled');
   });
 });
 
