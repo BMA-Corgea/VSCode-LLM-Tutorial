@@ -172,7 +172,7 @@
 
 import type { GitRunner } from '../start/build.js';
 import type { Dial } from '../start/request.js';
-import { referenceRootFor, repositoryRootOf } from './reference.js';
+import { DERIVED_CODE_MISSING_MESSAGE, derivedCodeMissing, referenceRootFor, repositoryRootOf, rootsForEngine } from './reference.js';
 import type { DeriveCost } from '../derive/assemble.js';
 import type { DivergeInput, DivergeOutcome } from '../derive/diverge.js';
 import type { ResolvedRequest } from './store.js';
@@ -353,6 +353,8 @@ export interface WalkView {
   choiceNote?: string;
   /** T-22: present while a press of *Choose this instead* is being re-planned. */
   replanning?: ReplanView;
+  /** T-22 (code review SF5): this step's code was re-derived and cannot be found; nothing is read in its place. */
+  derivedCodeMissing?: true;
   /**
    * T-5 (AC6): `plan.reproduce`'s never-taught files — generated, vendored, lockfiles, data,
    * binaries. Absent when the plan lists none, so the panel has nothing to offer rather than
@@ -963,7 +965,7 @@ export class WalkSession {
       return;
     }
     const outcome = await replanner.diverge(
-      { plan, referenceRoot: repositoryRootOf(request), derivedRoot: request.derivedRoot ?? null, stepId: job.stepId, answer: job.optionId, walked },
+      { plan, ...rootsForEngine(request), stepId: job.stepId, answer: job.optionId, walked },
       {
         ledger: this.ledger,
         isCancelled: () => job.cancelled,
@@ -1068,7 +1070,17 @@ export class WalkSession {
 
   /** Where this step's file is read from (`./reference.ts`), or `undefined` with no reference at all. */
   private referenceRootOf(step: StepLike): string | undefined {
-    return this.request === null ? undefined : referenceRootFor(this.request, step.target.file);
+    return this.request === null ? undefined : referenceRootFor(this.request, step);
+  }
+
+  /** A re-derived step whose code cannot be found (code review SF5): said, and nothing read in its place. */
+  private codeMissing(step: StepLike): boolean {
+    return this.request !== null && derivedCodeMissing(this.request, step);
+  }
+
+  /** The repository's own folder, which names the project to the tutor and the detour on every step (code review N2). */
+  private projectRoot(): string | undefined {
+    return this.request === null ? undefined : repositoryRootOf(this.request);
   }
 
   /** Records and pushes a refusal, counting it when it repeats the last one (see `choiceRefusalText`). Writes nothing to disk. */
@@ -1344,7 +1356,7 @@ export class WalkSession {
       // it the way `tutorContext` does for `AskContext.repo`, so the tutor and the detour name
       // the learner's project identically — and the raw `repo` field, which can be a URL with
       // a token in it, never leaves this machine.
-      await detour.start(step, this.plan, this.referenceRootOf(step));
+      await detour.start(step, this.plan, this.projectRoot());
       if (this.disposed) return;
       this.refresh(false);
     });
@@ -1376,7 +1388,7 @@ export class WalkSession {
         this.refresh(false);
         return;
       }
-      await detour.start(step, this.plan, this.referenceRootOf(step), { fresh: true });
+      await detour.start(step, this.plan, this.projectRoot(), { fresh: true });
       if (this.disposed) return;
       this.refresh(false);
     });
@@ -1618,7 +1630,9 @@ export class WalkSession {
     // answer `applyCheck` gives for the same folder, in the same words.
     const refRoot = this.referenceRootOf(step);
     if (refRoot === undefined) {
-      refuse('This tutorial has no reference repository recorded, so there is nothing for the tutor to read. Nothing was asked, and your question is still in the box.');
+      refuse(this.codeMissing(step)
+        ? `${DERIVED_CODE_MISSING_MESSAGE} Nothing was asked, and your question is still in the box.`
+        : 'This tutorial has no reference repository recorded, so there is nothing for the tutor to read. Nothing was asked, and your question is still in the box.');
       return;
     }
 
@@ -1647,7 +1661,7 @@ export class WalkSession {
     // leaving a stale complaint beside a working input.
     this.unreachable = undefined;
 
-    const ctx = await tutorContext(step, refRoot, this.target, this.adapters.git);
+    const ctx = await tutorContext(step, refRoot, this.target, this.adapters.git, this.projectRoot());
     if (stopped()) return;
 
     // Security review finding 12, and it goes here because THIS is the moment the exposure is
@@ -2023,7 +2037,15 @@ export class WalkSession {
     if (request === null) return;
     // `referenceRoot`, never `repo`: for a GitHub-URL build those differ, and `repo` is only
     // what the learner typed. `loadRequest` has already resolved and stat'd this one.
-    const refRoot = referenceRootFor(request, step.target.file);
+    const refRoot = referenceRootFor(request, step);
+    // A re-derived step whose code is gone writes nothing and outlines nothing: the author's file is not
+    // its code (code review SF5). A chapter step has no file, and a symbol step's file is its file step's.
+    if (refRoot === undefined) {
+      if (step.kind !== 'file') return;
+      this.setNote(stepId, DERIVED_CODE_MISSING_MESSAGE);
+      this.refresh(false);
+      return;
+    }
 
     const dial = stepDial(this.progress, stepId, request.dial);
 
@@ -2224,7 +2246,7 @@ export class WalkSession {
 
     const refRoot = this.referenceRootOf(step);
     if (refRoot === undefined) {
-      this.noteFor(stepId, 'This tutorial has no reference repository recorded, so there is nothing to check against.');
+      this.noteFor(stepId, this.codeMissing(step) ? DERIVED_CODE_MISSING_MESSAGE : 'This tutorial has no reference repository recorded, so there is nothing to check against.');
       return;
     }
 
@@ -2692,6 +2714,7 @@ export class WalkSession {
         ? { choiceNote: choiceRefusalText(this.choiceRefusal.reason, this.choiceRefusal.inARow) }
         : {}),
       ...(this.replan ? { replanning: { stepId: this.replan.stepId, message: this.replan.message } } : {}),
+      ...(this.codeMissing(step) ? { derivedCodeMissing: true as const } : {}),
       ...(reproducible > 0
         ? { reproduce: { count: reproducible, done: this.progress.reproduced !== undefined } }
         : {}),

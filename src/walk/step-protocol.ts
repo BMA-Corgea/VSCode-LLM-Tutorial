@@ -90,6 +90,8 @@ export function askTooLongMessage(length: number): string {
 export interface StepViewState {
   /** T-22: present while a press of *Choose this instead* is being re-planned (`WalkView.replanning`). */
   replanning?: { stepId: string; message: string };
+  /** T-22: this re-derived step's code cannot be found (`WalkView.derivedCodeMissing`). */
+  derivedCodeMissing?: true;
   plan: PlanLike;
   progress: Progress;
   /** the CURRENT step, already resolved — `renderStepHtml` never has to re-derive it. */

@@ -12,7 +12,11 @@ import os from 'node:os';
 import path from 'node:path';
 import type { DeriveCost } from '../../src/derive/assemble.js';
 import type { DivergeInput, DivergeOutcome } from '../../src/derive/diverge.js';
-import type { LlmReply } from '../../src/tutor/core.js';
+import { loadCore, resolveCoreRoot } from '../../src/core.js';
+import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
+import type { Dial } from '../../src/start/request.js';
+import { tutorCoreFor, type LlmReply, type TutorCore } from '../../src/tutor/core.js';
+import { DERIVED_CODE_MISSING_MESSAGE } from '../../src/walk/reference.js';
 import { setCurrent, setDial, markDone, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import {
   CHOICE_ALREADY_REPLANNING, CHOICE_ALREADY_TAKEN, REPLAN_CANCELLED_BILLED, REPLAN_CANCELLED_UNSENT, REPLAN_NOTHING_FOLLOWS,
@@ -99,7 +103,16 @@ interface Options {
   /** how the replanner loads: at once by default; a test holds it to cancel while it loads */
   replannerLoad?: (replanner: Replanner) => Promise<Replanner | undefined>;
   /** the dial core's load: at once and absent by default; a test holds it to keep the chain busy */
-  core?: () => Promise<undefined>;
+  core?: () => Promise<DialCore | undefined>;
+  /** the global dial in request.json: automated by default */
+  dial?: Dial;
+  /** where the tree is in the store: `TREE` by default */
+  treeName?: string;
+  /** a test that navigates on purpose lets the editor move; by default a move is a failure */
+  navigates?: boolean;
+  git?: WalkAdapters['git'];
+  tutorCore?: WalkAdapters['tutorCore'];
+  tutorSettings?: WalkAdapters['tutorSettings'];
   /** files in the reference repository, written before the walk opens; it is empty by default */
   reference?: Record<string, string>;
 }
@@ -124,7 +137,7 @@ function harness(options: Options = {}): Harness {
   const target = tempDir('rp-target-');
   const repo = tempDir('rp-repo-');
   const store = tempDir('rp-store-');
-  const tree = path.join(store, TREE);
+  const tree = path.join(store, options.treeName ?? TREE);
   fs.mkdirSync(tree, { recursive: true });
   for (const [rel, text] of Object.entries(options.reference ?? {})) {
     fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
@@ -136,7 +149,7 @@ function harness(options: Options = {}): Harness {
   fs.writeFileSync(path.join(dir, 'plan.json'), `${JSON.stringify(plan, null, 3)}\n`);
   saveProgress(target, options.progress?.(plan) ?? fixtureProgress(plan));
   if (options.noRequest !== true) {
-    fs.writeFileSync(path.join(dir, 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial: 'automated', referenceRoot: repo }));
+    fs.writeFileSync(path.join(dir, 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial: options.dial ?? 'automated', referenceRoot: repo }));
   }
   const pending: Pending[] = [];
   const errors: string[] = [];
@@ -152,7 +165,7 @@ function harness(options: Options = {}): Harness {
     setTree: (v) => { views.push(v); },
     setPanel: () => undefined,
     setStatus: () => undefined,
-    revealEditor: () => { assert.fail('a replan never moves the editor'); },
+    revealEditor: () => { if (options.navigates !== true) assert.fail('a replan never moves the editor'); },
     clearEditor: () => undefined,
     openFile: () => undefined,
     fileExists: (p) => fs.existsSync(p),
@@ -164,7 +177,9 @@ function harness(options: Options = {}): Harness {
     core: () => { coreCalls += 1; return options.core?.() ?? Promise.resolve(undefined); },
     readText: () => undefined,
     confirmOverwrite: () => Promise.resolve(false),
-    git: () => Promise.reject(new Error('no git here')),
+    git: options.git ?? (() => Promise.reject(new Error('no git here'))),
+    ...(options.tutorCore === undefined ? {} : { tutorCore: options.tutorCore }),
+    ...(options.tutorSettings === undefined ? {} : { tutorSettings: options.tutorSettings }),
     commitPerStep: () => false,
     ...(options.noReplanner === true ? {} : {
       replanner: () => options.replannerLoad?.(replanner) ?? Promise.resolve(options.replannerMissing === true ? undefined : replanner),
@@ -720,5 +735,100 @@ suite('while one is running (T-22, AC6)', () => {
     job.finish(FAILED);
     await h.session.settled();
     assert.equal(h.view().replanning, undefined);
+  });
+});
+
+// T-22's code review, SF10: AC5 rested on a source scan, and a reader that reached the repository by a
+// destructured read passed the whole suite (its M33-M35). Each reader is pinned here by what it DOES
+// with a landed plan whose D reads differently from the tree and from the repository. MF3 and SF5: a
+// step reads the tree only when it says it is re-derived, and never the author's file in its place.
+suite('the one reader, by what each reader does on a landed plan (T-22, AC5)', () => {
+  let dialCore: DialCore;
+  let realTutor: TutorCore;
+  suiteSetup(async () => {
+    const loaded = await loadCore(resolveCoreRoot('../repo-tour', process.cwd()));
+    assert.ok(loaded.found, loaded.reason ?? 'repo-tour should be found at the sibling checkout');
+    dialCore = dialCoreFor(loaded.loaded);
+    realTutor = tutorCoreFor(loaded.loaded);
+  });
+
+  const lines = (first: string, body: string): string => `${first}\n${body}\n${'// …\n'.repeat(9)}}\n`;
+  const AUTHORS = lines('export function tokenize(line: string): string[] {', "  return line.split(' ');");
+  const MODELS = lines('export function scanByHand(line: string): string[] {', '  return [line];');
+  const NAMED_TREE = 'k/the-derived-tree-0f3a';
+
+  /** A walk that landed a re-plan at D: D's re-derived file in the tree, the author's in the repository. */
+  async function landedWalk(extra: Options = {}): Promise<Harness> {
+    const h = harness({ dial: 'manual', reference: { 'src/parse.ts': AUTHORS }, core: () => Promise.resolve(dialCore), treeName: NAMED_TREE, navigates: true, progress: (p) => setDial(fixtureProgress(p), D, 'manual'), ...extra });
+    fs.mkdirSync(path.join(h.tree, 'src', 'api'), { recursive: true });
+    fs.writeFileSync(path.join(h.tree, 'src', 'parse.ts'), MODELS);
+    fs.writeFileSync(path.join(h.tree, 'src', 'api', 'fresh.ts'), 'export const fresh = 1;\n');
+    h.session.choose(D, ANSWER);
+    await finish(h, await reachedEngine(h), landed(h.plan, h.tree, NAMED_TREE));
+    assert.equal(h.view().step.id, D, 'discriminates: the learner is on D, which the re-plan re-derived');
+    return h;
+  }
+
+  test('the dial: manual mode outlines D from the tree, not from the repository', async () => {
+    const h = await landedWalk();
+    h.session.goTo('st-1-shape-src');
+    h.session.goTo(D);
+    await h.session.settled();
+    assert.deepEqual(h.view().shape?.signatures, ['export function scanByHand(line: string): string[] {'], 'what to write is the re-derived file');
+  });
+
+  test('the check: D is compared with the tree\'s file', async () => {
+    const h = await landedWalk();
+    fs.mkdirSync(path.join(h.target, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(h.target, 'src', 'parse.ts'), MODELS);
+    h.session.runCheck();
+    await h.session.settled();
+    assert.equal(h.view().check?.report.ok, true, 'the learner wrote exactly the re-derived file, and the check compared it with that one');
+  });
+
+  test('the tutor: a question at D diffs the learner\'s file against the tree\'s, and names the project after the repository', async () => {
+    const diffs: string[] = [];
+    const prompts: string[] = [];
+    const git: WalkAdapters['git'] = (args, cwd) => {
+      if (args[0] === 'diff' && cwd !== undefined) diffs.push(path.resolve(cwd, args[args.length - 2]!));
+      return Promise.reject(new Error('no git here'));
+    };
+    const h = await landedWalk({
+      git,
+      tutorCore: () => Promise.resolve({ ...realTutor, availability: () => Promise.resolve({ ok: true, detail: 'a stand-in' }), runLlm: (prompt: string) => { prompts.push(prompt); return Promise.resolve({ text: 'an answer', inputTokens: 1, outputTokens: 1, usd: 0, metered: false }); } }),
+      tutorSettings: () => ({ provider: 'claude', model: 'm', timeoutMs: 5_000 }),
+    });
+    fs.mkdirSync(path.join(h.target, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(h.target, 'src', 'parse.ts'), AUTHORS);
+    h.session.ask('Why is it written this way?');
+    await h.session.settled();
+    assert.deepEqual(diffs, [path.join(h.tree, 'src', 'parse.ts')], 'the reference the tutor reads is the re-derived file');
+    assert.equal(prompts.length, 1, 'discriminates: the question reached the stand-in model');
+    assert.ok(prompts[0]!.includes(path.basename(h.repo)), `the project is named after the repository (code review N2): ${path.basename(h.repo)}`);
+    assert.ok(!prompts[0]!.includes(path.basename(h.tree)), 'not after the tree a re-derived step is read from');
+  });
+
+  test('a reload whose tree is gone: D says its code is missing, and nothing reads the author\'s file in its place (SF5)', async () => {
+    const h = await landedWalk();
+    fs.rmSync(h.tree, { recursive: true, force: true });
+    h.session.dispose();
+    const again = WalkSession.open(h.target, h.adapters);
+    try {
+      again.goTo('st-1-shape-src');
+      again.goTo(D);
+      await again.settled();
+      const v = again.getView();
+      assert.ok(v, 'the walk opened');
+      assert.equal(v.step.id, D);
+      assert.equal(v.derivedCodeMissing, true, 'the page says the re-derived code is missing');
+      assert.equal(v.shape, undefined, 'and manual mode does not outline the author\'s file under the model\'s step');
+      assert.equal(v.writeNote, DERIVED_CODE_MISSING_MESSAGE);
+      again.runCheck();
+      await again.settled();
+      assert.equal(again.getView()?.check, undefined, 'no verdict is reached against the author\'s file');
+      assert.equal(again.getView()?.writeNote, DERIVED_CODE_MISSING_MESSAGE, 'the check says why');
+    } finally {
+      again.dispose();
+    }
   });
 });

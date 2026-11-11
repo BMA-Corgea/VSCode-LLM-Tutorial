@@ -177,6 +177,7 @@ import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
 import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, optionsTable, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
+import { DERIVED_CODE_MISSING_MESSAGE } from './reference.js';
 
 export { MAX_OPTIONS_RENDERED };
 
@@ -812,7 +813,7 @@ main, section, .option { min-width:0; }
  *     label was not a string, in a render nobody was listening to (security, finding 5).
  *     `planText`/`planId` make every read total.
  */
-function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replanning: StepViewState['replanning']): string {
+function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replanning: StepViewState['replanning'], codeMissing: boolean): string {
   const table = optionsTable(step);
   // T-22: a step a re-plan wrote from nothing has no author, so its recommended row cannot be
   // called the author's. The step a re-plan was decided AT keeps its author's row, which is true.
@@ -857,7 +858,9 @@ function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replan
   const running = replanning === undefined
     ? ''
     : `<p class="options-replanning" id="replan-status" role="status">${escapeHtml(planText(replanning.message))} <button type="button" class="btn" id="btn-replan-cancel">${REPLAN_CANCEL_LABEL}</button></p>`;
-  const notes = `${running}${refusedNote}${roadNote}${writtenNote}${staleNote}`;
+  // T-22 (code review SF5): a re-derived step whose code is gone says so where its road is drawn.
+  const missingNote = codeMissing ? `<p class="options-refused options-missing" role="note">${escapeHtml(DERIVED_CODE_MISSING_MESSAGE)}</p>` : '';
+  const notes = `${running}${refusedNote}${missingNote}${roadNote}${writtenNote}${staleNote}`;
   const outcome = notes !== '' ? `<div class="options-outcome" id="outcome-choice">${notes}</div>` : '';
   return `${outcome}<ul class="options">${items}</ul>${omittedNote}`;
 }
@@ -1534,7 +1537,7 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
 
   <section>
     <h2>Options</h2>
-    ${optionsHtml(step, state.choiceNote, state.plan, state.replanning)}
+    ${optionsHtml(step, state.choiceNote, state.plan, state.replanning, state.derivedCodeMissing === true)}
   </section>
 
   <section>
@@ -2108,6 +2111,7 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
     keyOf(decision.chosen), // T-21: a choice must repaint, or the press is silent
     keyOf(state.choiceNote ?? null), // T-21: so must a refusal, and a repeat of one (T-15)
     keyOf(state.step.derivedFrom ?? null), // T-22: the badge and the line follow it
+    state.derivedCodeMissing === true, // T-22: the code it was re-derived to is gone
     state.replanning ? [keyOf(state.replanning.stepId), keyOf(state.replanning.message)] : null, // T-22: every report changes the page
     divergenceAt(state.plan, id) !== undefined, // T-22: "the walk was re-planned here"
     keyOf(staleNoteText(state.plan, divergenceAt(state.plan, id))), // T-22 (M1)

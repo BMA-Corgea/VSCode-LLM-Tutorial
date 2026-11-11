@@ -29,35 +29,51 @@ function write(root: string, rel: string, text = 'x\n'): void {
   fs.writeFileSync(path.join(root, rel), text);
 }
 
-suite('referenceRootFor — the one answer to which root a step reads from (AC5)', () => {
-  test('a file the derived tree holds is read from there, and any other from the repository', () => {
+/** A step as `referenceRootFor` reads it: whether it is re-derived, and its file. */
+const kept = (file: string): { kind: 'file'; target: { file: string } } => ({ kind: 'file', target: { file } });
+const rederived = (file: string, kind: 'file' | 'symbol' | 'shape' = 'file'): { kind: typeof kind; derivedFrom: string; target: { file: string } } => ({ kind, derivedFrom: 'st-d', target: { file } });
+
+suite('referenceRootFor — the one answer, per step: a re-derived step reads the tree, any other the repository (AC5)', () => {
+  test('a re-derived step reads its file from the tree', () => {
     const referenceRoot = tempDir('ref-repo-');
     const derivedRoot = tempDir('ref-derived-');
     write(derivedRoot, 'src/new.ts');
-    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, 'src/new.ts'), derivedRoot);
-    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, 'src/old.ts'), referenceRoot);
+    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, rederived('src/new.ts')), derivedRoot, 'a re-derived step reads the tree');
   });
 
-  test('with no derived tree, everything is the repository', () => {
+  // T-22's code review, MF3: on a symbol press the file's own step stays, walked, and says it is the
+  // author's; read per FILE, it read the model's code under those words.
+  test('a step that is not re-derived reads the repository, even for a file the tree holds', () => {
     const referenceRoot = tempDir('ref-repo-');
-    assert.equal(referenceRootFor({ referenceRoot }, 'src/a.ts'), referenceRoot);
+    const derivedRoot = tempDir('ref-derived-');
+    write(derivedRoot, 'src/new.ts');
+    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, kept('src/new.ts')), referenceRoot);
+    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, kept('src/old.ts')), referenceRoot);
   });
 
-  test('a path that climbs out, or a planted link, never reads from the derived tree', () => {
+  // T-22's code review, SF5: storage cleared, another profile, another machine.
+  test('a re-derived step whose code cannot be found has no root: the author\'s file is never read in its place', () => {
+    const referenceRoot = tempDir('ref-repo-');
+    const derivedRoot = tempDir('ref-derived-');
+    write(referenceRoot, 'src/new.ts');
+    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, rederived('src/new.ts')), undefined, 'the tree does not hold it');
+    assert.equal(referenceRootFor({ referenceRoot }, rederived('src/new.ts')), undefined, 'no tree at all');
+    assert.equal(referenceRootFor({ referenceRoot }, kept('src/a.ts')), referenceRoot, 'discriminates: a kept step still reads the repository');
+  });
+
+  test('a path that climbs out, a planted link or a folder is not a file the tree holds', () => {
     const referenceRoot = tempDir('ref-repo-');
     const derivedRoot = tempDir('ref-derived-');
     const outside = tempDir('ref-outside-');
     write(outside, 'secret.ts');
+    write(derivedRoot, 'src/a.ts');
     fs.symlinkSync(path.join(outside, 'secret.ts'), path.join(derivedRoot, 'link.ts'));
-    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, '../secret.ts'), referenceRoot);
-    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, 'link.ts'), referenceRoot);
+    for (const file of ['../secret.ts', 'link.ts', 'src']) assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, rederived(file)), undefined, file);
   });
 
-  test('a folder in the derived tree is not a file it holds', () => {
+  test('a re-derived chapter step has no file of its own, and is given the repository', () => {
     const referenceRoot = tempDir('ref-repo-');
-    const derivedRoot = tempDir('ref-derived-');
-    write(derivedRoot, 'src/a.ts');
-    assert.equal(referenceRootFor({ referenceRoot, derivedRoot }, 'src'), referenceRoot);
+    assert.equal(referenceRootFor({ referenceRoot, derivedRoot: tempDir('ref-derived-') }, rederived('src/api', 'shape')), referenceRoot);
   });
 });
 
@@ -140,7 +156,8 @@ suite('loadRequest and a plan\'s tree: only a tree in the extension\'s own store
       for (const name of fs.readdirSync(path.join(process.cwd(), dir))) {
         const rel = `${dir}/${name}`;
         if (!name.endsWith('.ts') || allowed.has(rel)) continue;
-        assert.ok(!/\.referenceRoot\b/.test(code(path.join(process.cwd(), rel))), `${rel} reads referenceRoot directly`);
+        // Any mention, not only `.referenceRoot`: a destructured `{ referenceRoot: root }` read it past the dot (code review SF10).
+        assert.ok(!/\breferenceRoot\b/.test(code(path.join(process.cwd(), rel))), `${rel} names referenceRoot outside the one function`);
       }
     }
   });

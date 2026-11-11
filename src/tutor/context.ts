@@ -823,13 +823,15 @@ export async function tutorContext(
   refRoot: string,
   target: string,
   git: GitRunner,
+  /** the repository's own folder, which names the project: a re-derived step's `refRoot` is a tree's (T-22's code review, N2) */
+  projectRoot?: string,
 ): Promise<AskContext> {
   const learnerDiff = await learnerDiffFor(step, refRoot, target, git);
   // Every field, without exception, and that is the point: `question` and `why` are the two
   // the review measured at five megabytes each, `file` is the one nobody had thought about,
   // and a field added tomorrow that skips this list is the finding again.
   return {
-    repo: Outbound.text(path.basename(path.resolve(refRoot)), MAX_PAGE_TEXT),
+    repo: Outbound.text(path.basename(path.resolve(projectRoot ?? refRoot)), MAX_PAGE_TEXT),
     file: Outbound.text(step.target.file, MAX_PAGE_TEXT),
     fileMeaning: fileMeaningOf(step),
     stopTitle: Outbound.text(step.decision.question, MAX_PROMPT_TEXT),
