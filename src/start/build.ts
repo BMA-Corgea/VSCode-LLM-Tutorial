@@ -18,6 +18,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { gitAttributesRefusal, hazardousGitAttributes } from './gitattributes.js';
 import { parseGithubUrl, type BuildRequest } from './request.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
@@ -623,6 +624,11 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
     }
     return { ok: false, reason };
   }
+
+  // T-72: a .gitattributes repo-tour would read without end is refused here, before the digest and
+  // before the marker, so there is nothing to resume (src/start/gitattributes.ts).
+  const hazard = await hazardousGitAttributes(repoRoot);
+  if (hazard) return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard) };
 
   runPhase(target, marker, 'digest', ctx);
   if (ctx.isCancelled?.()) return cancel(target, 'before reading the repository');

@@ -347,6 +347,26 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     assert.deepEqual(unhandled, []);
   });
 
+  test('T-72: a reference whose .gitattributes is a link to /dev/zero is refused at once, on screen, and its digest never runs', async () => {
+    const repo = tmpDir('screen-t72-repo-');
+    fs.mkdirSync(path.join(repo, '.git'));
+    fs.writeFileSync(path.join(repo, 'app.ts'), 'export const a = 1;\n');
+    fs.symlinkSync('/dev/zero', path.join(repo, '.gitattributes'));
+    const request: BuildRequest = { idea: '', recreate: true, repo, target: tmpDir('screen-t72-target-'), dial: 'manual' };
+    const { page, read } = await open((r) => {
+      // SAFETY: if the pre-flight ever missed it, this digest fails the test instead of reading the link
+      // (read for real, it allocates until the extension host dies).
+      void runBuild(context, core, r, (rr, ctx) =>
+        buildFromRequest(rr, { ...ctx, core: { ...ctx.core, digest: () => Promise.reject(new Error('T-72: the digest ran')) } }));
+    });
+    await fill(page, request);
+    await until(read, filled, 'valid form');
+    await press(page);
+    const refused = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the build is refused');
+    assert.match(refused.problems[1] ?? '', /^\.gitattributes is a link, which repo-tour would follow and might read without end: remove it/,
+      'the reason under Reference repo does not say what is wrong and what to do');
+  });
+
   test('AC5: closing the start tab mid-build never swallows the ending, and a reopened start screen shows it building', async () => {
     const held = heldBuild();
     let run: Promise<void> | undefined;
