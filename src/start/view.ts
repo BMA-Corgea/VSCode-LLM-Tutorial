@@ -80,6 +80,14 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
    validation colour; "building" or "done" in the error colour reads as an error. */
 .submit-note { font-size:12px; margin-top:8px; min-height:14px; }
 .submit-note[data-kind="rejected"], .submit-note[data-kind="failed"] { color:var(--kw); }
+/* T-52: under System the form's text fields read like VS Code's own inputs, as the tutor box does (T-43).
+   The placeholder takes the theme's input.placeholderForeground (the browser's own grey measured 2.82:1 on
+   Dark Modern's input background); a focused field draws VS Code's 1 px focusBorder outline, inset so the
+   field does not grow, over the base sheet's border and halo. A named skin keeps its own. */
+:root:not([data-theme]) .field textarea::placeholder,
+:root:not([data-theme]) .field input[type=text]::placeholder { color:var(--vscode-input-placeholderForeground, var(--muted)); }
+:root:not([data-theme]) .field textarea:focus,
+:root:not([data-theme]) .field input[type=text]:focus { outline:1px solid var(--focus); outline-offset:-1px; }
 `;
 
 /** What the note says on a fresh render: a running build, else how the last one ended, else nothing. */
