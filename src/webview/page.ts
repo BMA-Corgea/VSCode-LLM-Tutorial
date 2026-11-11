@@ -15,10 +15,12 @@
  * no unscoped inline script.
  *
  * **The one thing a page loads instead of inlining** (T-40): VS Code's own icon font. A panel
- * that hands over `assets` gets `codicon.css` linked from the extension's own install, and the
- * CSP widened by exactly the webview's own origin (`webview.cspSource`) for styles and fonts:
- * nothing else, and never for scripts. A panel that hands over nothing gets the page this shell
- * always drew. See `./codicons.ts` for what ships and why every icon is decoration.
+ * that hands over `assets` gets the icon sheet inlined with the page's nonce (`./codicons.ts`
+ * `codiconPageCss`, naming the font by its `asWebviewUri`), and the CSP gains exactly one source
+ * list: `font-src`, the webview's own origin (`webview.cspSource`). Styles stay the nonce alone and
+ * scripts are never touched. No stylesheet is linked, on purpose: a linked sheet holds the page's
+ * script until it arrives, and a press on a freshly drawn page was lost in that window (T-40's
+ * review, F3). A panel that hands over nothing gets the page this shell always drew.
  *
  * Client script lives inside a TS template literal (repo-tour lesson, T-3, 2026-08-26: a
  * stray escape here renders a page that does nothing and says nothing about why) — every
@@ -26,7 +28,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { CODICON_PAGE_CSS } from './codicons.js';
+import { codiconPageCss } from './codicons.js';
 import { escapeAttr, escapeHtml } from './html.js';
 
 /**
@@ -34,25 +36,35 @@ import { escapeAttr, escapeHtml } from './html.js';
  * `vscode.Webview` (`./assets.ts`) and handed in as two strings, so this module stays pure.
  */
 export interface PageAssets {
-  /** `webview.cspSource`: the one origin this page may take a stylesheet or a font from. */
+  /** `webview.cspSource`: the origins this page may take its font from (VS Code 1.145:
+   *  `'self' https://*.vscode-cdn.net`). */
   cspSource: string;
-  /** `webview.asWebviewUri(…)` of the packaged `codicon.css`, as a string. */
-  codiconCss: string;
+  /** `webview.asWebviewUri(…)` of the packaged `codicon.ttf`, as a string. */
+  codiconFont: string;
 }
 
 /**
- * What a `cspSource` may look like: one or more CSP source expressions (`https://*.vscode-cdn.net`,
- * `'self'`), separated by single spaces. Anything else (a `;`, a quote that is not a keyword's, a
- * comma, a newline) could close the directive and open another, so the page is drawn without the
- * icons rather than under a policy nobody wrote. VS Code's own value always matches.
+ * What `renderPage` will write into the `font-src` directive: tokens of letters, digits and
+ * `* + . : / ' _ -`, separated by single spaces. That is a shape check, not an allowlist: it admits
+ * any token made of those characters (`*` or `https:` alone pass too, and they could only widen
+ * `font-src`, never another directive). What it rules out is everything that could END the
+ * directive or the attribute: `;`, `,`, a newline, `"`, `<`, `>`. VS Code's own value always
+ * matches; a value that does not is drawn without the icons rather than under a policy nobody wrote.
  */
 const CSP_SOURCE_LIST = /^[A-Za-z0-9*+.:/'_-]+(?: [A-Za-z0-9*+.:/'_-]+)*$/;
+
+/**
+ * What the font's URI may look like, since it is written into a CSS `url("…")` inside the page's
+ * `<style>`: no character that could close the string, the `url()` or the element (`"`, `'`, `\`,
+ * `(`, `)`, `<`, `>`) and no whitespace. `asWebviewUri` percent-encodes all of these.
+ */
+const CSS_URL = /^[^"'\\()<>\s]+$/;
 
 /** The assets this page will actually use: all of them, or none when either string is unusable. */
 function usableAssets(assets: PageAssets | undefined): PageAssets | undefined {
   if (!assets) return undefined;
   if (typeof assets.cspSource !== 'string' || !CSP_SOURCE_LIST.test(assets.cspSource)) return undefined;
-  if (typeof assets.codiconCss !== 'string' || assets.codiconCss === '') return undefined;
+  if (typeof assets.codiconFont !== 'string' || !CSS_URL.test(assets.codiconFont)) return undefined;
   return assets;
 }
 
@@ -108,17 +120,17 @@ export function renderPage(opts: RenderPageOptions): string {
   const n = nonce();
   const themeAttr = opts.skin && opts.skin !== 'system' ? ` data-theme="${escapeAttr(opts.skin)}"` : '';
   const assets = usableAssets(opts.assets);
-  // With the icon font: styles and fonts may also come from the webview's own origin, which is
-  // where codicon.css and the codicon.ttf it names are served from. Scripts never may.
-  const csp = (assets
-    ? ["default-src 'none'", `style-src 'nonce-${n}' ${assets.cspSource}`, `font-src ${assets.cspSource}`, `script-src 'nonce-${n}'`]
-    : ["default-src 'none'", `style-src 'nonce-${n}'`, `script-src 'nonce-${n}'`]
-  ).join('; ');
+  // With the icon font: the font, and only the font, may come from the webview's own origin. The
+  // rules that draw it are inlined below under the nonce, so styles and scripts stay the nonce alone.
+  const csp = [
+    "default-src 'none'",
+    `style-src 'nonce-${n}'`,
+    ...(assets ? [`font-src ${assets.cspSource}`] : []),
+    `script-src 'nonce-${n}'`,
+  ].join('; ');
   const script = `${bootstrapScript()}\n${opts.script}`;
-  // Ahead of every inlined sheet, so a page's own rules override codicon.css's at equal specificity.
-  const icons = assets
-    ? `<link rel="stylesheet" href="${escapeAttr(assets.codiconCss)}">\n<style nonce="${n}">${CODICON_PAGE_CSS}</style>\n`
-    : '';
+  // Ahead of every other sheet, so a page's own rules can override the icon sheet's.
+  const icons = assets ? `<style nonce="${n}">${codiconPageCss(assets.codiconFont)}</style>\n` : '';
 
   return `<!doctype html>
 <html lang="en"${themeAttr}>

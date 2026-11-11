@@ -151,14 +151,14 @@ function report(overrides: Partial<CheckReport> = {}): CheckReport {
   return { symbols: [], imports: [], parseErrors: 0, ok: true, ...overrides };
 }
 
-/** The text inside one of the page's single-purpose paragraphs, so a test can assert what
- *  the line SAYS rather than merely that the phrase occurs somewhere on the page. */
 /** T-40: the markup with its decorative icons taken out: an empty, aria-hidden codicon says nothing,
  *  so what an element says is unchanged by one (test/unit/codicons.test.ts pins the icons). */
 function withoutIcons(markup: string): string {
   return markup.replace(/<span class="codicon [^"]*" aria-hidden="true"><\/span>/g, '');
 }
 
+/** The text inside one of the page's single-purpose paragraphs, so a test can assert what
+ *  the line SAYS rather than merely that the phrase occurs somewhere on the page. */
 function paragraph(html: string, cls: string): string {
   const found = new RegExp(`<p class="${cls}">([\\s\\S]*?)</p>`).exec(html);
   assert.ok(found, `the page should render a .${cls} paragraph`);

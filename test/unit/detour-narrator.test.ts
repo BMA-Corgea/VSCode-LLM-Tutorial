@@ -90,13 +90,13 @@ function poison<T>(value: unknown): T {
   return value as T;
 }
 
-/** The text of the first element carrying `class="<cls>"`, exactly as the markup spells it. */
 /** T-40: the markup with its decorative icons taken out: an empty, aria-hidden codicon says nothing,
  *  so what an element says is unchanged by one (test/unit/codicons.test.ts pins the icons). */
 function withoutIcons(markup: string): string {
   return markup.replace(/<span class="codicon [^"]*" aria-hidden="true"><\/span>/g, '');
 }
 
+/** The text of the first element carrying `class="<cls>"`, exactly as the markup spells it. */
 function textOfClass(html: string, cls: string): string {
   const found = new RegExp(`<[a-z0-9]+ class="${cls}"[^>]*>([\\s\\S]*?)</[a-z0-9]+>`).exec(html);
   assert.ok(found, `the page should render an element with class="${cls}"`);

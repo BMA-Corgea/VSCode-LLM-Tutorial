@@ -423,11 +423,11 @@ suite('disclosure: what the archive MUST contain', () => {
     'extension/node_modules/web-tree-sitter/tree-sitter.js',
     'extension/node_modules/web-tree-sitter/tree-sitter.wasm',
     ...REQUIRED_GRAMMARS.map((g) => `extension/node_modules/tree-sitter-wasms/out/tree-sitter-${g}.wasm`),
-    // T-40: VS Code's icon font, its stylesheet, and both of the package's licences.
+    // T-40: VS Code's icon font and both of the package's licences (the pages inline the stylesheet's
+    // few rules rather than linking it, so the stylesheet itself does not ship).
     'extension/node_modules/@vscode/codicons/package.json',
     'extension/node_modules/@vscode/codicons/LICENSE',
     'extension/node_modules/@vscode/codicons/LICENSE-CODE',
-    'extension/node_modules/@vscode/codicons/dist/codicon.css',
     'extension/node_modules/@vscode/codicons/dist/codicon.ttf',
   ];
 
@@ -481,12 +481,11 @@ suite('disclosure: what the archive MUST contain', () => {
     assert.deepEqual(results.filter((r) => !r.ok).map((f) => f.id), ['web-tree-sitter-wasm']);
   });
 
-  test('T-40: an archive without the icon font, its stylesheet, or either of their licences fails, and names which', () => {
+  test('T-40: an archive without the icon font or either of its licences fails, and names which', () => {
     // A missing font is silent: every icon renders as nothing and every word is still there, so
-    // nothing on screen says anything is wrong. And CC-BY-4.0 (the font) and MIT (the stylesheet)
-    // both ask that their licence travel with what they license.
+    // nothing on screen says anything is wrong. And CC-BY-4.0 (the font) and MIT (the stylesheet the
+    // pages' icon rules are adapted from) both ask that their licence travel with what they license.
     const cases: Array<[string, string]> = [
-      ['codicons/dist/codicon.css', 'codicon-css'],
       ['codicons/dist/codicon.ttf', 'codicon-font'],
       ['codicons/LICENSE', 'codicons-licence'],
       ['codicons/LICENSE-CODE', 'codicons-code-licence'],

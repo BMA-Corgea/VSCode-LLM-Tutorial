@@ -143,6 +143,16 @@ export class NarratorPanel implements vscode.Disposable {
     this.panel.webview.html = renderNarratorHtml(state, skins, pageAssets(this.panel.webview, this.extensionUri));
   }
 
+  /**
+   * The live narrator's webview, or `undefined` when none is open. For vscode-test only, as
+   * `StepViewProvider.webview` is: it is the one way a test can read what this panel GRANTS its page
+   * (`options.localResourceRoots`). This panel draws model-authored text, which is why its root has to
+   * be pinned and not merely shown to load the font (T-40's review, F5).
+   */
+  get webview(): vscode.Webview | undefined {
+    return this.panel?.webview;
+  }
+
   /** Close it, without the dispose being read as the learner asking to go back. */
   close(): void {
     const panel = this.panel;

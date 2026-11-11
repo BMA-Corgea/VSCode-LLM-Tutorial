@@ -15,14 +15,14 @@ copied into this repository, and this NOTICE does not modify repo-tour's own lic
 Third-party icons
 -----------------
 The panels draw Visual Studio Code's own icons, the Codicons (https://github.com/microsoft/vscode-codicons),
-Copyright (c) Microsoft Corporation, from the npm package @vscode/codicons, shipped UNMODIFIED
-inside the extension at node_modules/@vscode/codicons/. The icons and their font (codicon.ttf)
-are licensed under the Creative Commons Attribution 4.0 International licence (CC-BY-4.0,
-https://creativecommons.org/licenses/by/4.0/; full text in node_modules/@vscode/codicons/LICENSE);
-the stylesheet that loads them (codicon.css) is licensed under the MIT licence
-(node_modules/@vscode/codicons/LICENSE-CODE). Both are provided as is, without warranties of any
-kind; see those licences. Nothing here is fetched from the network: the font is served to each
-panel from the extension's own install.
+Copyright (c) Microsoft Corporation, from the npm package @vscode/codicons. Their font
+(codicon.ttf) is shipped UNMODIFIED inside the extension at node_modules/@vscode/codicons/dist/,
+and is licensed under the Creative Commons Attribution 4.0 International licence (CC-BY-4.0,
+https://creativecommons.org/licenses/by/4.0/; full text in node_modules/@vscode/codicons/LICENSE).
+The few style rules that draw the icons (src/webview/codicons.ts) are adapted from the package's
+codicon.css, which is licensed under the MIT licence (node_modules/@vscode/codicons/LICENSE-CODE).
+Both are provided as is, without warranties of any kind; see those licences. Nothing here is
+fetched from the network: the font is served to each panel from the extension's own install.
 
 Your AGPL entitlement
 -----------------------

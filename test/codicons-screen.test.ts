@@ -4,8 +4,8 @@
  *
  * `test/unit/codicons.test.ts` pins the markup and the CSP string. It cannot see whether VS Code
  * actually serves the font, and that takes three things agreeing inside the real host: the panel's
- * `localResourceRoots`, the page's CSP (`style-src` and `font-src` naming `webview.cspSource`), and
- * the URI `asWebviewUri` produced. Get any one wrong and every icon is blank while every word is
+ * `localResourceRoots`, the page's CSP (`font-src` naming `webview.cspSource`), and the URI
+ * `asWebviewUri` produced, which the page's own icon sheet names in its `@font-face`. Get any one wrong and every icon is blank while every word is
  * still there, which no screenshot of the words would catch. So each test reads, from inside the
  * real page: the codicon `FontFace`'s status once a load is asked for (`loaded`, not `error`, and
  * not absent), what the stylesheet did to an icon (its font family, its glyph, its drawn width),
@@ -64,7 +64,10 @@ interface Icon { family: string; glyph: string; width: number }
 interface FontReading {
   /** Every codicon FontFace on the page and its status, after `document.fonts.load` was asked. */
   faces: string[];
-  href: string | null;
+  /** The `src` of the page's own codicon `@font-face` rule. */
+  src: string | null;
+  /** How many stylesheets the page links (none: its script must never wait for one). */
+  links: number;
   csp: string | null;
   icons: Record<string, Icon | null>;
 }
@@ -75,7 +78,13 @@ function FONTS(selectors: Record<string, string>): string {
     try { await document.fonts.load('16px codicon'); } catch (e) { /* the status below says what happened */ }
     const faces = [];
     document.fonts.forEach((f) => { if (f.family.replace(/["']/g, '') === 'codicon') faces.push(f.status); });
-    const link = document.querySelector('link[rel="stylesheet"]');
+    let src = null;
+    for (const sheet of Array.from(document.styleSheets)) {
+      for (const rule of Array.from(sheet.cssRules)) {
+        if (rule instanceof CSSFontFaceRule && rule.style.getPropertyValue('font-family').replace(/["']/g, '') === 'codicon') src = rule.style.getPropertyValue('src');
+      }
+    }
+    const links = document.querySelectorAll('link[rel="stylesheet"]').length;
     const meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
     const icon = (sel) => {
       const el = document.querySelector(sel);
@@ -84,25 +93,27 @@ function FONTS(selectors: Record<string, string>): string {
     };
     const icons = {};
     for (const [name, sel] of Object.entries(${JSON.stringify(selectors)})) icons[name] = icon(sel);
-    return { faces, href: link ? link.href : null, csp: meta ? meta.getAttribute('content') : null, icons };
+    return { faces, src, links, csp: meta ? meta.getAttribute('content') : null, icons };
   })()`;
 }
 
 /** The font really arrived, through this page's own CSP, from the packaged folder. */
 function assertFontServed(where: string, r: FontReading): void {
   assert.deepEqual(r.faces, ['loaded'], `${where}: the codicon font did not load (statuses ${JSON.stringify(r.faces)}): ${JSON.stringify(r)}`);
-  assert.match(r.href ?? '', /\/node_modules\/(%40|@)vscode\/codicons\/dist\/codicon\.css$/, `${where}: the stylesheet is the packaged one`);
-  assert.match(r.href ?? '', /^https:\/\//, `${where}: served by the webview's resource origin, not a file or a CDN path`);
+  assert.match(r.src ?? '', /^url\("https:\/\/[^"]+\/node_modules\/(%40|@)vscode\/codicons\/dist\/codicon\.ttf"\)/,
+    `${where}: the page's own sheet names the packaged font, on the webview's resource origin: ${r.src}`);
+  assert.equal(r.links, 0, `${where}: no stylesheet is linked, so the page's script never waits for one`);
   const csp = r.csp ?? '';
   const directive = (name: string): string[] =>
     (csp.split(';').map((d) => d.trim()).find((d) => d.startsWith(`${name} `)) ?? '').split(/\s+/).slice(1);
   assert.deepEqual(directive('script-src').length, 1, `${where}: scripts are still the nonce and nothing else: ${csp}`);
   assert.match(directive('script-src')[0] ?? '', /^'nonce-[^']+'$/, `${where}: scripts are still the nonce and nothing else: ${csp}`);
-  // VS Code's own cspSource (1.145: `'self' https://*.vscode-cdn.net`): fonts may come from exactly
-  // the origins a stylesheet may, which is that and nothing else.
-  const styleOrigins = directive('style-src').filter((s) => !s.startsWith("'nonce-"));
-  assert.ok(styleOrigins.some((s) => s.startsWith('https://')), `${where}: styles may come from the webview's resource origin: ${csp}`);
-  assert.deepEqual(directive('font-src'), styleOrigins, `${where}: fonts come from the webview's own origins and nowhere else: ${csp}`);
+  // Styles are the nonce alone: the icon sheet is inlined under it. Fonts come from VS Code's own
+  // cspSource (1.145: `'self' https://*.vscode-cdn.net`), and from nothing a page could name itself.
+  assert.equal(directive('style-src').length, 1, `${where}: styles stay the nonce alone: ${csp}`);
+  assert.match(directive('style-src')[0] ?? '', /^'nonce-[^']+'$/, `${where}: styles stay the nonce alone: ${csp}`);
+  assert.ok(directive('font-src').some((s) => s.startsWith('https://')), `${where}: fonts from the webview's resource origin: ${csp}`);
+  assert.ok(directive('font-src').every((s) => s === "'self'" || /^https:\/\/[^\s*]*\*?[^\s]*$/.test(s)), `${where}: and nothing but its origins: ${csp}`);
 }
 
 function assertIcon(where: string, icon: Icon | null, glyph: string): void {
