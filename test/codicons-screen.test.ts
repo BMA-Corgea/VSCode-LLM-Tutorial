@@ -123,6 +123,32 @@ function assertIcon(where: string, icon: Icon | null, glyph: string): void {
   assert.equal(icon.width, 16, `${where}: the glyph is not drawn at the font's own width: ${JSON.stringify(icon)}`);
 }
 
+/**
+ * Reads until `done` holds, for up to `ms`. A read that a repaint interrupted is retried rather than
+ * failed: these reads await (a font load, a 300 ms pause), and a step panel that repaints meanwhile
+ * replaces its frame, which destroys the context the read was running in. That says nothing about
+ * the page under test except that a newer one has replaced it, which the next read finds. Any other
+ * error is thrown at once. Returns the last reading, which the caller's assertions then judge.
+ */
+async function readUntil<T>(read: () => Promise<T>, done: (r: T) => boolean, ms = 20_000): Promise<T> {
+  const deadline = Date.now() + ms;
+  let last: T | undefined;
+  let interrupted: unknown;
+  for (;;) {
+    try {
+      last = await read();
+      if (done(last)) return last;
+    } catch (err) {
+      if (!(err instanceof Error && /Execution context was destroyed/.test(err.message))) throw err;
+      interrupted = err;
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(200);
+  }
+  if (last === undefined) throw interrupted instanceof Error ? interrupted : new Error('no reading was ever completed');
+  return last;
+}
+
 async function getApi(): Promise<ExtensionApi> {
   const ext = vscode.extensions.getExtension<ExtensionApi>('bma-corgea.build-tutorials');
   assert.ok(ext);
@@ -184,9 +210,7 @@ suite('T-40: VS Code\'s own icons, in the real panels', function () {
 
   test('the step panel: the font arrives through its own root and CSP, and Previous and Next draw the arrows', () => inAWalk(async ({ screen }) => {
     const read = screen.reader<FontReading>(STEP_TITLE, FONTS({ prev: '#btn-prev .codicon', next: '#btn-next .codicon' }));
-    const deadline = Date.now() + 20_000;
-    let r = await read();
-    while ((!r.icons['prev'] || r.faces[0] !== 'loaded') && Date.now() < deadline) { await sleep(200); r = await read(); }
+    const r = await readUntil(read, (x) => !!x.icons['prev'] && x.faces[0] === 'loaded');
     assertFontServed('step panel', r);
     assertIcon('Previous', r.icons['prev'] ?? null, GLYPH.arrowLeft);
     assertIcon('Next', r.icons['next'] ?? null, GLYPH.arrowRight);
@@ -213,9 +237,7 @@ suite('T-40: VS Code\'s own icons, in the real panels', function () {
     type Spin = { glyph: string; reduce: boolean; animations: string[]; first: string; second: string } | null;
     const spin = (): Promise<Spin> => screen.reader<Spin>(STEP_TITLE, SPIN)();
 
-    let moving = await spin();
-    const deadline = Date.now() + 30_000;
-    while ((moving === null || moving.glyph !== GLYPH.loading) && Date.now() < deadline) { await sleep(200); moving = await spin(); }
+    const moving = await readUntil(spin, (x) => x !== null && x.glyph === GLYPH.loading, 30_000);
     assert.ok(moving, 'the waiting line has no spinner');
     assert.equal(moving.glyph, GLYPH.loading, `the spinner's glyph did not arrive: ${JSON.stringify(moving)}`);
     assert.equal(moving.reduce, false, 'this host starts with motion allowed');
@@ -226,9 +248,7 @@ suite('T-40: VS Code\'s own icons, in the real panels', function () {
     const was = workbench.inspect<string>('reduceMotion')?.globalValue;
     try {
       await workbench.update('reduceMotion', 'on', vscode.ConfigurationTarget.Global);
-      let still = await spin();
-      const stopBy = Date.now() + 20_000;
-      while ((still === null || !still.reduce) && Date.now() < stopBy) { await sleep(200); still = await spin(); }
+      const still = await readUntil(spin, (x) => x !== null && x.reduce);
       assert.ok(still?.reduce, `VS Code never told the page to reduce motion: ${JSON.stringify(still)}`);
       assert.deepEqual(still.animations, [], `the spinner still turns under reduced motion: ${JSON.stringify(still)}`);
       assert.equal(still.second, still.first, `the spinner still moves under reduced motion: ${JSON.stringify(still)}`);
@@ -244,9 +264,7 @@ suite('T-40: VS Code\'s own icons, in the real panels', function () {
     assert.ok(panel, 'the step view provider is registered');
     panel.dispatchForTest({ type: 'detour:start' });
     const read = screen.reader<FontReading>(NARRATOR_TITLE, FONTS({ prev: '#btn-detour-prev .codicon', next: '#btn-detour-next .codicon' }));
-    let r = await read();
-    const deadline = Date.now() + 20_000;
-    while ((!r.icons['next'] || r.faces[0] !== 'loaded') && Date.now() < deadline) { await sleep(200); r = await read(); }
+    const r = await readUntil(read, (x) => !!x.icons['next'] && x.faces[0] === 'loaded');
     assertFontServed('narrator', r);
     assertIcon('the narrator\'s Previous', r.icons['prev'] ?? null, GLYPH.arrowLeft);
     assertIcon('the narrator\'s Next', r.icons['next'] ?? null, GLYPH.arrowRight);
@@ -259,9 +277,7 @@ suite('T-40: VS Code\'s own icons, in the real panels', function () {
     try {
       await vscode.commands.executeCommand('buildTutorials.start');
       const read = screen.reader<FontReading>(START_TITLE, FONTS({}));
-      let r = await read();
-      const deadline = Date.now() + 20_000;
-      while (r.faces[0] !== 'loaded' && Date.now() < deadline) { await sleep(200); r = await read(); }
+      const r = await readUntil(read, (x) => x.faces[0] === 'loaded');
       assertFontServed('Start form', r);
     } finally {
       screen.close();
