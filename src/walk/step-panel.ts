@@ -75,6 +75,7 @@
 
 import * as vscode from 'vscode';
 import { readSkin, writeSkin } from '../skins.js';
+import { codiconsRoot, pageAssets } from '../webview/assets.js';
 import type { Dial } from '../start/request.js';
 import type { SkinsModule } from '../start/view.js';
 import type { WalkView } from './session.js';
@@ -259,8 +260,11 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
    * itself is what `src/extension.ts` registers in `context.subscriptions`, once.
    */
   private resolved: vscode.Disposable[] = [];
+  /** Where the packaged icon font is (T-40): the one folder this view's webview may read. */
+  private readonly extensionUri: vscode.Uri;
 
   constructor(context: vscode.ExtensionContext, private readonly deps: StepPanelDeps) {
+    this.extensionUri = context.extensionUri;
     // `'system'` when the core has not loaded yet — it is repo-tour's own `DEFAULT_SKIN`
     // value, so this fallback agrees with the real one rather than guessing at it, and a skin
     // the learner has actually chosen is read from `globalState` either way.
@@ -392,15 +396,16 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.webviewView = view;
     view.webview.options = {
       enableScripts: true,
-      // Explicitly EMPTY, not merely unset (security review, informational). Unset does not
-      // mean "no roots": VS Code defaults `localResourceRoots` to the extension's own install
-      // directory plus every open workspace folder, so the page would be allowed to load
-      // `vscode-webview-resource:` URLs for any file in a repository the learner has open —
-      // and this page is rendering strings that came out of exactly such a repository. It
-      // needs none of it: every stylesheet and every script on this page is INLINED by
-      // `renderPage`, and there is no `<img>`, `<link>` or `<iframe>` in `./step-view.ts` at
-      // all. Nothing to grant, so nothing is granted.
-      localResourceRoots: [],
+      // ONE folder, never left unset (security review, informational). Unset does not mean "no
+      // roots": VS Code defaults `localResourceRoots` to the extension's own install directory
+      // plus every open workspace folder, so the page would be allowed to load
+      // `vscode-webview-resource:` URLs for any file in a repository the learner has open — and
+      // this page is rendering strings that came out of exactly such a repository. It needs one
+      // thing from outside its own markup: VS Code's icon font (T-40), which ships inside this
+      // extension. So it is granted that font's folder and nothing else; every stylesheet and
+      // script of its own is still INLINED by `renderPage`, and the one `<link>` on the page is
+      // the font's stylesheet, from that folder.
+      localResourceRoots: [codiconsRoot(this.extensionUri)],
     };
     this.render();
 
@@ -496,9 +501,10 @@ export class StepViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     const view = this.webviewView;
     if (!view) return;
     const page = this.page();
+    const assets = pageAssets(view.webview, this.extensionUri);
     view.webview.html = page.kind === 'step'
-      ? renderStepHtml(page.state, page.skins)
-      : renderNoticeHtml(page.notice);
+      ? renderStepHtml(page.state, page.skins, assets)
+      : renderNoticeHtml(page.notice, assets);
     this.paintedKey = this.keyFor(page);
   }
 

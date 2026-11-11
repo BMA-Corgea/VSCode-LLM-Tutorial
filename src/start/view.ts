@@ -13,7 +13,7 @@
  */
 
 import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
-import { renderPage } from '../webview/page.js';
+import { renderPage, type PageAssets } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import { DIALS, type Dial } from './request.js';
 import type { BuildEnding, PanelState } from './protocol.js';
@@ -289,7 +289,12 @@ export function startScript(): string {
   return CLIENT_SCRIPT;
 }
 
-export function renderStartHtml(state: PanelState, skins: SkinsModule): string {
+/**
+ * `assets` (T-40): the icon font, from `./panel.ts`'s live webview. The form draws no icon today;
+ * it takes the font so the one shell every panel shares stays one shell, and a later icon here
+ * needs no new plumbing.
+ */
+export function renderStartHtml(state: PanelState, skins: SkinsModule, assets?: PageAssets): string {
   return renderPage({
     title: 'Build Tutorials: Start',
     coreCss: skins.baseCss() + skins.alternateCss(),
@@ -298,5 +303,6 @@ export function renderStartHtml(state: PanelState, skins: SkinsModule): string {
     skin: state.skin,
     body: bodyHtml(state, skins),
     script: CLIENT_SCRIPT,
+    assets,
   });
 }

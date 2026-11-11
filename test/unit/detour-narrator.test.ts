@@ -90,6 +90,12 @@ function poison<T>(value: unknown): T {
   return value as T;
 }
 
+/** T-40: the markup with its decorative icons taken out: an empty, aria-hidden codicon says nothing,
+ *  so what an element says is unchanged by one (test/unit/codicons.test.ts pins the icons). */
+function withoutIcons(markup: string): string {
+  return markup.replace(/<span class="codicon [^"]*" aria-hidden="true"><\/span>/g, '');
+}
+
 /** The text of the first element carrying `class="<cls>"`, exactly as the markup spells it. */
 function textOfClass(html: string, cls: string): string {
   const found = new RegExp(`<[a-z0-9]+ class="${cls}"[^>]*>([\\s\\S]*?)</[a-z0-9]+>`).exec(html);
@@ -271,7 +277,7 @@ suite('renderNarratorHtml — the walk it draws (AC2)', () => {
       ['btn-detour-prev', PREV_LABEL], ['btn-detour-next', NEXT_LABEL], ['btn-detour-back', BACK_LABEL],
     ];
     for (const [id, label] of controls) {
-      const found = new RegExp(`<button[^>]*id="${id}"[^>]*>([^<]*)</button>`).exec(html);
+      const found = new RegExp(`<button[^>]*id="${id}"[^>]*>([^<]*)</button>`).exec(withoutIcons(html));
       assert.ok(found, `${id} should be on the page`);
       assert.equal(found[1], label);
     }

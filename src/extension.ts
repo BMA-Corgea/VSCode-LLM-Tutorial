@@ -663,6 +663,7 @@ function registerWalk(context: vscode.ExtensionContext): void {
       back: () => { walkSession?.returnFromDetour(); },
     },
     () => walkSkins,
+    context.extensionUri,
   );
   walkStatus = new WalkStatusBar();
   walkPanel = new StepViewProvider(context, {
@@ -768,6 +769,8 @@ export interface ExtensionApi {
      * way to intercept it either cannot test the tutor or has to pay to.
      */
     useTutorCore: (core: TutorCore | undefined) => void;
+    /** T-40: the detour narrator, so a test can read what it grants its webview (see `NarratorPanel.webview`). */
+    narrator: () => NarratorPanel | undefined;
   };
 }
 
@@ -829,6 +832,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
       },
       tutorCore: () => ensureTutorCore(context),
       useTutorCore: (core: TutorCore | undefined) => { tutorCoreStandIn = core; },
+      narrator: () => walkNarrator,
     },
   };
 }

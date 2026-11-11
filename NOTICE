@@ -12,6 +12,18 @@ layer, and the shared skins. repo-tour is loaded at build and run time from a lo
 (the buildTutorials.repoTourPath setting) via dynamic import — it is a dependency, not code
 copied into this repository, and this NOTICE does not modify repo-tour's own licensing.
 
+Third-party icons
+-----------------
+The panels draw Visual Studio Code's own icons, the Codicons (https://github.com/microsoft/vscode-codicons),
+Copyright (c) Microsoft Corporation, from the npm package @vscode/codicons. Their font
+(codicon.ttf) is shipped UNMODIFIED inside the extension at node_modules/@vscode/codicons/dist/,
+and is licensed under the Creative Commons Attribution 4.0 International licence (CC-BY-4.0,
+https://creativecommons.org/licenses/by/4.0/; full text in node_modules/@vscode/codicons/LICENSE).
+The few style rules that draw the icons (src/webview/codicons.ts) are adapted from the package's
+codicon.css, which is licensed under the MIT licence (node_modules/@vscode/codicons/LICENSE-CODE).
+Both are provided as is, without warranties of any kind; see those licences. Nothing here is
+fetched from the network: the font is served to each panel from the extension's own install.
+
 Your AGPL entitlement
 -----------------------
 The AGPL's network-use clause (section 13) means that if you run a modified version of this

@@ -58,7 +58,8 @@
 
 import type { SkinsModule } from '../start/view.js';
 import { bridgeCss } from '../skins.js';
-import { renderPage } from '../webview/page.js';
+import { codicon } from '../webview/codicons.js';
+import { renderPage, type PageAssets } from '../webview/page.js';
 import { escapeHtml } from '../webview/html.js';
 import type { Detour } from './types.js';
 
@@ -340,8 +341,8 @@ function actionsHtml(count: number, current: number): { actions: string; hint: s
   const atFirst = current <= 0;
   const atLast = current >= count - 1;
   const actions = '<div class="actions">'
-    + `<button type="button" class="btn" id="btn-detour-prev"${atFirst ? ' disabled' : ''}>${escapeHtml(PREV_LABEL)}</button>`
-    + `<button type="button" class="btn" id="btn-detour-next"${atLast ? ' disabled' : ''}>${escapeHtml(NEXT_LABEL)}</button>`
+    + `<button type="button" class="btn" id="btn-detour-prev"${atFirst ? ' disabled' : ''}>${codicon('arrow-left', 'lead')}${escapeHtml(PREV_LABEL)}</button>`
+    + `<button type="button" class="btn" id="btn-detour-next"${atLast ? ' disabled' : ''}>${escapeHtml(NEXT_LABEL)}${codicon('arrow-right', 'trail')}</button>`
     + `${back}</div>`;
   // The end a learner is most likely to be looking for a way out of wins when a one-stop
   // detour is both: the hint that names the way out is the more useful of the two.
@@ -437,7 +438,8 @@ export function narratorScript(): string {
   return CLIENT_SCRIPT;
 }
 
-export function renderNarratorHtml(state: NarratorViewState, skins: SkinsModule): string {
+/** `assets` (T-40): the icon font, from `./panel.ts`'s live webview. */
+export function renderNarratorHtml(state: NarratorViewState, skins: SkinsModule, assets?: PageAssets): string {
   return renderPage({
     title: NARRATOR_TITLE,
     coreCss: skins.baseCss() + skins.alternateCss(),
@@ -446,6 +448,7 @@ export function renderNarratorHtml(state: NarratorViewState, skins: SkinsModule)
     skin: state.skin,
     body: bodyHtml(state),
     script: CLIENT_SCRIPT,
+    assets,
   });
 }
 
