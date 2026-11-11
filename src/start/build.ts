@@ -751,8 +751,9 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   // the same form was refused as "not empty — pick an empty or new folder", which threw away what had
   // been cached. A folder holding only this build's marker is now built in again (`unfinishedBuildIn`).
   function fail(err: unknown): BuildOutcome {
-    // One final full stop and trailing space go, never a path's own dots (review F3).
-    const said = (err instanceof Error ? err.message : String(err)).replace(/\s+$/, '').replace(/\.$/, '');
+    // Trailing space goes, and a final full stop that ends a sentence; never dots that are part of
+    // the text itself, a path's or an ellipsis's (review F3).
+    const said = (err instanceof Error ? err.message : String(err)).replace(/\s+$/, '').replace(/(?<!\.)\.$/, '');
     // A failure that pressing again cannot cure says only what it says (review F3).
     if ((err as { retryWontHelp?: unknown } | null)?.retryWontHelp === true) return { ok: false, reason: said };
     return { ok: false, reason: `${said || 'the build stopped without saying why'} — ${TRY_AGAIN}` };

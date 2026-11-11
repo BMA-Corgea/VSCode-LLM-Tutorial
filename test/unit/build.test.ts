@@ -415,8 +415,10 @@ suite('the write-ahead marker (AC4)', () => {
     assert.equal(missing.reason, wontHelp.message, 'a failure pressing again cannot cure says only what it says');
     const silent = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('')) } }));
     assert.equal(silent.reason, `the build stopped without saying why — ${TRY_AGAIN}`);
-    const dotted = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('could not read /work/my.project')) } }));
-    assert.equal(dotted.reason, `could not read /work/my.project — ${TRY_AGAIN}`);
+    const dotted = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('could not read /work/my.project...')) } }));
+    assert.equal(dotted.reason, `could not read /work/my.project... — ${TRY_AGAIN}`, 'the dots are the text, not a sentence\'s end');
+    const sentence = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('the network blinked.')) } }));
+    assert.equal(sentence.reason, `the network blinked — ${TRY_AGAIN}`, 'one full stop ending a sentence goes');
   });
 
   test("T-71: the language refusal keeps its own words (no \"try again\": the same repository fails the same way)", async () => {
