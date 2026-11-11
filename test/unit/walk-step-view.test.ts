@@ -3294,6 +3294,19 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
     assert.ok(html({ ...base, plan: long }).includes(escapeForHtml(staleStepsNote(many.slice(0, MAX_STALE_NAMED).map((s) => `step ${s.ordinal} (${s.target.file})`), 3))));
   });
 
+  test('one walked step is named as one, and more than one as many (AC9)', () => {
+    assert.equal(
+      staleStepsNote(['step 2 (src/parse.ts)'], 0),
+      'You have already walked a step that stood on the old road: step 2 (src/parse.ts). Your files are as you left them, so it may need revisiting.',
+      'one step is "a step", and "it"',
+    );
+    for (const [names, omitted] of [[['step 2 (src/parse.ts)'], 1], [['step 2 (a.ts)', 'step 3 (b.ts)'], 0]] as const) {
+      const many = staleStepsNote(names, omitted);
+      assert.match(many, /already walked steps that stood/, `${names.length} named, ${omitted} more`);
+      assert.match(many, /so they may need revisiting\.$/, `${names.length} named, ${omitted} more`);
+    }
+  });
+
   test('a plan whose record is not the right shape draws nothing about it, and does not throw', () => {
     const base = stateAt(ON);
     for (const divergences of ['x', [null], [{ stepId: ON, staleDependents: 'x' }], [{ stepId: 7 }]]) {
@@ -3329,6 +3342,8 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
       ['a re-plan moving on', { ...base, replanning: { stepId: ON, message: 'a' } }, { ...base, replanning: { stepId: ON, message: 'b' } }],
       ['a re-plan being recorded', { ...base, plan: replannedHere().plan, step: { ...base.step } }, { ...base, plan: base.plan }],
       ['the walked steps it names', { ...base, plan: replannedHere(['st-1-shape-src']).plan }, { ...base, plan: replannedHere(['st-2-file-parse']).plan }],
+      // F9: a step the model rewrote in the author's own words keeps its id, so this field is all that moves.
+      ['a step that kept its id and its words, now the model\'s', base, { ...base, step: { ...base.step, derivedFrom: 'st-2-file-parse' } }],
     ];
     for (const [name, a, b] of pairs) assert.notEqual(key(a), key(b), name);
   });

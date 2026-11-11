@@ -292,6 +292,26 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     assert.match(h.view().choiceNote ?? '', /\$0\.0123/);
   });
 
+  test('at a shape step the note does not claim the step\'s own code: a shape step has none', async () => {
+    const SHAPE = 'st-1-shape-src';
+    const ROAD = 'fold-into-root';
+    const plan = fixturePlan();
+    const shape = plan.steps.find((s) => s.id === SHAPE)!;
+    shape.decision.options.push({ id: ROAD, label: 'Fold src into the root', consequence: 'One chapter fewer.', taken: false });
+    const h = harness({ plan });
+    h.session.choose(SHAPE, ROAD);
+    const fresh: StepLike = { ...plan.steps.find((s) => s.id === LATER)!, id: 'fresh-1', kind: 'file', target: { file: 'src/api/fresh.ts' }, derivedFrom: SHAPE };
+    const next: PlanLike = {
+      ...plan,
+      steps: [...plan.steps.filter((s) => s.id !== LATER), fresh]
+        .map((s, i) => ({ ...s, ordinal: i + 1, ...(s.id === SHAPE ? { decision: { ...s.decision, chosen: ROAD } } : {}) })),
+      divergences: [{ stepId: SHAPE, answer: ROAD, staleDependents: [], at: 't', tree: TREE }],
+    };
+    await finish(h, await reachedEngine(h), { ok: true, changed: true, plan: next, derivedRoot: h.tree, staleDependents: [], cost: COST });
+    assert.deepEqual(loadPlan(h.target), next, 'discriminates: it landed');
+    assert.equal(h.view().choiceNote, replanDoneText(1, false, COST), 'one later step follows the choice, and no code of the shape step\'s own');
+  });
+
   test('when nothing later needed re-planning the note does not say nothing depended on it: a walked step may have', () => {
     assert.match(replanDoneText(0, true, COST), /No later step needed re-planning/);
     assert.doesNotMatch(replanDoneText(0, true, COST), /depended/);

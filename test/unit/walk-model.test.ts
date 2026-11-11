@@ -28,7 +28,7 @@
 
 import * as assert from 'node:assert/strict';
 import { BUILD_PLAN_SCHEMA, validateBuildPlan, type JsonSchema } from './plan-schema.js';
-import { MAX_OPTION_ID, MAX_OPTIONS_RENDERED, currentStep, emptyProgress, isOptionKey, markDone, nextStepId, walkedSteps, optionsTable, prevStepId, setCheck, setChosen, setCurrent, setDial, statusText, stepDial, treeModel, withChosen, type OptionLike, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
+import { MAX_OPTION_ID, MAX_OPTIONS_RENDERED, currentStep, divergenceAt, emptyProgress, isOptionKey, markDone, nextStepId, walkedSteps, optionsTable, prevStepId, setCheck, setChosen, setCurrent, setDial, statusText, stepDial, treeModel, withChosen, type OptionLike, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
 
 const IDS = ['st-1-shape-src', 'st-2-file-parse', 'st-3-symbol-handle', 'st-4-symbol-render'];
@@ -147,6 +147,23 @@ suite('setCurrent / markDone / setDial — pure updates, never a mutation', () =
       'st-1-shape-src': { status: 'done' },
       'st-2-file-parse': { status: 'pending', dial: 'scaffolded' },
     });
+  });
+});
+
+suite('divergenceAt — the plan\'s own record of a re-plan decided at a step (T-22, AC9)', () => {
+  test('the LAST re-plan at a step is the one its page describes: a second press at D walked other steps', () => {
+    const D = 'st-2-file-parse';
+    const plan: PlanLike = {
+      ...fixturePlan(),
+      divergences: [
+        { stepId: D, answer: 'a', staleDependents: ['st-1-shape-src'], at: 't1', tree: 'k/1' },
+        { stepId: 'st-4-symbol-render', answer: 'b', staleDependents: ['st-3-symbol-handle'], at: 't2', tree: 'k/2' },
+        { stepId: D, answer: 'c', staleDependents: [], at: 't3', tree: 'k/3' },
+      ],
+    };
+    assert.deepEqual(divergenceAt(plan, D), { staleDependents: [] }, 'not the first press\'s list, which named a step the second one did not stand on');
+    assert.deepEqual(divergenceAt(plan, 'st-4-symbol-render'), { staleDependents: ['st-3-symbol-handle'] }, 'and a record at another step is that step\'s alone');
+    assert.equal(divergenceAt(plan, 'st-3-symbol-handle'), undefined, 'a step nothing was decided at has none');
   });
 });
 
