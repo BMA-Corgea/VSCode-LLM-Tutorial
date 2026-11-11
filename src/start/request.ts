@@ -17,6 +17,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /**
@@ -191,18 +192,65 @@ export function unfinishedBuildIn(target: string, now: number = Date.now()): 'bu
     }
     const marker = JSON.parse(fs.readFileSync(path.join(build, MARKER_FILE), 'utf8')) as unknown;
     if (typeof marker !== 'object' || marker === null) return null;
-    const { startedAt, phase, request, heartbeatAt, endedAt } = marker as Record<string, unknown>;
+    const { startedAt, phase, request } = marker as Record<string, unknown>;
     if (typeof startedAt !== 'string' || typeof phase !== 'string' || !PHASES.includes(phase) || typeof request !== 'object' || request === null) {
       return null;
     }
-    if (typeof endedAt === 'string') return 'build-again';
-    const beat = typeof heartbeatAt === 'string' ? Date.parse(heartbeatAt) : Number.NaN;
-    if (!Number.isNaN(beat)) return now - beat < HEARTBEAT_STALE_MS ? 'maybe-running' : 'build-again';
-    const started = Date.parse(startedAt);
-    return Number.isNaN(started) || now - started < NO_HEARTBEAT_STALE_MS ? 'maybe-running' : 'build-again';
+    return markerSaysRunning(marker as Record<string, unknown>, now) ? 'maybe-running' : 'build-again';
   } catch {
     return null; // unreadable, or a marker that does not parse: not something to build over
   }
+}
+
+/**
+ * Whether the build that wrote `marker` may still be running (T-71 reviews F1, F4 and the re-review's
+ * R1, R3). The one rule the form's press and the reload's Resume prompt both apply:
+ *   - it says it ended (`endedAt`): not running;
+ *   - its extension host was on THIS machine and that process is gone (a reload, a crash): not
+ *     running, at once, whatever its heartbeat says. A pid only ever declares a build dead early; it
+ *     never makes one alive (ids are reused), and a clock that jumped cannot keep a dead build alive;
+ *   - otherwise its heartbeat decides: fresh, running (perhaps in another window, or on another
+ *     machine sharing the folder); older than `HEARTBEAT_STALE_MS`, not;
+ *   - a marker from before heartbeats: running for 6 hours from its start, then not, when a press
+ *     asks (`withoutHeartbeat` 'running', the cautious default); not running when the reload's Resume
+ *     prompt asks ('not-running'), which offered such a marker before T-71 and still does: it is the
+ *     interrupted build that prompt exists for, and only a fresh heartbeat proves a build alive.
+ */
+export function markerSaysRunning(
+  marker: Record<string, unknown>,
+  now: number = Date.now(),
+  withoutHeartbeat: 'running' | 'not-running' = 'running',
+): boolean {
+  if (typeof marker.endedAt === 'string') return false;
+  if (typeof marker.pid === 'number' && marker.host === os.hostname() && !processAlive(marker.pid)) return false;
+  const beat = typeof marker.heartbeatAt === 'string' ? Date.parse(marker.heartbeatAt) : Number.NaN;
+  if (!Number.isNaN(beat)) return now - beat < HEARTBEAT_STALE_MS;
+  if (withoutHeartbeat === 'not-running') return false;
+  const started = typeof marker.startedAt === 'string' ? Date.parse(marker.startedAt) : Number.NaN;
+  return Number.isNaN(started) || now - started < NO_HEARTBEAT_STALE_MS;
+}
+
+/** Whether a process with this id exists. EPERM means it does, under another user. */
+function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * The request as a build is given it (T-71 re-review R4): the repository and the folder the form
+ * validated, which are the trimmed ones, and the folder in one spelling (`path.resolve`). Applied once,
+ * where a press enters (`form:submit`), so that the folder validated, the bookmark, the marker's
+ * `request.target`, `BUILDING_NOW`'s key and the folder built in are one string. A trailing space used
+ * to build `<folder> ` beside the folder the form had checked. The form keeps what was typed.
+ */
+export function normaliseRequest(req: BuildRequest): BuildRequest {
+  const target = req.target.trim();
+  return { ...req, repo: req.repo.trim(), target: target ? path.resolve(target) : target };
 }
 
 export function validateRequest(req: BuildRequest): ValidationResult {

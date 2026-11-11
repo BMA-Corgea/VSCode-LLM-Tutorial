@@ -34,7 +34,7 @@
  * script) for zero flash; the host's only job there is to persist the choice.
  */
 
-import { DIALS, validateRequest, type BuildRequest, type Dial, type ValidationResult } from './request.js';
+import { DIALS, normaliseRequest, validateRequest, type BuildRequest, type Dial, type ValidationResult } from './request.js';
 
 export interface PanelState {
   request: BuildRequest;
@@ -150,7 +150,8 @@ export async function handleStartMessage(
       const { ok, problems } = validateRequest(message.payload.request);
       const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined };
       if (ok) {
-        effects.submit(message.payload.request);
+        // What was validated is what is built: trimmed, the folder in one spelling (T-71 re-review R4).
+        effects.submit(normaliseRequest(message.payload.request));
         next.building = true;
         // Said BEFORE the build's own progress notification, and on the surface the eye is
         // actually on. `runBuild` awaits a `workspaceState.update` and only then raises a

@@ -18,7 +18,8 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, parseGithubUrl, type BuildRequest } from './request.js';
+import os from 'node:os';
+import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerSaysRunning, parseGithubUrl, type BuildRequest } from './request.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
 // repo-tour's real types — see src/core.ts's header for why the boundary is typed this loosely). ──
@@ -438,6 +439,14 @@ export interface BuildMarker {
   heartbeatAt?: string;
   /** Written as a build that kept its marker (a failure) leaves: it is not running any more. */
   endedAt?: string;
+  /**
+   * This build's own random id (T-71 re-review R2). A build touches the marker on disk (its
+   * heartbeat, its ending, its deletion) only while it is its own, never another build's.
+   */
+  id?: string;
+  /** The extension host that ran it, and its machine: a gone host on this machine is a dead build at once. */
+  pid?: number;
+  host?: string;
 }
 
 /** How long an interrupted build stays worth offering to resume (plan step 6e). */
@@ -516,9 +525,12 @@ export function readFreshMarker(target: string, now: () => number = Date.now): B
   return marker;
 }
 
-function deleteMarker(target: string): void {
+function deleteMarker(target: string, id?: string): void {
+  // Never another build's marker (T-71 re-review R2): a build deletes only its own, or none at all.
+  const there = readMarker(target);
+  if (there && id !== undefined && there.id !== undefined && there.id !== id) return;
   try {
-    fs.unlinkSync(markerPath(target));
+    if (there) fs.unlinkSync(markerPath(target));
   } catch {
     /* already gone — fine */
   }
@@ -597,23 +609,47 @@ export interface BuildOutcome {
   reason?: string;
 }
 
-/** Advances the marker to `phase`, durably (write-ahead), before that phase's own work runs. */
-function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: BuildContext): void {
+/**
+ * Advances the marker to `phase`, durably (write-ahead), before that phase's own work runs.
+ *
+ * The first write takes the folder: the check just before it decided this build may. Every later one
+ * happens only while the marker on disk is still this build's own (T-71 re-review R2). Another build
+ * can have taken the folder over meanwhile, as one may once this build's heartbeat looked stale (a
+ * laptop that slept), or the marker can have been removed. Then this build writes nothing more and
+ * stops: `false`.
+ */
+function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: BuildContext, first = false): boolean {
+  if (!first && readMarker(target)?.id !== marker.id) return false;
   marker.phase = phase;
   marker.heartbeatAt = new Date().toISOString();
   writeMarker(target, marker, ctx.writeOps ?? realFsWriteOps);
   ctx.onPhase?.(phase);
+  return true;
+}
+
+/** Whether anything is at `<target>/.repo-tour/build/plan.json`, a link included. */
+function planIn(target: string): boolean {
+  try {
+    return fs.lstatSync(path.join(buildDir(target), 'plan.json'), { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return false; // no build folder to hold one (`.repo-tour` a file, say)
+  }
 }
 
 export async function buildFromRequest(request: BuildRequest, ctx: BuildContext): Promise<BuildOutcome> {
+  // Built exactly where it says. The press normalises what was typed (`normaliseRequest`, T-71
+  // re-review R4), and a Resume builds where its marker is.
   const target = request.target;
-  const marker: BuildMarker = { startedAt: new Date().toISOString(), phase: 'digest', request };
+  const marker: BuildMarker = {
+    startedAt: new Date().toISOString(), phase: 'digest', request,
+    id: randomBytes(8).toString('hex'), pid: process.pid, host: os.hostname(),
+  };
   // T-71 review F1: this host is building this folder until the build is over, however it started.
   const key = path.resolve(target);
   BUILDING_NOW.add(key);
   const heartbeat = setInterval(() => {
     // Only a marker this build already wrote: never one made before its first phase, or after its end.
-    if (readMarker(target)?.startedAt !== marker.startedAt) return;
+    if (readMarker(target)?.id !== marker.id) return;
     marker.heartbeatAt = new Date().toISOString();
     try { writeMarker(target, marker, ctx.writeOps ?? realFsWriteOps); } catch { /* the next beat tries again */ }
   }, HEARTBEAT_MS);
@@ -624,8 +660,12 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
     clearInterval(heartbeat);
     BUILDING_NOW.delete(key);
     // A build that kept its marker (a failure) says, as it leaves, that it is not running any more.
-    if (readMarker(target)?.startedAt === marker.startedAt) {
+    // One whose first marker write failed (a full disk) tidies what it did leave (re-review R5).
+    const left = readMarker(target);
+    if (left?.id === marker.id) {
       try { writeMarker(target, { ...marker, endedAt: new Date().toISOString() }, ctx.writeOps ?? realFsWriteOps); } catch { /* stale in 90 s */ }
+    } else if (left === null) {
+      deleteMarker(target, marker.id);
     }
     ctx.core.release?.(); // a refusal after the digest, a failure, a cancel: nothing may keep a worker alive
   }
@@ -634,6 +674,9 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
 async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: BuildMarker): Promise<BuildOutcome> {
   const target = request.target;
   const git = ctx.git ?? realGit;
+  // Whether a finished plan was there as this build began, as for a Resume of a build that crashed
+  // just after writing it. Only a plan that appears DURING the fetch is another build's tutorial (R2).
+  const planBefore = planIn(target);
 
   let repoRoot: string;
   try {
@@ -665,7 +708,20 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return { ok: false, reason };
   }
 
-  runPhase(target, marker, 'digest', ctx);
+  // The folder is checked again just before this build's first write (T-71 re-review R2). A fetch can
+  // take minutes, and another window may have started a build in the same folder meanwhile, or
+  // finished one there.
+  const there = readMarker(target);
+  // Positive evidence of another live build only. Every marker this version writes carries a
+  // heartbeat (`runPhase`), so one without is from before T-71: the one a Resume is taking over, or
+  // one the press already weighed (`unfinishedBuildIn`) before this build began.
+  if (there && there.id !== marker.id && markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) {
+    return { ok: false, reason: `another build started in ${target} while this one was fetching the repository — wait for it to finish, or pick an empty or new folder` };
+  }
+  if (!planBefore && planIn(target)) {
+    return { ok: false, reason: `another build finished a tutorial in ${target} while this one was fetching the repository — it is left as it is; pick an empty or new folder to build another` };
+  }
+  runPhase(target, marker, 'digest', ctx, true);
   if (ctx.isCancelled?.()) return cancel(target, 'before reading the repository');
 
   let digestResult: DigestResultLike;
@@ -685,12 +741,12 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   const unsupported = detectUnsupportedLanguages(digestResult);
   if (unsupported) {
     const reason = languageRefusalMessage(repoRoot, unsupported);
-    deleteMarker(target); // deterministic — resuming can never make an unsupported repo supported
+    deleteMarker(target, marker.id); // deterministic — resuming can never make an unsupported repo supported
     return { ok: false, reason };
   }
 
   if (ctx.isCancelled?.()) return cancel(target, 'before deriving the build order');
-  runPhase(target, marker, 'plan', ctx);
+  if (!runPhase(target, marker, 'plan', ctx)) return takenOver();
 
   let plan: BuildPlanLike;
   try {
@@ -702,7 +758,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   }
 
   if (ctx.isCancelled?.()) return cancel(target, 'before asking about each decision');
-  runPhase(target, marker, 'interpret', ctx);
+  if (!runPhase(target, marker, 'interpret', ctx)) return takenOver();
 
   let interpreted: InterpretPlanResultLike;
   try {
@@ -720,7 +776,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   }
 
   if (ctx.isCancelled?.()) return cancel(target, 'before writing the plan');
-  runPhase(target, marker, 'write', ctx);
+  if (!runPhase(target, marker, 'write', ctx)) return takenOver();
 
   try {
     ctx.onProgress?.('writing the plan…');
@@ -738,7 +794,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return fail(err);
   }
 
-  deleteMarker(target); // success — nothing left to resume
+  deleteMarker(target, marker.id); // success — nothing left to resume
   return { ok: true, plan: interpreted.plan, cost: interpreted.cost };
 
   // The marker is deliberately LEFT on any of these failures (digest/buildPlan/interpretPlan/
@@ -758,8 +814,15 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     if ((err as { retryWontHelp?: unknown } | null)?.retryWontHelp === true) return { ok: false, reason: said };
     return { ok: false, reason: `${said || 'the build stopped without saying why'} — ${TRY_AGAIN}` };
   }
+  function takenOver(): BuildOutcome {
+    // R2: the folder is another build's now, or its marker was removed. This build wrote nothing more.
+    const why = readMarker(target)
+      ? `another build took over ${target} while this one was running`
+      : `this build's record in ${target} was removed while it was running`;
+    return { ok: false, reason: `${why} — it stopped and wrote nothing more; wait for any build there to finish, or pick an empty or new folder` };
+  }
   function cancel(t: string, when: string): BuildOutcome {
-    deleteMarker(t); // an explicit user cancel — not a crash — so there is nothing to resume
+    deleteMarker(t, marker.id); // an explicit user cancel — not a crash — so there is nothing to resume
     return { ok: false, cancelled: true, reason: `build cancelled ${when}` };
   }
 }
@@ -795,13 +858,17 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
   if (!target) return undefined;
   const marker = readFreshMarker(target, ctx.now ?? Date.now);
   if (!marker) return undefined;
+  // T-71 re-review R1: a build that may still be running, in this window or another, is not offered.
+  const running = (m: BuildMarker): boolean => BUILDING_NOW.has(path.resolve(target)) || markerSaysRunning(m as unknown as Record<string, unknown>, Date.now(), 'not-running');
+  if (running(marker)) return undefined;
 
   const answer = await ctx.confirm(`A build for ${target} was interrupted (in progress: ${marker.phase}). Resume it?`);
   // The answer can come long after the question (review F1): a build may have started there since,
-  // from the form. Then neither resume nor discard: that build owns the folder and its marker now.
-  if (BUILDING_NOW.has(path.resolve(target)) || readMarker(target)?.startedAt !== marker.startedAt) return undefined;
+  // here or in another window. Then neither resume nor discard: that build owns the folder now.
+  const current = readMarker(target);
+  if (!current || (current.id ?? current.startedAt) !== (marker.id ?? marker.startedAt) || running(current)) return undefined;
   if (answer === 'Discard') {
-    deleteMarker(target);
+    deleteMarker(target, marker.id);
     return undefined;
   }
   if (answer !== 'Resume') return undefined; // dismissed — leave the marker for next time
