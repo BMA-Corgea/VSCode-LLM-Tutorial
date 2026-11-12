@@ -219,12 +219,20 @@ async function verifyOne(editor) {
   // before writing a single line - the CLI still exits 0, so the failure looks exactly like
   // "the extension never activated". It is the same flag @vscode/test-electron passes to launch
   // the very same binary for `npm test`.
+  //
+  // T-131: with no DISPLAY the launch runs under xvfb-run, whose display goes the moment its command returns, and the
+  // editor's `code` command returns about a second after starting the editor: the editor lost its display while it was
+  // still starting, and wrote no exthost.log (CI's failure, reproduced here on 1.145.2 and VSCodium). `--wait` keeps the
+  // command up, and with it xvfb-run and its display, until the editor is stopped below. With a DISPLAY of its own the
+  // launch is as it was.
   const [runBin, runArgs] = editorCommand(editor.bin, [
+    ...(process.env.DISPLAY ? [] : ['--wait']),
     ...isolation, '--no-sandbox', '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes',
     '--disable-gpu', '--disable-updates', '--new-window', workspace,
   ]);
   // T-131: the launch command's own stdout and stderr, kept (the last 64 KiB of each) for the failures below: xvfb-run,
-  // and the editor's `code` command, which starts the editor itself detached and returns. A launch that fails at once
+  // and the editor's `code` command, which starts the editor itself detached (and, with no DISPLAY, waits for it: the
+  // `--wait` above). A launch that fails at once
   // (a missing library, a display that will not start, a refused flag) says why there, before any log is written. The
   // editor's own output does not come this way (the command starts it with its output ignored); its logs say the rest.
   const child = spawn(runBin, runArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
