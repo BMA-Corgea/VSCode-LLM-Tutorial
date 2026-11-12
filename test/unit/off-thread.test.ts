@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import {
-  BuildPhaseCancelled, buildFromRequest, coreFor, markerPath, phaseCancelled, readMarker,
+  BuildPhaseCancelled, buildFromRequest, coreFor, markerPath, phaseCancelled, readMarker, TRY_AGAIN,
   type BuildContext, type BuildCore, type BuildOutcome, type BuildPhase, type DigestResultLike,
 } from '../../src/start/build.js';
 import { BUILD_WORKER_HEAP_MB, offThreadCore, type OffThreadDeps } from '../../src/start/off-thread.js';
@@ -249,7 +249,7 @@ suite('a failure in the worker comes back in the same words (T-30 AC7)', functio
   test('digest throwing: the same reason, and the marker left for a resume, as in-process', async () => {
     const repo = mixedFixture();
     const inProcess = await buildFromRequest(requestFor(repo, tmp('t30-target-')), contextFor({ ...realCore, digest: () => Promise.reject(new Error('disk exploded')) }));
-    assert.equal(inProcess.reason, 'disk exploded', 'the comparison this test is built on');
+    assert.equal(inProcess.reason, `disk exploded — ${TRY_AGAIN}`, 'the comparison this test is built on');
 
     const target = tmp('t30-target-');
     const stub = stubCore({ 'digest.js': `export async function digest() { throw new Error('disk exploded'); }\n` });
@@ -268,7 +268,7 @@ suite('a failure in the worker comes back in the same words (T-30 AC7)', functio
       'build.js': `export async function buildPlan() { throw new Error('no order to be had'); }\n`,
     });
     const outcome = await buildFromRequest(requestFor(repo, target), contextFor(offThreadCore(harness({ coreRoot: stub }).deps)));
-    assert.equal(outcome.reason, 'no order to be had');
+    assert.equal(outcome.reason, `no order to be had — ${TRY_AGAIN}`);
     assert.equal(readMarker(target)?.phase, 'plan');
   });
 });
@@ -312,7 +312,19 @@ suite('a worker that cannot answer is a sentence, never a hang (T-30 AC8)', func
   test('running out of memory ends the worker, not this process', async () => {
     await endsWithASentence(stubCore({
       'digest.js': `export async function digest() { const keep = []; for (;;) keep.push(new Array(10000).fill({ a: 1 })); }\n`,
-    }), /^reading the repository stopped unexpectedly/, { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
+    }), /^reading the repository stopped: this repository is too large to read here \(the build's worker reached its memory limit\)$/,
+    { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
+  });
+
+  test('T-71 review F3: the memory limit and a missing worker are failures pressing again cannot cure, and say so by a property', async () => {
+    const outOfMemory = await endsWithASentence(stubCore({
+      'digest.js': `export async function digest() { const keep = []; for (;;) keep.push(new Array(10000).fill({ a: 1 })); }\n`,
+    }), /./, { workerOptions: { resourceLimits: { maxOldGenerationSizeMb: 24, maxYoungGenerationSizeMb: 8 } } });
+    assert.doesNotMatch(outOfMemory.reason ?? '', /try again/, 'the same repository reaches the same limit');
+    const missing = await endsWithASentence(stubCore({ 'digest.js': OK_DIGEST }), /./, { workerFile: path.join(tmp('t30-empty-'), 'build-worker.js') });
+    assert.doesNotMatch(missing.reason ?? '', /try again/, 'its own words already say to reinstall');
+    const ordinary = await endsWithASentence(stubCore({ 'digest.js': `export async function digest() { throw new Error('a blip'); }\n` }), /a blip/);
+    assert.match(ordinary.reason ?? '', /try again/, 'an ordinary failure still says what to do next');
   });
 
   /** A digest that answers, and then its thread dies a moment later: the gap between two phases. */
@@ -501,23 +513,35 @@ suite('Cancel while a phase is running (T-30 AC4, AC5, AC6)', function () {
   });
 
   test('the digest never reads a cache committed in the reference: not even a file it would follow out of the tree (security review 1, 4)', async () => {
-    const repo = mixedFixture();
+    // Two plants, each a `.repo-tour/inventory.json` committed in the reference: a plain file, and a
+    // link to a file outside the tree. The plain one is the positive control: without being told
+    // otherwise, repo-tour reads it. The link is no longer followed by repo-tour itself since its own
+    // T-63 (2026-11-11), so it can no longer be the control; it is still asked about below, and still
+    // read by a repo-tour from before T-63 (T-83: the control that stopped proving anything there).
+    type Digested = { manifest: { incremental: unknown }; plan: { deleted: string[] } };
+    const plain = mixedFixture();
+    fs.mkdirSync(path.join(plain, '.repo-tour'));
+    fs.writeFileSync(path.join(plain, '.repo-tour', 'inventory.json'), JSON.stringify([{ path: 'FROM-A-COMMITTED-CACHE', sha256: 'x' }]));
+    const unprotected = await realCore.digest(plain, { write: false }) as unknown as Digested;
+    assert.ok(unprotected.manifest.incremental, 'the planted file was not read at all: this test proves nothing');
+    assert.deepEqual(unprotected.plan.deleted, ['FROM-A-COMMITTED-CACHE']);
+
+    const linked = mixedFixture();
     const outside = tmp('t30-outside-');
     fs.writeFileSync(path.join(outside, 'inventory.json'), JSON.stringify([{ path: 'FROM-OUTSIDE-THE-REPOSITORY', sha256: 'x' }]));
-    fs.mkdirSync(path.join(repo, '.repo-tour'));
-    fs.symlinkSync(path.join(outside, 'inventory.json'), path.join(repo, '.repo-tour', 'inventory.json'));
-    // The positive control: without being told otherwise, repo-tour does read it.
-    const unprotected = await realCore.digest(repo, { write: false }) as unknown as { manifest: { incremental: unknown }; plan: { deleted: string[] } };
-    assert.ok(unprotected.manifest.incremental, 'the planted file was not read at all: this test proves nothing');
-    assert.deepEqual(unprotected.plan.deleted, ['FROM-OUTSIDE-THE-REPOSITORY']);
+    fs.mkdirSync(path.join(linked, '.repo-tour'));
+    fs.symlinkSync(path.join(outside, 'inventory.json'), path.join(linked, '.repo-tour', 'inventory.json'));
 
-    let seen: DigestResultLike | undefined;
-    const inWorker = offThreadCore(harness().deps);
-    const spying: BuildCore = { ...inWorker, digest: async (...args) => { seen = await inWorker.digest(...args); return seen; } };
-    const target = tmp('t30-target-');
-    const outcome = await buildFromRequest(requestFor(repo, target), contextFor(spying));
-    assert.equal(outcome.ok, true, outcome.reason);
-    assert.equal((seen as unknown as { manifest: { incremental: unknown } }).manifest.incremental, null);
+    for (const repo of [plain, linked]) {
+      let seen: DigestResultLike | undefined;
+      const inWorker = offThreadCore(harness().deps);
+      const spying: BuildCore = { ...inWorker, digest: async (...args) => { seen = await inWorker.digest(...args); return seen; } };
+      const target = tmp('t30-target-');
+      const outcome = await buildFromRequest(requestFor(repo, target), contextFor(spying));
+      assert.equal(outcome.ok, true, outcome.reason);
+      assert.equal((seen as unknown as { manifest: { incremental: unknown } }).manifest.incremental, null,
+        `${repo === plain ? 'a committed cache' : 'a committed link out of the tree'} was read by the build's digest`);
+    }
   });
 
   test('a .repo-tour that is a symlink: the clean-up does not remove a folder through it (security review 5)', async () => {
@@ -541,7 +565,63 @@ suite('Cancel while a phase is running (T-30 AC4, AC5, AC6)', function () {
       onPhase: (phase: BuildPhase) => { if (phase === 'interpret') cancelled = true; },
     }));
     assert.equal(outcome.cancelled, true);
-    assert.equal(outcome.reason, 'build cancelled before writing the plan', 'interpret keeps today\'s between-phase Cancel (T-70)');
+    assert.equal(outcome.reason, 'build cancelled before writing the plan', 'with no model call to end (the cache answers every file), the check after the phase answers the Cancel');
+  });
+});
+
+suite('T-70: Cancel reaches the model calls of the build the extension makes', function () {
+  this.timeout(60_000);
+
+  test('the core built as src/extension.ts builds it, with the shipped polls: Cancel during the first call ends it within 2 s, and no other call reaches the model', async () => {
+    // Real, as in every build: offThreadCore over coreFor over repo-tour's own modules, the worker's read
+    // and plan, the default polls, repo-tour's interpretPlan, cachedOnly false. The test's own: the
+    // provider repo-tour's llm module hands out, and where answers are kept. A pin that brings its own
+    // runner or its own poll cannot see this chain undo T-70 (review F2). And no model CLI can be found
+    // while it runs, so had the runner gone missing, repo-tour's own runLlm would spawn nothing.
+    const saved = { claude: process.env.REPO_TOUR_CLAUDE_BIN, codex: process.env.REPO_TOUR_CODEX_BIN };
+    const nowhere = tmp('t70-no-cli-');
+    process.env.REPO_TOUR_CLAUDE_BIN = path.join(nowhere, 'no-such-claude');
+    process.env.REPO_TOUR_CODEX_BIN = path.join(nowhere, 'no-such-codex');
+    try {
+      let cancelled = false;
+      let pressedAt = 0;
+      const calls: Array<{ file: string; endedAt?: number }> = [];
+      const provider = {
+        // Holds each call until its signal fires, or for 3 s: well inside this test's timeout, so a call
+        // that is never ended fails below in its own words.
+        run: (prompt: string, opts: { signal?: AbortSignal }): Promise<unknown> => new Promise((_resolve, reject) => {
+          const call: { file: string; endedAt?: number } = { file: /File: (\S+)/.exec(prompt)?.[1] ?? '?' };
+          calls.push(call);
+          if (calls.length === 1) { cancelled = true; pressedAt = Date.now(); } // Cancel, pressed during the first call
+          const cap = setTimeout(() => reject(new Error('never ended: its signal did not fire')), 3_000);
+          opts.signal?.addEventListener('abort', () => { call.endedAt = Date.now(); clearTimeout(cap); reject(new Error('aborted')); }, { once: true });
+        }),
+      };
+      const cache = tmp('t70-interpret-cache-');
+      const inProcess = coreFor({
+        ...loaded.loaded,
+        llm: { providerById: () => provider },
+        interpret: { ...(loaded.loaded['interpret'] as object), defaultCacheDir: () => cache }, // never the shared cache
+      });
+      const target = tmp('t30-target-');
+      const outcome = await buildFromRequest(requestFor(mixedFixture(), target),
+        contextFor(offThreadCore(harness({ inProcess }).deps), { cachedOnly: false, isCancelled: () => cancelled }));
+
+      assert.ok(calls.length > 0, `the build never reached its first model call: ${JSON.stringify(outcome.reason ?? outcome.cost?.['failures'])}`);
+      assert.equal(calls.length, 1, `${calls.length} calls reached the model; only the one in flight at Cancel may (${calls.map((c) => c.file).join(', ')})`);
+      const first = calls[0]!;
+      assert.notEqual(first.endedAt, undefined, 'the call in flight at Cancel was never ended');
+      const endedMs = first.endedAt! - pressedAt;
+      assert.ok(endedMs < 2_000, `the call in flight outlived Cancel by ${endedMs} ms`);
+      assert.deepEqual({ ok: outcome.ok, cancelled: outcome.cancelled, reason: outcome.reason }, { ok: false, cancelled: true, reason: 'build cancelled while asking about each decision' });
+      assertTargetClean(target);
+      assert.deepEqual(fs.readdirSync(cache), [], 'a cancelled build wrote an answer');
+    } finally {
+      if (saved.claude === undefined) delete process.env.REPO_TOUR_CLAUDE_BIN;
+      else process.env.REPO_TOUR_CLAUDE_BIN = saved.claude;
+      if (saved.codex === undefined) delete process.env.REPO_TOUR_CODEX_BIN;
+      else process.env.REPO_TOUR_CODEX_BIN = saved.codex;
+    }
   });
 });
 

@@ -758,16 +758,19 @@ export class WalkSession {
     this.enterCurrentStep();
   }
 
-  /** The next step by ordinal, or nothing at all at the end of the plan — no wraparound. */
-  next(): void {
+  /** The next step by ordinal, or nothing at all at the end of the plan — no wraparound. Returns
+   *  whether it moved, so a caller can say why it did not (T-51). */
+  next(): boolean {
     const id = nextStepId(this.plan, this.progress);
     if (id) this.goTo(id);
+    return id !== null;
   }
 
-  /** The previous step by ordinal, or nothing at all at the start of the plan. */
-  prev(): void {
+  /** The previous step by ordinal, or nothing at all at the start of the plan. Returns whether it moved. */
+  prev(): boolean {
     const id = prevStepId(this.plan, this.progress);
     if (id) this.goTo(id);
+    return id !== null;
   }
 
   /**

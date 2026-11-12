@@ -7,9 +7,9 @@ here and found via the reference table below.
 
 ## Live edge
 
-> **The foreman continuation run of 2026-11-08 has ended: read [`kb/RESUME.md`](RESUME.md) first.**
-> It is that run's handoff (eight tickets landed; T-22 is on a local branch) and supersedes "Where
-> that stands" and "Waiting on" below, which still describe September.
+> **The foreman AFK run of 2026-11-10 ended on the owner's stop: read [`kb/RESUME.md`](RESUME.md) first.**
+> Six tickets landed (five pushed; T-51 merged locally, NOT pushed); T-22, T-71, T-70, T-72 and T-83 are on local
+> branches. It supersedes "Where that stands" and "Waiting on" below, which still describe September.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live.
@@ -52,19 +52,29 @@ that undo and the deferred replan diff need the same substrate.
 - **T-23** (feature) — The walked prefix and the learner's disk — a replan never touches either — intake
 - **T-18** (feature) — Asking before showing — the decision comes before its code in a Mode A walk — intake
 - **T-20** (feature) — The idea path — the start screen's idea box builds a Mode A plan — intake
-- **T-40** (feature) — Codicons in the webviews, and waiting states that move — intake
 - **T-60** (bug) — A Claude reply's input token count leaves out cached input — intake
-- **T-70** (bug) — Cancel during 'asking about each decision…' does not stop the model calls — the… — intake
 - **T-50** (bug) — A press from a stale step page acts on the step the learner moved to, on every … — intake
-- **T-80** (bug) — T-15's folder-picker screen test fails on clean main: the press after a failed … — intake
-- **T-81** (bug) — The unit and screen suites leave about 390 temp folders per run in /tmp and nev… — intake
 - **T-61** (feature) — Model-written code runs as the learner: tell them first, and decide which built… — intake
-- **T-71** (bug) — After a failed build the same form is refused as 'not empty', with no word that… — intake
-- **T-72** (bug) — A .gitattributes committed as a symlink to /dev/zero makes repo-tour's read end… — intake
-- **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — build
+- **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — auto-review
 - **T-73** (bug) — A second Check my work with nothing changed leaves the panel exactly as it was:… — intake
-- **T-51** (bug) — Previous and Next at the ends of the plan are enabled and answer nothing — intake
-- **T-52** (feature) — The Start form's fields: the theme's placeholder colour and focus outline — intake
+- **T-81** (bug) — The unit and screen suites leave about 390 temp folders per run in /tmp and nev… — uat
+- **T-40** (feature) — Codicons in the webviews, and waiting states that move — uat
+- **T-80** (bug) — T-15's folder-picker screen test fails on clean main: the press after a failed … — uat
+- **T-71** (bug) — After a failed build the same form is refused as 'not empty', with no word that… — gate
+- **T-100** (bug) — Every vscode-test host run leaves a dead vscode-git-*.sock in XDG_RUNTIME_DIR — intake
+- **T-70** (bug) — Cancel during 'asking about each decision…' does not stop the model calls — the… — auto-review
+- **T-72** (bug) — A .gitattributes committed as a symlink to /dev/zero makes repo-tour's read end… — auto-review
+- **T-82** (bug) — CI has been red since Sep 8: a newer git (2.56) no longer prints the index.lock… — uat
+- **T-52** (feature) — The Start form's fields: the theme's placeholder colour and focus outline — uat
+- **T-90** (feature) — A symbol press rewrites its whole file from the decision alone: show the code q… — intake
+- **T-91** (bug) — The Start build writes request.json and plan.json through a linked .repo-tour/b… — intake
+- **T-92** (bug) — The dial and the tutor read a taught step's file from an attacker-chosen refere… — intake
+- **T-93** (bug) — A re-plan question cancelled in flight is paid for twice: its late answer is ne… — intake
+- **T-94** (techdebt) — Derived trees: a lifetime cap of 200 files per plan, and orphan trees never pru… — intake
+- **T-110** (bug) — The Start form's checkbox, radios and skin picker show no focus outline under S… — intake
+- **T-111** (techdebt) — native-polish.test.ts's CSS-rule helpers squeeze out every space, so a selector… — intake
+- **T-51** (bug) — Previous and Next at the ends of the plan are enabled and answer nothing — verify
+- **T-83** (bug) — On GitHub's runner the step panel's Check my work verdict ends below the panel:… — refine
 
 ## Waiting on
 
@@ -76,6 +86,15 @@ that undo and the deferred replan diff need the same substrate.
   GA-3); T-5…T-8 sit at `plan` — unstarted, not blocked. The next human stop is T-4's
   **accept** gate.
 - **T-22** — waiting at spec_ready on human:owner since 2026-11-08
+- **T-81** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-40** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-80** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-71** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-70** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-72** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-82** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-52** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-51** — waiting at spec_ready on human:owner since 2026-11-11
 
 
 ## Known landmines (not bugs today; they bite on a named trigger)

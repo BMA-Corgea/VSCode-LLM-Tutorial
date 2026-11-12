@@ -44,13 +44,15 @@
         "command": "buildTutorials.prevStep",
         "title": "Previous step",
         "category": "Build Tutorials",
-        "icon": "$(arrow-left)"
+        "icon": "$(arrow-left)",
+        "enablement": "!buildTutorials.atFirstStep"
       },
       {
         "command": "buildTutorials.nextStep",
         "title": "Next step",
         "category": "Build Tutorials",
-        "icon": "$(arrow-right)"
+        "icon": "$(arrow-right)",
+        "enablement": "!buildTutorials.atLastStep"
       },
       {
         "command": "buildTutorials.goToStep",

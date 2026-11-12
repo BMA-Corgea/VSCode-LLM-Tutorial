@@ -136,6 +136,15 @@ export function prevStepId(plan: PlanLike, progress: Progress): string | null {
   return steps[idx - 1]?.id ?? null;
 }
 
+/**
+ * T-51: whether the walk stands at either end of the plan, decided by the very functions a press of
+ * *Previous* or *Next* uses, so "disabled" and "a press would not move" can never disagree: `atFirst` exactly
+ * when `prevStepId` is `null`, `atLast` exactly when `nextStepId` is. A one-step plan is both.
+ */
+export function planEnds(plan: PlanLike, progress: Progress): { atFirst: boolean; atLast: boolean } {
+  return { atFirst: prevStepId(plan, progress) === null, atLast: nextStepId(plan, progress) === null };
+}
+
 export function setCurrent(progress: Progress, stepId: string): Progress {
   return { ...progress, current: stepId };
 }

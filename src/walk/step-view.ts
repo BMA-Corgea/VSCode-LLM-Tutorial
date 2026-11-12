@@ -176,7 +176,7 @@ import { codicon } from '../webview/codicons.js';
 import { renderPage, type PageAssets } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
-import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, optionsTable, type OptionLike, type StepLike, type WhySource } from './model.js';
+import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, optionsTable, planEnds, type OptionLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
 
 export { MAX_OPTIONS_RENDERED };
@@ -415,6 +415,15 @@ export const TUTOR_TURN_LABEL = 'Tutor';
  * point. So it is named, and it is styled apart — see `.tutor-turn.turn-note`.
  */
 export const NOTE_TURN_LABEL = 'This tutorial';
+
+/**
+ * T-51: why *Previous* or *Next* is disabled, said under the action row (the narrator's own pattern, its
+ * `FIRST_STOP_HINT`/`LAST_STOP_HINT`): a control that cannot act is disabled WITH its reason, never left
+ * enabled to do nothing (T-15's rule). Exported so a test asserts the words the page uses.
+ */
+export const FIRST_STEP_HINT = 'This is the first step of the plan — there is nothing before it.';
+export const LAST_STEP_HINT = 'This is the last step of the plan — there is nothing after it.';
+export const ONLY_STEP_HINT = 'This is the only step in the plan — there is nothing before or after it.';
 
 /** T-7: the second button beside *Ask*, its waiting line, and the way out. Exported like every
  *  other visible string here — one home, asserted rather than copied. */
@@ -771,6 +780,11 @@ main, section, .option { min-width:0; }
 .tutor-foot { margin:0 0 12px; }
 /* With Forget gone from the row, the detour button sat flush against Ask. */
 .detour { margin-top:8px; }
+/* T-51: why Previous or Next is disabled, under the row, in the asides' muted ink (the narrator's own pattern). */
+.ends-hint { color:var(--muted); font-size:12px; margin:0 0 8px; overflow-wrap:anywhere; }
+/* T-51 review F1: the base sheet keeps a disabled .btn's look under the pointer but not a disabled .btn.primary's;
+   Next is the first primary button this page disables. */
+.btn.primary[disabled]:hover { background:var(--accent-solid); border-color:var(--accent-solid-edge); }
 /* F-11: where in the plan this step sits. */
 .step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
 /* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
@@ -1484,15 +1498,29 @@ function waitingMessage(stage: unknown): string {
  * `stepRenderKey`, so a plan whose length changes repaints.
  */
 function stepCountText(state: StepViewState): string {
-  const steps = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+  // T-51 review F2: in the plan's ORDER (ordinal), which is the order Previous and Next move in and the
+  // order the ends are decided by. Listed order disagreed with them on a plan listed out of order.
+  const listed = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+  const steps = [...listed].sort((a, b) => (a?.ordinal ?? 0) - (b?.ordinal ?? 0));
   const index = steps.findIndex((s) => s?.id === state.step.id);
   return index >= 0 ? `Step ${index + 1} of ${steps.length}` : '';
+}
+
+/** T-51: why a move is disabled, or `''` when neither end is reached. */
+function endsHintText(ends: { atFirst: boolean; atLast: boolean }): string {
+  if (ends.atFirst && ends.atLast) return ONLY_STEP_HINT;
+  if (ends.atFirst) return FIRST_STEP_HINT;
+  if (ends.atLast) return LAST_STEP_HINT;
+  return '';
 }
 
 function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   const step = state.step;
   const currentDial: Dial = resolvedDial(state.dial);
   const count = stepCountText(state);
+  // T-51: a move the walk cannot make is not offered. Decided by the functions the press itself uses.
+  const ends = planEnds(state.plan, state.progress);
+  const endsHint = endsHintText(ends);
 
   return `
 <main id="step-main" data-step-id="${escapeAttr(planId(step.id))}">
@@ -1524,14 +1552,15 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   ${writeNoteHtml(state.writeNote)}
 
   <div class="actions">
-    <button type="button" class="btn" id="btn-prev">${codicon('arrow-left', 'lead')}Previous</button>
+    <button type="button" class="btn" id="btn-prev"${ends.atFirst ? ' disabled' : ''}>${codicon('arrow-left', 'lead')}Previous</button>
     <span class="open-wrap">
       <button type="button" class="btn" id="btn-open"${state.fileExists ? '' : ' disabled'}>Open the file</button>
       ${openFileHint(state.fileExists)}
     </span>
     <button type="button" class="btn" id="btn-check">Check my work</button>
-    <button type="button" class="btn primary" id="btn-next">Next${codicon('arrow-right', 'trail')}</button>
+    <button type="button" class="btn primary" id="btn-next"${ends.atLast ? ' disabled' : ''}>Next${codicon('arrow-right', 'trail')}</button>
   </div>
+  ${endsHint ? `<p class="ends-hint" id="ends-hint">${escapeHtml(endsHint)}</p>` : ''}
 
   <div class="note" id="step-note">${escapeHtml(state.note ?? '')}</div>
 
@@ -1585,6 +1614,14 @@ const CLIENT_SCRIPT = `
   var savedY = 0;
   var revealKey = '';
   var revealAt = 0;
+  // T-83: where the outcome a reveal brought into view sat on screen ({ key, top, at }). The press can
+  // be answered by more than one repaint: a passing check draws its verdict, then its commit, refused
+  // for want of a git identity, draws a note ABOVE it. The reveal is spent on the first. So the next
+  // repaint of this step puts the outcome back where it sat, instead of keeping only the scroll
+  // position, which leaves it wherever the new lines above push it (CI: 70 px down, out of the panel).
+  // Held until the learner moves (a wheel, a touch, a key, a pointer press), or for the reveal's
+  // lifetime. A repaint that changes nothing above the outcome moves nothing.
+  var held = null;
   var restored = false;
   var initial = restore();
   // The blob is ONE per view, written for one step. This page owns it when it was written for
@@ -1615,6 +1652,13 @@ const CLIENT_SCRIPT = `
       revealKey = initial.reveal;
       revealAt = initial.revealAt;
     }
+    // Checked like reveal: a known key, and only ever used to find an element by id.
+    var hold = initial.hold;
+    if (hold && typeof hold === 'object' && typeof hold.key === 'string' && REVEALS.indexOf(hold.key) >= 0
+      && typeof hold.top === 'number' && isFinite(hold.top) && typeof hold.at === 'number' && isFinite(hold.at)
+      && Date.now() - hold.at >= -1000 && Date.now() - hold.at <= REVEAL_LIFETIME_MS) {
+      held = { key: hold.key, top: Math.round(hold.top), at: hold.at };
+    }
   }
   // ONE blob, written whole every time. Two writers each calling save() with only their own
   // field would each erase the other's — the note would eat the draft on the next reply, and
@@ -1628,9 +1672,13 @@ const CLIENT_SCRIPT = `
     if (Object.keys(otherDrafts).length > 0) { blob.drafts = otherDrafts; }
     if (savedY > 0) { blob.y = savedY; }
     if (revealKey) { blob.reveal = revealKey; blob.revealAt = revealAt; }
+    if (held) { blob.hold = held; }
     save(blob);
   }
-  function reveal(key) { revealKey = key; revealAt = Date.now(); persist(); }
+  function reveal(key) { revealKey = key; revealAt = Date.now(); held = null; persist(); }
+  function topOf(el) {
+    return el && typeof el.getBoundingClientRect === 'function' ? Math.round(el.getBoundingClientRect().top) : null;
+  }
 
   var initialNoteEl = document.getElementById('step-note');
   if (savedNote && initialNoteEl) { initialNoteEl.textContent = savedNote; }
@@ -1664,17 +1712,32 @@ const CLIENT_SCRIPT = `
   // T-16 (F-01): back to where the learner was on this step, then the outcome of their last
   // press into view. block 'nearest' moves only as far as needed and not at all when the
   // outcome is already visible; behavior 'auto' never animates. One-shot: the reveal is
-  // cleared here, so a later repaint on the same step does not jump again.
+  // cleared here, so a later repaint on the same step does not jump again. What it leaves is
+  // where the outcome now sits (T-83, \`held\` above), for the repaints that follow the same press.
   if (savedY > 0 && typeof window.scrollTo === 'function') { window.scrollTo(0, savedY); }
   restored = true;
   if (revealKey) {
     var outcome = document.getElementById('outcome-' + revealKey);
     if (outcome && typeof outcome.scrollIntoView === 'function') {
       outcome.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      var top = topOf(outcome);
+      held = top === null ? null : { key: revealKey, top: top, at: revealAt };
     }
     revealKey = '';
     persist();
+  } else if (held) {
+    var heldTop = topOf(document.getElementById('outcome-' + held.key));
+    if (heldTop === null) {
+      held = null;
+    } else if (heldTop !== held.top && typeof window.scrollTo === 'function') {
+      window.scrollTo(0, Math.max(0, (typeof window.scrollY === 'number' ? window.scrollY : 0) + heldTop - held.top));
+    }
+    persist();
   }
+  // The learner's own move ends the hold: from then on a repaint keeps their scroll position, as before.
+  ['wheel', 'touchstart', 'keydown', 'pointerdown'].forEach(function (type) {
+    window.addEventListener(type, function () { if (held) { held = null; persist(); } });
+  });
   // T-21 re-review F1: a press from a page for a step already left is answered on the page drawn
   // for the step the learner is on, and the old page's reveal is keyed to the old step, so this is
   // the page that has to bring the words into view. VS Code then puts the OLD page's scroll
@@ -1869,7 +1932,7 @@ const CLIENT_SCRIPT = `
       // bring the note itself into view, because the learner pressed from further down the
       // page. An EMPTY note only clears an old one: an accepted ask posts it just before the
       // repaint to "thinking", and that repaint still needs its reveal.
-      if (note) { revealKey = ''; }
+      if (note) { revealKey = ''; held = null; }
       persist();
       if (el && note && typeof el.scrollIntoView === 'function') {
         el.scrollIntoView({ block: 'nearest', behavior: 'auto' });
@@ -2068,6 +2131,9 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
   return JSON.stringify([
     keyOf(id),
     stepCountText(state),
+    // T-51: which moves the page disables. Derived from the plan's order and the current step, which the
+    // count above mostly encodes; stated outright so the key cannot drift from the markup.
+    Object.values(planEnds(state.plan, state.progress)),
     keyOf(decision.question),
     keyOfList<OptionLike | undefined>(decision.options, MAX_OPTIONS_RENDERED, (option) => [
       keyOf(option?.id), keyOf(option?.label), keyOf(option?.consequence), option?.taken,
