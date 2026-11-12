@@ -26,9 +26,15 @@ export function downstreamOf(nodes: readonly GraphNode[], decision: string): Set
   // nodes come in. Mode A's plans are in topological order, but a real repository's are not: repo-tour
   // breaks an import cycle by listing a file before a file it imports (T-22's code review, MF2), and a
   // single forward pass then missed it. On a plan in topological order the two give the same set.
+  // Appended in place: copying the list on every edge was quadratic in fan-in, and a chapter's shape step
+  // stands under every file in its chapter (2.2 s at 20,000 files, on the extension host's thread).
   const dependents = new Map<string, string[]>();
   for (const n of nodes) {
-    for (const d of n.dependsOn) dependents.set(d, [...(dependents.get(d) ?? []), n.path]);
+    for (const d of n.dependsOn) {
+      const list = dependents.get(d);
+      if (list === undefined) dependents.set(d, [n.path]);
+      else list.push(n.path);
+    }
   }
   const out = new Set<string>();
   const stack = [...(dependents.get(decision) ?? [])];
