@@ -58,7 +58,7 @@ import {
   MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT,
   MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE,
   NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE,
-  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, NOT_REPLANNED_NOTE, RECORDED_NOTE, MAX_STALE_NAMED, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_MESSAGE,
+  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, NOT_REPLANNED_NOTE, RECORDED_NOTE, MAX_STALE_NAMED, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_DERIVED_MESSAGE, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, CLEAR_CONFIRM_LABEL, PREPARING_MESSAGE,
@@ -3285,6 +3285,27 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
     const page = html(stateAt(ON));
     for (const note of [REPLANNED_NOTE, WRITTEN_BY_THE_MODEL_NOTE]) assert.ok(note.length === 0 || !page.includes(escapeForHtml(note)));
     assert.ok(!page.includes(`>${SUGGESTED_BADGE}<`));
+  });
+
+  // T-22's code review, N3: the tutor's line before anything is asked said it is told "why the author chose as they
+  // did, and how your file differs from theirs", on steps whose code the model wrote. The tutor is told neither.
+  test('before anything is asked, a step whose code the model wrote does not say the tutor is told about an author (AC7)', () => {
+    const emptyLine = (state: StepViewState): string => {
+      const found = /<p class="tutor-empty">([^<]*)<\/p>/.exec(tutorSection(html(state)));
+      assert.ok(found, 'an unasked step draws the empty line');
+      return found[1]!;
+    };
+    for (const [what, state] of [
+      ['a step the model wrote', writtenByTheModel()],
+      ['the step where the road changed', replannedHere()],
+      ['the step where the road changed, back on the author\'s road', replannedHere([], 'author')],
+    ] as const) {
+      const line = emptyLine(state);
+      assert.ok(!/author|theirs/i.test(line), `${what}: the empty line names an author: "${line}"`);
+      assert.ok(/the code the model wrote/.test(line), `${what}: the empty line says whose code the learner's file is compared with: "${line}"`);
+      assert.equal(line, escapeForHtml(TUTOR_EMPTY_DERIVED_MESSAGE), what);
+    }
+    assert.equal(emptyLine(stateAt(ON)), escapeForHtml(TUTOR_EMPTY_MESSAGE), 'an author\'s step keeps its line');
   });
 
   test('M1: each walked step that stood on the old road is named on D\'s page (AC9)', () => {

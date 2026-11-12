@@ -482,6 +482,11 @@ export function detourElsewhereMessage(stepNumber: number | undefined): string {
 export const TUTOR_EMPTY_MESSAGE =
   'Nothing asked about this step yet. The tutor is told this step’s question, its options, why the author chose as they did, and how your file differs from theirs.';
 
+/** T-22 (code review, N3): the same line on a step whose code a re-plan wrote, which has no author's code to compare
+ *  with and is not sent the author's reason (`src/tutor/context.ts`: the road its code follows is named instead). */
+export const TUTOR_EMPTY_DERIVED_MESSAGE =
+  'Nothing asked about this step yet. The tutor is told this step’s question, its options, which road its code follows, and how your file differs from the code the model wrote.';
+
 /** The placeholder in the box — and the one place the Enter/Shift+Enter rule is stated to the
  *  person it is a rule for. A keyboard shortcut nobody is told about is not a feature. */
 export const ASK_PLACEHOLDER = 'Ask about this step — Enter sends, Shift+Enter for a new line';
@@ -884,7 +889,8 @@ function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replan
   const staleNote = stale === '' ? '' : `<p class="options-stale options-diverged" role="note">${escapeHtml(stale)}</p>`;
   const running = replanning === undefined
     ? ''
-    : `<p class="options-replanning" id="replan-status" role="status">${escapeHtml(planText(replanning.message))} <button type="button" class="btn" id="btn-replan-cancel">${REPLAN_CANCEL_LABEL}</button></p>`;
+    // T-40's spinner, as beside the tutor's and the detour's waits: a re-plan is a wait for the model too.
+    : `<p class="options-replanning" id="replan-status" role="status">${codicon('loading', 'lead', { spin: true })}${escapeHtml(planText(replanning.message))} <button type="button" class="btn" id="btn-replan-cancel">${REPLAN_CANCEL_LABEL}</button></p>`;
   // T-22 (code review SF5): a re-derived step whose code is gone says so where its road is drawn.
   const missingNote = codeMissing ? `<p class="options-refused options-missing" role="note">${escapeHtml(DERIVED_CODE_MISSING_MESSAGE)}</p>` : '';
   const notes = `${running}${refusedNote}${missingNote}${roadNote}${writtenNote}${staleNote}`;
@@ -1225,9 +1231,9 @@ function answerHtml(text: unknown): string {
  * option by moving it into the window, and this one keeps the newest turns by taking the window
  * from the other end — same rule, different end of the list.
  */
-function transcriptHtml(turns: AskMessage[]): string {
+function transcriptHtml(turns: AskMessage[], rederived: boolean): string {
   const all = Array.isArray(turns) ? turns : [];
-  if (all.length === 0) return `<p class="tutor-empty">${escapeHtml(TUTOR_EMPTY_MESSAGE)}</p>`;
+  if (all.length === 0) return `<p class="tutor-empty">${escapeHtml(rederived ? TUTOR_EMPTY_DERIVED_MESSAGE : TUTOR_EMPTY_MESSAGE)}</p>`;
 
   const shown = all.slice(-MAX_TURNS_RENDERED);
   const omitted = all.length - shown.length;
@@ -1329,7 +1335,8 @@ function tutorHtml(state: StepViewState): string {
     : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
 
   return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
-    + transcriptHtml(state.transcript)
+    // Re-derived exactly when the tutor's context says so (`derivedFrom` set: D itself, or a step the model wrote).
+    + transcriptHtml(state.transcript, state.step?.derivedFrom !== undefined)
     + note
     + unreachable
     + elsewhereHtml(state)
