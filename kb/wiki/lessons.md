@@ -9,6 +9,39 @@ type: reference
 One entry per lesson, newest first, each citing the ticket or incident it came from. These
 are the things that cost real time and would cost it again.
 
+## A plan's reason argues for the road it recommends, and only a real model shows it (T-22, 2026-11-10)
+
+T-22's first live divergence pressed *Scan the ranges one by one* at `isInRange`, and the model wrote a
+binary search. Every check on the page passed: the labels, the running line, the warning, the reload. The
+question for D's own code carried the plan's `why` beside the learner's road, and a plan's `why` is the
+reason for the road it RECOMMENDS: repo-tour's is the author's (here, from the docstring, *"Binary search
+on a sorted flat array of [start, end] pairs."*). Beside any other road it argues for the road not taken,
+and a model follows a reason over a label. Four real calls found what every scripted test had passed,
+because a scripted model answers what it was scripted to, not what the prompt argues.
+
+Send a reason only beside the road it was written for (`whyForRoad`, `src/walk/model.ts`), and say whose
+road another one is. Where a prompt carries an argument, prove it once against a real model, read what
+comes back by hand before anything runs it, and re-drive the same inputs for nothing afterwards (a
+replay of the reply cache) to show which questions a fix changed.
+
+## A real repository's plan is not in topological order (T-22, 2026-11-10)
+
+Mode A's plans list every step after the steps it depends on, so T-17's "downstream of D" was one
+forward pass over the plan in order. repo-tour's plans for a real repository do not: it orders by
+chapter, then file, then symbol, and breaks an import cycle by listing a file before a file it imports.
+The forward pass then missed a dependent, so a kept step stood on a removed one and a walked one went
+unnamed (T-22's code review, MF2). Compute reachability along the edges (`downstreamOf` walks them
+backwards from the decision), never from the order the steps happen to come in; on a plan that is in
+order the two give the same set, so Mode A could not have shown the difference.
+
+## A symbol step shares its file's key (T-22, 2026-11-10)
+
+In a Mode B plan a `symbol` step's `target.file` is its file's path, the same as the file step's. A map
+from file to step built over every step keeps whichever came last, which is a symbol: the live run's new
+`lookup.js` was made to depend on one variable of `lookup-data.js` instead of that file's own step.
+Mode B's edges run file to file, so build any file-keyed map from `file` and `shape` steps only, and
+find a symbol's file through its file step (`fileStepOf`, `src/derive/diverge.ts`).
+
 ## In a webview, a linked stylesheet holds the script, and a late font moves what a reveal measured (T-40, 2026-11-10)
 
 T-40 added VS Code's icon font to every webview. Its unit tests, probe, mutants and its own real-host
