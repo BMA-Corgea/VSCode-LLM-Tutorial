@@ -223,8 +223,10 @@ async function verifyOne(editor) {
     ...isolation, '--no-sandbox', '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes',
     '--disable-gpu', '--disable-updates', '--new-window', workspace,
   ]);
-  // T-131: the editor's own stdout and stderr, kept (the last 64 KiB of each) for the failures below. An editor that
-  // dies at start (its sandbox, the display, a missing library) may say why only there, before it writes any log.
+  // T-131: the launch command's own stdout and stderr, kept (the last 64 KiB of each) for the failures below: xvfb-run,
+  // and the editor's `code` command, which starts the editor itself detached and returns. A launch that fails at once
+  // (a missing library, a display that will not start, a refused flag) says why there, before any log is written. The
+  // editor's own output does not come this way (the command starts it with its output ignored); its logs say the rest.
   const child = spawn(runBin, runArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   const editorOutput = captureOutput(child);
 
@@ -343,15 +345,15 @@ function captureOutput(child, keep = 64 * 1024) {
   };
 }
 
-/** T-131: what the editor wrote to its stdout and stderr, after its logs, on the same failures. It only prints. */
+/** T-131: what the launch command wrote to its stdout and stderr, after the editor's logs, on the same failures. It only prints. */
 function printEditorOutput(editorOutput, { lines = 40, maxLine = 400 } = {}) {
   for (const name of ['stdout', 'stderr']) {
     const tail = editorOutput.kept[name].split('\n').filter((l) => l.trim() !== '').slice(-lines);
     if (tail.length === 0) {
-      warn(`the editor wrote nothing to its ${name}`);
+      warn(`the launch command (xvfb-run, the editor's code command) wrote nothing to its ${name}`);
       continue;
     }
-    warn(`what the editor wrote to its ${name} (the last ${tail.length} line${tail.length === 1 ? '' : 's'})`);
+    warn(`what the launch command (xvfb-run, the editor's code command) wrote to its ${name} (the last ${tail.length} line${tail.length === 1 ? '' : 's'})`);
     for (const l of tail) console.log(`         ${l.length > maxLine ? `${l.slice(0, maxLine)}…` : l}`);
   }
 }
