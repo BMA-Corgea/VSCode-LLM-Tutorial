@@ -277,7 +277,10 @@ suite('T-72: a .gitattributes repo-tour would read without end', () => {
     const target = tmp('t72-url-target-');
     const outcome = await buildFromRequest(request('https://github.com/someone/hostile', target), context({ globalStorageRoot: storage, git }));
     assert.deepEqual(calls.map((c) => c[0]), ['clone'], 'the fixture has to take the URL path, through a clone');
-    assert.equal(outcome.reason, LINK_REFUSAL, "the pre-flight did not check the clone: for a URL, the reference is the clone, not the URL");
+    assert.match(outcome.reason ?? '', /^\.gitattributes is a link, which repo-tour would follow/, "the pre-flight did not check the clone: for a URL, the reference is the clone, not the URL");
+    // Code review, finding 5: the clone is only ever fetched, so "remove it from the reference
+    // repository" would leave the learner refused for ever. The words name the way that works.
+    assert.equal(outcome.reason, '.gitattributes is a link, which repo-tour would follow: clone the repository yourself, remove it in your copy, and build from that folder');
     assert.equal(readMarker(target), null);
   });
 
@@ -303,6 +306,8 @@ suite('T-72: a .gitattributes repo-tour would read without end', () => {
     assert.equal(gitAttributesRefusal(root, { file: '/r/packages/inner/.gitattributes', why: 'link' }),
       'packages/inner/.gitattributes is a link, which repo-tour would follow: remove it from the reference repository, or build from a copy without it');
     assert.match(gitAttributesRefusal(root, { file: '/r/.gitattributes', why: 'not-a-file' }), /^\.gitattributes is not a regular file \(a pipe or a device\)/);
+    assert.equal(gitAttributesRefusal(root, { file: '/r/.gitattributes', why: 'too-large', bytes: 3 * 1024 * 1024 }, 'url'),
+      '.gitattributes is 3.0 MB, over the 1 MB a .gitattributes may be: clone the repository yourself, remove it in your copy, and build from that folder');
     assert.match(gitAttributesRefusal(root, { file: '/r/.gitattributes', why: 'too-large', bytes: 3 * 1024 * 1024 }),
       /^\.gitattributes is 3\.0 MB, over the 1 MB a \.gitattributes may be: remove it/);
     assert.match(gitAttributesRefusal(root, { file: '/r/.gitattributes', why: 'too-large', bytes: GITATTRIBUTES_MAX_BYTES + 1 }),

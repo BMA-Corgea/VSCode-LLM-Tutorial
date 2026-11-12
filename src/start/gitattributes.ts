@@ -122,7 +122,13 @@ async function hazardOf(file: string): Promise<GitAttributesHazard | null> {
  * end, but one to a small file is not, so the words do not say that every link is. The size is
  * rounded up, so the figure shown is never at or under the bound it is said to be over.
  */
-export function gitAttributesRefusal(root: string, hazard: GitAttributesHazard): string {
+/**
+ * The refusal's words. `from` is where the reference came from (T-72 code review, finding 5). For a
+ * GitHub URL the reference is this extension's own clone, which a later build only ever `fetch`es, so
+ * its files never change. Removing the file upstream would leave the learner refused for ever, so
+ * those words name the way that works instead.
+ */
+export function gitAttributesRefusal(root: string, hazard: GitAttributesHazard, from: 'folder' | 'url' = 'folder'): string {
   const where = path.relative(root, hazard.file).split(path.sep).join('/') || '.gitattributes';
   const mb = (bytes: number): string => (Math.ceil((bytes / (1024 * 1024)) * 10) / 10).toFixed(1);
   const what = hazard.why === 'link'
@@ -130,5 +136,7 @@ export function gitAttributesRefusal(root: string, hazard: GitAttributesHazard):
     : hazard.why === 'not-a-file'
       ? 'is not a regular file (a pipe or a device), which repo-tour might read without end'
       : `is ${mb(hazard.bytes ?? 0)} MB, over the ${GITATTRIBUTES_MAX_BYTES / (1024 * 1024)} MB a .gitattributes may be`;
-  return `${where} ${what}: remove it from the reference repository, or build from a copy without it`;
+  return from === 'url'
+    ? `${where} ${what}: clone the repository yourself, remove it in your copy, and build from that folder`
+    : `${where} ${what}: remove it from the reference repository, or build from a copy without it`;
 }

@@ -636,7 +636,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext): Promise<B
     // this file safe, and a marker left here asks again on every reload and leaves the target
     // "not empty" for the next press (T-72 code review, finding 1).
     deleteMarker(target);
-    return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard) };
+    return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard, parseGithubUrl(request.repo) ? 'url' : 'folder') };
   }
 
   runPhase(target, marker, 'digest', ctx);
