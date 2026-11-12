@@ -398,9 +398,15 @@ class El {
   scrollIntoView(opts: unknown): void { this.scrolled.push(opts); }
 }
 
-function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = [], scrollY?: number) {
+/** An element the page can measure (T-83): its top, in the panel, as `getBoundingClientRect` reports it. */
+class LaidOutEl extends El {
+  constructor(public top: number) { super(); }
+  getBoundingClientRect(): { top: number; bottom: number; height: number } { return { top: this.top, bottom: this.top + 178, height: 178 }; }
+}
+
+function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = [], scrollY?: number, layout: Record<string, number> = {}) {
   const elements = new Map<string, El>();
-  for (const m of html.matchAll(/\sid="([^"]+)"/g)) elements.set(m[1]!, new El());
+  for (const m of html.matchAll(/\sid="([^"]+)"/g)) elements.set(m[1]!, m[1]! in layout ? new LaidOutEl(layout[m[1]!]!) : new El());
   const stepId = /<main id="step-main" data-step-id="([^"]*)"/.exec(html)?.[1];
   assert.ok(stepId !== undefined);
   elements.get('step-main')!.setAttribute('data-step-id', stepId);
@@ -430,7 +436,9 @@ function runStepScript(html: string, saved?: unknown, codeBlocks: El[] = [], scr
   const send = (data: unknown) => { for (const fn of windowListeners.get('message') ?? []) fn({ data }); };
   const scroll = (y: number) => { fakeWindow.scrollY = y; for (const fn of windowListeners.get('scroll') ?? []) fn({}); };
   const setScrollY = (y: number) => { fakeWindow.scrollY = y; };
-  return { elements, posted, states, windowCalls, send, scroll, setScrollY };
+  /** A learner's own move (T-83): a wheel, a touch, a key or a pointer press, on the window. */
+  const fire = (type: string) => { for (const fn of windowListeners.get(type) ?? []) fn({}); };
+  return { elements, posted, states, windowCalls, send, scroll, setScrollY, fire };
 }
 
 const CHECK_PASS: Partial<StepViewState> = {
@@ -630,6 +638,73 @@ suite('T-16 F-01 — a press\'s outcome is brought into view after the repaint i
 
 // ── F-07 ─────────────────────────────────────────────────────────────────────────────────────
 
+
+// ── T-83: the repaint that follows the same press ─────────────────────────────────────────────
+
+suite('T-83 — a repaint that follows the same press keeps its outcome where the reveal left it', () => {
+  const STEP = 'st-2-file-parse';
+  const page = (): string => renderStepHtml(stateAt(STEP, CHECK_PASS), FAKE_SKINS);
+  const last = (dom: ReturnType<typeof runStepScript>): Record<string, unknown> => dom.states[dom.states.length - 1] as Record<string, unknown>;
+  const held = (top: number, at = Date.now()) => ({ stepId: STEP, note: '', draft: '', y: 4603, hold: { key: 'check', top, at } });
+
+  test('the reveal records where it left the outcome', () => {
+    const at = Date.now();
+    const dom = runStepScript(page(), { stepId: STEP, note: '', draft: '', y: 4327, reveal: 'check', revealAt: at }, [], 4603, { 'outcome-check': 128 });
+    assert.deepEqual(last(dom).hold, { key: 'check', top: 128, at }, 'nothing remembers where the verdict sat, so the next repaint cannot put it back');
+    assert.equal(last(dom).reveal, undefined, 'the reveal itself is still one-shot');
+  });
+
+  test('lines the next repaint draws above it (a refused commit) are scrolled past: the outcome stays where it sat', () => {
+    // CI's numbers: the verdict revealed at 128, then the refused commit's note, 70 px, drawn above it.
+    const dom = runStepScript(page(), held(128), [], 4603, { 'outcome-check': 198 });
+    assert.deepEqual(dom.windowCalls, [[0, 4603], [0, 4673]], 'the verdict was left 70 px lower, where the lines drawn above it pushed it');
+    assert.equal((last(dom).hold as { top?: number } | undefined)?.top, 128, 'a further repaint of the same press must find the hold too');
+  });
+
+  test('an outcome taller than the panel keeps its top where the reveal left it, in view', () => {
+    // A too-tall outcome is revealed with its top at the panel's (block nearest, scroll-margin 12).
+    const dom = runStepScript(page(), held(12), [], 4603, { 'outcome-check': 82 });
+    assert.deepEqual(dom.windowCalls, [[0, 4603], [0, 4673]], "a too-tall outcome's top was left 70 px lower, where the lines drawn above it pushed it");
+  });
+
+  test('a repaint that moves nothing above the outcome moves nothing', () => {
+    const dom = runStepScript(page(), held(128), [], 4603, { 'outcome-check': 128 });
+    assert.deepEqual(dom.windowCalls, [[0, 4603]], 'the page moved although nothing above the outcome did');
+  });
+
+  test("the learner's own move ends the hold, so a later repaint keeps their scroll position", () => {
+    for (const move of ['wheel', 'touchstart', 'keydown', 'pointerdown']) {
+      const dom = runStepScript(page(), held(128), [], 4603, { 'outcome-check': 128 });
+      assert.ok(last(dom).hold, `${move}: no hold to end`);
+      dom.fire(move);
+      assert.equal(last(dom).hold, undefined, `${move}: the hold outlived the learner's own move, so a later repaint would pull the page back`);
+    }
+  });
+
+  test('a new press replaces the hold, and a note that answers a press without a repaint drops it', () => {
+    const pressed = runStepScript(page(), held(128), [], 4603, { 'outcome-check': 128 });
+    pressed.elements.get('btn-check')!.dispatch('click');
+    assert.equal(last(pressed).hold, undefined, "a new press kept the last press's hold");
+    assert.equal(last(pressed).reveal, 'check');
+    const noted = runStepScript(page(), held(128), [], 4603, { 'outcome-check': 128 });
+    noted.send({ type: 'step:note', payload: { note: 'There is nothing to ask yet — type a question first.' } });
+    assert.equal(last(noted).hold, undefined, 'a note that answered a press kept the old hold, so the next repaint would pull the page back to the old outcome');
+  });
+
+  test('a hold past the reveal lifetime, saved on another step, naming no known outcome, or with no number for a top, moves nothing', () => {
+    const cases: Array<{ stepId: string; hold: unknown }> = [
+      { stepId: STEP, hold: { key: 'check', top: 128, at: Date.now() - 60_000 } },
+      { stepId: 'st-1-shape-src', hold: { key: 'check', top: 128, at: Date.now() } },
+      { stepId: STEP, hold: { key: '__proto__', top: 128, at: Date.now() } },
+      { stepId: STEP, hold: { key: 'check', top: '128', at: Date.now() } },
+      { stepId: STEP, hold: 'check' },
+    ];
+    for (const c of cases) {
+      const dom = runStepScript(page(), { note: '', draft: '', y: 4603, ...c }, [], 4603, { 'outcome-check': 198 });
+      assert.deepEqual(dom.windowCalls, c.stepId === STEP ? [[0, 4603]] : [], `${JSON.stringify(c)}: the page moved`);
+    }
+  });
+});
 suite('T-16 F-07 — under System the webviews use the editor\'s own fonts', () => {
   test('the bridge defines --mono as the editor font and sets the workbench font on body', () => {
     const css = cssOf(renderStepHtml(stateAt('st-1-shape-src'), FAKE_SKINS));
