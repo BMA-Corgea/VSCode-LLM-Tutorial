@@ -242,9 +242,11 @@ async function verifyOne(editor) {
   if (!logPath) {
     bad('no exthost.log was produced - the editor did not get far enough to say anything');
     failures.push('exthost-log');
+    printEditorLogTails(userDataDir);
   } else if (!logText.includes(activationLine)) {
     bad(`exthost.log never logged "${activationLine}"`);
     failures.push('activation');
+    printEditorLogTails(userDataDir);
   } else {
     ok(`exthost.log: ${activationLine}`);
 
@@ -307,6 +309,46 @@ async function stopEditor(child, profile) {
   const stubborn = processesUsingProfile(profile);
   if (stubborn.length > 0) warn(`${stubborn.length} editor process(es) would not stop: ${stubborn.join(', ')}`);
   return stubborn.length === 0;
+}
+
+/**
+ * T-131: when the editor never said what this check waits for, what it DID say. The tail of every log the editor
+ * wrote for this run (main.log, renderer*.log, sharedprocess.log, the extension host's own, whatever its logs folder
+ * holds), each under its own name, so a failure on a machine nobody can log into (GitHub's runner) says why. It only
+ * prints: what passes and what fails is decided above it, and nothing here can change that.
+ */
+function printEditorLogTails(userDataDir, { lines = 40, maxFiles = 30, maxLine = 400 } = {}) {
+  const logsRoot = path.join(userDataDir, 'logs');
+  if (!fs.existsSync(logsRoot)) {
+    warn(`the editor wrote no logs folder: ${logsRoot}`);
+    return;
+  }
+  const files = [];
+  const walk = (dir, depth) => {
+    if (depth > 6) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, depth + 1);
+      else if (entry.isFile() && entry.name.endsWith('.log')) files.push(full);
+    }
+  };
+  walk(logsRoot, 0);
+  if (files.length === 0) {
+    warn(`the editor's logs folder holds no log: ${logsRoot}`);
+    return;
+  }
+  files.sort();
+  warn(`what the editor logged (${files.length} file${files.length === 1 ? '' : 's'} under ${logsRoot}; the last ${lines} lines of each)`);
+  for (const file of files.slice(0, maxFiles)) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch (err) { text = `(could not be read: ${err instanceof Error ? err.message : String(err)})`; }
+    const tail = text.split('\n').filter((l) => l.trim() !== '').slice(-lines);
+    console.log(`      -- ${path.relative(logsRoot, file)} (${tail.length === 0 ? 'empty' : `last ${tail.length} line${tail.length === 1 ? '' : 's'}`})`);
+    for (const l of tail) console.log(`         ${l.length > maxLine ? `${l.slice(0, maxLine)}…` : l}`);
+  }
+  if (files.length > maxFiles) warn(`and ${files.length - maxFiles} more log file(s) not shown`);
 }
 
 function findExthostLog(userDataDir) {
