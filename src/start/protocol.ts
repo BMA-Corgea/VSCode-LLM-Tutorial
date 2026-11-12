@@ -34,7 +34,7 @@
  * script) for zero flash; the host's only job there is to persist the choice.
  */
 
-import { DIALS, validateRequest, type BuildRequest, type Dial, type ValidationResult } from './request.js';
+import { DIALS, normaliseRequest, validateRequest, type BuildRequest, type Dial, type ValidationResult } from './request.js';
 
 export interface PanelState {
   request: BuildRequest;
@@ -66,10 +66,22 @@ export interface PanelState {
    * pressed.
    */
   ended?: BuildEnding;
+  /**
+   * How many builds in a row have FAILED (T-71). A build that fails the same way twice, as a
+   * language refusal does, used to leave the screen after the second press exactly as it was before
+   * it: the same note, the same reason. The count is in the note's words, so each press changes
+   * them. Reset by an edit, a folder pick, and any other ending.
+   */
+  failedInARow?: number;
 }
 
 /** How a build that the start screen started came to an end — what its note says afterwards. */
 export type BuildEnding = 'built' | 'failed' | 'cancelled';
+
+/** The failure count after a build ends this way: one more for a failure, none after anything else. */
+export function failedInARowAfter(previous: number | undefined, ended: BuildEnding): number {
+  return ended === 'failed' ? (previous ?? 0) + 1 : 0;
+}
 
 export type PickTarget = 'repo' | 'target';
 
@@ -98,7 +110,7 @@ export type OutboundMessage =
   // button has to come back — and the note says how it ended, because a button that silently
   // re-enables after a failure looks exactly like one that was never pressed.
   // Posted by `StartPanel.buildFinished` from `reportOutcome`.
-  | { type: 'form:idle'; payload: { ended: BuildEnding } }
+  | { type: 'form:idle'; payload: { ended: BuildEnding; inARow?: number } }
   | { type: 'field:set'; payload: { field: PickTarget; value: string; problems: ValidationResult['problems'] } };
 
 export interface StartEffects {
@@ -123,7 +135,7 @@ export async function handleStartMessage(
   switch (message.type) {
     case 'form:changed': {
       const { problems } = validateRequest(message.payload.request);
-      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined };
+      const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined, failedInARow: 0 };
       return { state: next, post: { type: 'form:problems', payload: { problems } } };
     }
     // T-15: split from `form:changed`, which it used to share a case with. The old shared
@@ -138,7 +150,8 @@ export async function handleStartMessage(
       const { ok, problems } = validateRequest(message.payload.request);
       const next: PanelState = { ...state, request: message.payload.request, problems, refusedInARow: 0, ended: undefined };
       if (ok) {
-        effects.submit(message.payload.request);
+        // What was validated is what is built: trimmed, the folder in one spelling (T-71 re-review R4).
+        effects.submit(normaliseRequest(message.payload.request));
         next.building = true;
         // Said BEFORE the build's own progress notification, and on the surface the eye is
         // actually on. `runBuild` awaits a `workspaceState.update` and only then raises a
@@ -163,7 +176,7 @@ export async function handleStartMessage(
       if (picked === undefined) return { state }; // cancelled — nothing changed
       const request: BuildRequest = { ...state.request, [field]: picked };
       const { problems } = validateRequest(request);
-      return { state: { ...state, request, problems, refusedInARow: 0, ended: undefined }, post: { type: 'field:set', payload: { field, value: picked, problems } } };
+      return { state: { ...state, request, problems, refusedInARow: 0, ended: undefined, failedInARow: 0 }, post: { type: 'field:set', payload: { field, value: picked, problems } } };
     }
     case 'skin:set': {
       effects.persistSkin(message.payload.skin);
