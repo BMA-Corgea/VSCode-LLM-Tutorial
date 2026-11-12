@@ -513,23 +513,35 @@ suite('Cancel while a phase is running (T-30 AC4, AC5, AC6)', function () {
   });
 
   test('the digest never reads a cache committed in the reference: not even a file it would follow out of the tree (security review 1, 4)', async () => {
-    const repo = mixedFixture();
+    // Two plants, each a `.repo-tour/inventory.json` committed in the reference: a plain file, and a
+    // link to a file outside the tree. The plain one is the positive control: without being told
+    // otherwise, repo-tour reads it. The link is no longer followed by repo-tour itself since its own
+    // T-63 (2026-11-11), so it can no longer be the control; it is still asked about below, and still
+    // read by a repo-tour from before T-63 (T-83: the control that stopped proving anything there).
+    type Digested = { manifest: { incremental: unknown }; plan: { deleted: string[] } };
+    const plain = mixedFixture();
+    fs.mkdirSync(path.join(plain, '.repo-tour'));
+    fs.writeFileSync(path.join(plain, '.repo-tour', 'inventory.json'), JSON.stringify([{ path: 'FROM-A-COMMITTED-CACHE', sha256: 'x' }]));
+    const unprotected = await realCore.digest(plain, { write: false }) as unknown as Digested;
+    assert.ok(unprotected.manifest.incremental, 'the planted file was not read at all: this test proves nothing');
+    assert.deepEqual(unprotected.plan.deleted, ['FROM-A-COMMITTED-CACHE']);
+
+    const linked = mixedFixture();
     const outside = tmp('t30-outside-');
     fs.writeFileSync(path.join(outside, 'inventory.json'), JSON.stringify([{ path: 'FROM-OUTSIDE-THE-REPOSITORY', sha256: 'x' }]));
-    fs.mkdirSync(path.join(repo, '.repo-tour'));
-    fs.symlinkSync(path.join(outside, 'inventory.json'), path.join(repo, '.repo-tour', 'inventory.json'));
-    // The positive control: without being told otherwise, repo-tour does read it.
-    const unprotected = await realCore.digest(repo, { write: false }) as unknown as { manifest: { incremental: unknown }; plan: { deleted: string[] } };
-    assert.ok(unprotected.manifest.incremental, 'the planted file was not read at all: this test proves nothing');
-    assert.deepEqual(unprotected.plan.deleted, ['FROM-OUTSIDE-THE-REPOSITORY']);
+    fs.mkdirSync(path.join(linked, '.repo-tour'));
+    fs.symlinkSync(path.join(outside, 'inventory.json'), path.join(linked, '.repo-tour', 'inventory.json'));
 
-    let seen: DigestResultLike | undefined;
-    const inWorker = offThreadCore(harness().deps);
-    const spying: BuildCore = { ...inWorker, digest: async (...args) => { seen = await inWorker.digest(...args); return seen; } };
-    const target = tmp('t30-target-');
-    const outcome = await buildFromRequest(requestFor(repo, target), contextFor(spying));
-    assert.equal(outcome.ok, true, outcome.reason);
-    assert.equal((seen as unknown as { manifest: { incremental: unknown } }).manifest.incremental, null);
+    for (const repo of [plain, linked]) {
+      let seen: DigestResultLike | undefined;
+      const inWorker = offThreadCore(harness().deps);
+      const spying: BuildCore = { ...inWorker, digest: async (...args) => { seen = await inWorker.digest(...args); return seen; } };
+      const target = tmp('t30-target-');
+      const outcome = await buildFromRequest(requestFor(repo, target), contextFor(spying));
+      assert.equal(outcome.ok, true, outcome.reason);
+      assert.equal((seen as unknown as { manifest: { incremental: unknown } }).manifest.incremental, null,
+        `${repo === plain ? 'a committed cache' : 'a committed link out of the tree'} was read by the build's digest`);
+    }
   });
 
   test('a .repo-tour that is a symlink: the clean-up does not remove a folder through it (security review 5)', async () => {

@@ -25,6 +25,7 @@
  */
 
 import * as assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,7 +46,7 @@ interface Box { top: number; bottom: number; height: number; fullyInView: boolea
 interface NewestTurn { top: number; bottom: number; words: string }
 interface WaitingLine { visible: boolean; insideTheBox: boolean; fullyInView: boolean }
 /** `y` is read only to go into a failure's message, where it says where the panel had got to. */
-interface Reading { y: number; panelHeight: number; pageHeight: number; outcome: Box | null; summary: string | null; newestTurn: NewestTurn | null; thinking: WaitingLine | null; step: string | null }
+interface Reading { y: number; panelHeight: number; pageHeight: number; outcome: Box | null; summary: string | null; newestTurn: NewestTurn | null; thinking: WaitingLine | null; step: string | null; writeNote: string | null; page: number }
 
 /** What is on screen, from inside the page: where it is scrolled to, and where the outcome is. */
 const READ = (outcomeId: string): string => `(() => {
@@ -81,6 +82,9 @@ const READ = (outcomeId: string): string => `(() => {
       fullyInView: within(waiting.getBoundingClientRect()),
     } : null,
     step: (document.getElementById('step-main') || { getAttribute: () => null }).getAttribute('data-step-id'),
+    writeNote: document.getElementById('write-note') ? words(document.getElementById('write-note')) : null,
+    // Which document this is: every repaint is a new one (T-83).
+    page: Math.round(performance.timeOrigin),
   };
 })()`;
 
@@ -136,13 +140,25 @@ function assertTallPage(reading: Reading): void {
 suite('T-42: the real panel keeps the outcome of a press in view', function () {
   this.timeout(120_000);
 
-  async function drive(body: (d: Drive) => Promise<void>): Promise<void> {
+  /** `refuseTheCommit` (T-83): the walk's git is a machine's with no identity, as GitHub's runner is, so the
+   *  commit a passing check makes is refused on any machine. Each call is also 0.3 s slower, so the refusal is
+   *  drawn by a repaint of its own after the verdict's, as it is on CI, and never merged into the verdict's. */
+  async function drive(body: (d: Drive) => Promise<void>, options: { refuseTheCommit?: boolean } = {}): Promise<void> {
     const ext = vscode.extensions.getExtension<ExtensionApi>('bma-corgea.build-tutorials');
     assert.ok(ext);
     const api = await ext.activate();
     const screen = await Screen.open(api._context);
     const dirs: string[] = [];
+    let restorePath: string | undefined;
     try {
+      if (options.refuseTheCommit) {
+        const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+        const shim = fs.mkdtempSync(path.join(os.tmpdir(), 't83-git-'));
+        dirs.push(shim);
+        fs.writeFileSync(path.join(shim, 'git'), `#!/bin/sh\nsleep 0.3\nGIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 exec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+        restorePath = process.env.PATH;
+        process.env.PATH = `${shim}${path.delimiter}${process.env.PATH ?? ''}`;
+      }
       await api._walk.openAt(tallTutorial(dirs));
       await vscode.commands.executeCommand('buildTutorials.step.focus');
       const session = api._walk.session();
@@ -200,6 +216,7 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
         modelReplies: (how) => { reply = how; },
       });
     } finally {
+      if (restorePath !== undefined) process.env.PATH = restorePath;
       api._walk.useTutorCore(undefined);
       api._walk.session()?.dispose();
       screen.close();
@@ -222,6 +239,28 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
     assert.ok(after.outcome?.fullyInView, `the check's verdict is not fully in the panel: ${JSON.stringify(after)}`);
     assert.ok((after.summary ?? '') !== '', `the verdict does not say what the check found: ${JSON.stringify(after)}`);
   }));
+
+  // T-83: CI's one red. GitHub's runner has no git identity, so the commit a passing check makes is refused,
+  // and the refusal is drawn by a SECOND repaint, about 0.3 s after the verdict's, as the write note under the
+  // dial: above the verdict. The reveal had been spent on the first repaint, so the verdict slid 70 px down,
+  // out of the panel. Waited for until that second repaint is on screen, so it cannot pass on the first.
+  test("T-83: Check my work — the verdict stays fully in view when the commit after it is refused (no git identity, as on GitHub's runner)", function () {
+    if (process.platform === 'win32') this.skip(); // the slowed git is a sh script
+    return drive(async ({ atButton, click, whenShown }) => {
+    const before = await atButton('btn-check', 'outcome-check');
+    assertTallPage(before);
+    assert.equal(before.outcome, null, 'there is no verdict before the first check');
+
+    await click('btn-check');
+    const verdict = (r: Reading): boolean => r.outcome?.words.toLowerCase().startsWith(CHECK_HEADING.toLowerCase()) === true;
+    const first = await whenShown('outcome-check', verdict, 'the verdict');
+    const after = await whenShown('outcome-check', (r) => verdict(r) && (r.writeNote ?? '').includes('was not committed'), 'the verdict, with the refused commit drawn above it');
+    assert.notEqual(after.page, first.page, `the refused commit was drawn in the verdict's own repaint, so this run did not test a repaint after it: ${JSON.stringify({ first, after })}`);
+
+    assertTheOutcomeCanFit(after);
+    assert.ok(after.outcome?.fullyInView, `the check's verdict slid out of the panel when the refused commit was drawn above it: ${JSON.stringify(after)}`);
+    }, { refuseTheCommit: true });
+  });
 
   // The answer is held back on purpose. A real ask paints at least twice — waiting, then the answer —
   // and the reveal is one-shot, so the first paint spends it; a stand-in that answered at once
