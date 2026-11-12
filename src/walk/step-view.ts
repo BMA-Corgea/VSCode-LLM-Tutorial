@@ -172,10 +172,11 @@ import type { CheckOutcome } from '../dial/check.js';
 import { type SkinsModule } from '../start/view.js';
 import { DIALS, type Dial } from '../start/request.js';
 import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
-import { renderPage } from '../webview/page.js';
+import { codicon } from '../webview/codicons.js';
+import { renderPage, type PageAssets } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
-import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, optionsTable, stepHasDependents, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
+import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, optionsTable, planEnds, stepHasDependents, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
 import { DERIVED_CODE_MISSING_MESSAGE } from './reference.js';
 
@@ -435,6 +436,15 @@ export const TUTOR_TURN_LABEL = 'Tutor';
  * point. So it is named, and it is styled apart — see `.tutor-turn.turn-note`.
  */
 export const NOTE_TURN_LABEL = 'This tutorial';
+
+/**
+ * T-51: why *Previous* or *Next* is disabled, said under the action row (the narrator's own pattern, its
+ * `FIRST_STOP_HINT`/`LAST_STOP_HINT`): a control that cannot act is disabled WITH its reason, never left
+ * enabled to do nothing (T-15's rule). Exported so a test asserts the words the page uses.
+ */
+export const FIRST_STEP_HINT = 'This is the first step of the plan — there is nothing before it.';
+export const LAST_STEP_HINT = 'This is the last step of the plan — there is nothing after it.';
+export const ONLY_STEP_HINT = 'This is the only step in the plan — there is nothing before or after it.';
 
 /** T-7: the second button beside *Ask*, its waiting line, and the way out. Exported like every
  *  other visible string here — one home, asserted rather than copied. */
@@ -792,10 +802,19 @@ main, section, .option { min-width:0; }
 .tutor-foot { margin:0 0 12px; }
 /* With Forget gone from the row, the detour button sat flush against Ask. */
 .detour { margin-top:8px; }
+/* T-51: why Previous or Next is disabled, under the row, in the asides' muted ink (the narrator's own pattern). */
+.ends-hint { color:var(--muted); font-size:12px; margin:0 0 8px; overflow-wrap:anywhere; }
+/* T-51 review F1: the base sheet keeps a disabled .btn's look under the pointer but not a disabled .btn.primary's;
+   Next is the first primary button this page disables. */
+.btn.primary[disabled]:hover { background:var(--accent-solid); border-color:var(--accent-solid-edge); }
 /* F-11: where in the plan this step sits. */
 .step-count { color:var(--muted); font-size:12px; margin:0 0 4px; }
 /* F-10: keyboard focus on a code block that scrolls sideways (the script adds the tabindex). */
 .turn-text pre.tutor-code:focus-visible { outline:1px solid var(--focus); outline-offset:2px; }
+/* T-40: the verdict's mark is VS Code's own pass or error icon, in the status colour of T-16's rule
+   beside it (VS Code's testing colours under System, the skin's own under a named skin). */
+.check-summary.check-pass .codicon { color:var(--status-ok); }
+.check-summary.check-fail .codicon { color:var(--status-bad); }
 `;
 
 /**
@@ -1032,7 +1051,8 @@ function checkHtml(outcome: CheckOutcome): string {
   const report = outcome.report;
   const summary = planText(outcome.summary);
   const ok = report.ok === true;
-  const summaryHtml = `<p class="check-summary ${ok ? 'check-pass' : 'check-fail'}">${escapeHtml(summary)}</p>`;
+  // T-40: VS Code's own marks for a passed and a failed test (the Testing view's), before the words.
+  const summaryHtml = `<p class="check-summary ${ok ? 'check-pass' : 'check-fail'}">${codicon(ok ? 'pass' : 'error', 'lead')}${escapeHtml(summary)}</p>`;
 
   // A number, checked as one: `parseErrors` crosses the same duck-typed boundary as the rows,
   // and `NaN > 0` is false while `'3' > 0` is true — neither is an answer worth acting on.
@@ -1304,7 +1324,7 @@ function tutorHtml(state: StepViewState): string {
     + ` placeholder="${escapeAttr(ASK_PLACEHOLDER)}"${accepted}${thinking ? ' disabled' : ''}></textarea>`;
 
   const controls = thinking
-    ? `<span class="tutor-thinking" id="tutor-thinking">${escapeHtml(waitingMessage(tutor?.stage))}</span>`
+    ? `<span class="tutor-thinking" id="tutor-thinking">${codicon('loading', 'lead', { spin: true })}${escapeHtml(waitingMessage(tutor?.stage))}</span>`
       + `<button type="button" class="btn" id="btn-tutor-cancel">${escapeHtml(CANCEL_BUTTON_LABEL)}</button>`
     : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
 
@@ -1388,7 +1408,7 @@ function detourHtml(state: StepViewState): string {
   if (detour?.generating === true) {
     return '<div class="detour" id="outcome-detour">'
       + note
-      + `<div class="tutor-controls"><span class="detour-waiting" id="detour-waiting">${escapeHtml(DETOUR_WAITING_MESSAGE)}</span>`
+      + `<div class="tutor-controls"><span class="detour-waiting" id="detour-waiting">${codicon('loading', 'lead', { spin: true })}${escapeHtml(DETOUR_WAITING_MESSAGE)}</span>`
       + `<button type="button" class="btn" id="btn-tutor-cancel-detour">${escapeHtml(CANCEL_BUTTON_LABEL)}</button></div>`
       + '</div>';
   }
@@ -1526,15 +1546,29 @@ function waitingMessage(stage: unknown): string {
  * `stepRenderKey`, so a plan whose length changes repaints.
  */
 function stepCountText(state: StepViewState): string {
-  const steps = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+  // T-51 review F2: in the plan's ORDER (ordinal), which is the order Previous and Next move in and the
+  // order the ends are decided by. Listed order disagreed with them on a plan listed out of order.
+  const listed = Array.isArray(state.plan.steps) ? state.plan.steps : [];
+  const steps = [...listed].sort((a, b) => (a?.ordinal ?? 0) - (b?.ordinal ?? 0));
   const index = steps.findIndex((s) => s?.id === state.step.id);
   return index >= 0 ? `Step ${index + 1} of ${steps.length}` : '';
+}
+
+/** T-51: why a move is disabled, or `''` when neither end is reached. */
+function endsHintText(ends: { atFirst: boolean; atLast: boolean }): string {
+  if (ends.atFirst && ends.atLast) return ONLY_STEP_HINT;
+  if (ends.atFirst) return FIRST_STEP_HINT;
+  if (ends.atLast) return LAST_STEP_HINT;
+  return '';
 }
 
 function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   const step = state.step;
   const currentDial: Dial = resolvedDial(state.dial);
   const count = stepCountText(state);
+  // T-51: a move the walk cannot make is not offered. Decided by the functions the press itself uses.
+  const ends = planEnds(state.plan, state.progress);
+  const endsHint = endsHintText(ends);
 
   return `
 <main id="step-main" data-step-id="${escapeAttr(planId(step.id))}">
@@ -1566,14 +1600,15 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   ${writeNoteHtml(state.writeNote)}
 
   <div class="actions">
-    <button type="button" class="btn" id="btn-prev">Previous</button>
+    <button type="button" class="btn" id="btn-prev"${ends.atFirst ? ' disabled' : ''}>${codicon('arrow-left', 'lead')}Previous</button>
     <span class="open-wrap">
       <button type="button" class="btn" id="btn-open"${state.fileExists ? '' : ' disabled'}>Open the file</button>
       ${openFileHint(state.fileExists)}
     </span>
     <button type="button" class="btn" id="btn-check">Check my work</button>
-    <button type="button" class="btn primary" id="btn-next">Next</button>
+    <button type="button" class="btn primary" id="btn-next"${ends.atLast ? ' disabled' : ''}>Next${codicon('arrow-right', 'trail')}</button>
   </div>
+  ${endsHint ? `<p class="ends-hint" id="ends-hint">${escapeHtml(endsHint)}</p>` : ''}
 
   <div class="note" id="step-note">${escapeHtml(state.note ?? '')}</div>
 
@@ -1937,7 +1972,7 @@ export function stepScript(): string {
  * case is exactly the case where there isn't one — so it is deliberately unskinned, styled by
  * the bridge sheet's editor-token mapping alone, which needs nothing from repo-tour.
  */
-export function renderNoticeHtml(notice: string): string {
+export function renderNoticeHtml(notice: string, assets?: PageAssets): string {
   return renderPage({
     title: 'Build Tutorials: Step',
     coreCss: '',
@@ -1946,6 +1981,7 @@ export function renderNoticeHtml(notice: string): string {
     skin: 'system',
     body: `<main class="notice-only"><h1>${escapeHtml(NOTICE_HEADING)}</h1><p class="notice">${escapeHtml(notice)}</p></main>`,
     script: '',
+    assets,
   });
 }
 
@@ -2111,6 +2147,9 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
   return JSON.stringify([
     keyOf(id),
     stepCountText(state),
+    // T-51: which moves the page disables. Derived from the plan's order and the current step, which the
+    // count above mostly encodes; stated outright so the key cannot drift from the markup.
+    Object.values(planEnds(state.plan, state.progress)),
     keyOf(decision.question),
     keyOfList<OptionLike | undefined>(decision.options, MAX_OPTIONS_RENDERED, (option) => [
       keyOf(option?.id), keyOf(option?.label), keyOf(option?.consequence), option?.taken,
@@ -2207,7 +2246,12 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
   ]);
 }
 
-export function renderStepHtml(state: StepViewState, skins: SkinsModule): string {
+/**
+ * `assets` (T-40) is the icon font, which `./step-panel.ts` builds from its live webview. It is
+ * deliberately NOT part of `stepRenderKey`: it is a function of the webview, not of the state, the
+ * same on every paint of one view, and a view VS Code re-resolves is repainted unconditionally.
+ */
+export function renderStepHtml(state: StepViewState, skins: SkinsModule, assets?: PageAssets): string {
   return renderPage({
     title: 'Build Tutorials: Step',
     coreCss: skins.baseCss() + skins.alternateCss(),
@@ -2216,5 +2260,6 @@ export function renderStepHtml(state: StepViewState, skins: SkinsModule): string
     skin: state.skin,
     body: bodyHtml(state, skins),
     script: CLIENT_SCRIPT,
+    assets,
   });
 }

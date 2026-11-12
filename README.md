@@ -308,6 +308,14 @@ in it) and then the real `vscode-test` suite (a genuine `WebviewPanel`, a real t
 view, real editor decorations, the extension's activation). **Neither ever spends a token** —
 `cachedOnly: true` throughout, or an injected runner.
 
+Neither leaves anything in the machine's temp folder. Each run makes one private folder, points
+`TMPDIR` at it for everything it starts, and removes it when the run ends, after a failure or a
+Ctrl-C too (`scripts/test-tmp.mjs`). To look inside after a failure, set
+`BUILD_TUTORIALS_KEEP_TMP=failed` (or `=1` to keep every run's folder): the folder's path is
+printed. CI runs `node scripts/check-tmp.mjs -- npm test`, which fails naming anything a run
+leaves behind. Start the vscode-test hosts through `npm test` or `node scripts/run-tests.mjs`: a
+bare `npx vscode-test` cleans up when it exits, but not when it is stopped by a signal.
+
 `npm run package` does not simply zip the working tree. It packs the sibling repo-tour checkout
 into a tarball, installs it into a staging copy built from an explicit allowlist of files, and
 packages from there — then reads the finished archive back and **fails** if the core, either

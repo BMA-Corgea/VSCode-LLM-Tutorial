@@ -82,6 +82,7 @@
 
 import { EXPECTED_GRAMMARS } from '../doctor.js';
 import { BUILD_WORKER_RELATIVE } from '../start/worker-protocol.js';
+import { CODICONS_CODE_LICENCE, CODICONS_LICENCE, CODICON_FONT } from '../webview/codicons.js';
 
 /** A thing found in the archive that should not be there. */
 export interface Violation {
@@ -645,6 +646,27 @@ export const REQUIRED_CONTENT: readonly ContentRequirement[] = [
     matches: (rel: string) => rel === `node_modules/tree-sitter-wasms/out/tree-sitter-${lang}.wasm`,
     atLeast: 1,
   })),
+  // T-40: VS Code's own icons. The paths are `src/webview/codicons.ts`'s, the same ones the panels
+  // load, imported rather than copied (REQUIRED_GRAMMARS's lesson). A missing font is silent: every
+  // icon renders as nothing and every word is still there, so nothing on screen would say so.
+  {
+    id: 'codicon-font',
+    why: `${CODICON_FONT} is the font every webview draws VS Code's icons in; without it every icon is blank`,
+    matches: (rel) => rel === CODICON_FONT,
+    atLeast: 1,
+  },
+  {
+    id: 'codicons-licence',
+    why: `${CODICONS_LICENCE} is CC-BY-4.0, the icons' licence, which asks that it travel with the font`,
+    matches: (rel) => rel === CODICONS_LICENCE,
+    atLeast: 1,
+  },
+  {
+    id: 'codicons-code-licence',
+    why: `${CODICONS_CODE_LICENCE} is MIT, the licence of codicon.css, whose rules the pages' icon sheet is adapted from`,
+    matches: (rel) => rel === CODICONS_CODE_LICENCE,
+    atLeast: 1,
+  },
 ];
 
 export interface RequirementResult {

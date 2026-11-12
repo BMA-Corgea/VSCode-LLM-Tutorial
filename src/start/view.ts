@@ -13,7 +13,7 @@
  */
 
 import { bridgeCss, pickerHtml, type SkinRow } from '../skins.js';
-import { renderPage } from '../webview/page.js';
+import { renderPage, type PageAssets } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import { DIALS, type Dial } from './request.js';
 import type { BuildEnding, PanelState } from './protocol.js';
@@ -66,6 +66,14 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
    validation colour; "building" or "done" in the error colour reads as an error. */
 .submit-note { font-size:12px; margin-top:8px; min-height:14px; }
 .submit-note[data-kind="rejected"], .submit-note[data-kind="failed"] { color:var(--kw); }
+/* T-52: under System the form's text fields read like VS Code's own inputs, as the tutor box does (T-43).
+   The placeholder takes the theme's input.placeholderForeground (the browser's own grey measured 2.82:1 on
+   Dark Modern's input background); a focused field draws VS Code's 1 px focusBorder outline, inset so the
+   field does not grow, over the base sheet's border and halo. A named skin keeps its own. */
+:root:not([data-theme]) .field textarea::placeholder,
+:root:not([data-theme]) .field input[type=text]::placeholder { color:var(--vscode-input-placeholderForeground, var(--muted)); }
+:root:not([data-theme]) .field textarea:focus,
+:root:not([data-theme]) .field input[type=text]:focus { outline:1px solid var(--focus); outline-offset:-1px; }
 `;
 
 /** What the note says on a fresh render: a running build, else how the last one ended, else nothing. */
@@ -289,7 +297,12 @@ export function startScript(): string {
   return CLIENT_SCRIPT;
 }
 
-export function renderStartHtml(state: PanelState, skins: SkinsModule): string {
+/**
+ * `assets` (T-40): the icon font, from `./panel.ts`'s live webview. The form draws no icon today;
+ * it takes the font so the one shell every panel shares stays one shell, and a later icon here
+ * needs no new plumbing.
+ */
+export function renderStartHtml(state: PanelState, skins: SkinsModule, assets?: PageAssets): string {
   return renderPage({
     title: 'Build Tutorials: Start',
     coreCss: skins.baseCss() + skins.alternateCss(),
@@ -298,5 +311,6 @@ export function renderStartHtml(state: PanelState, skins: SkinsModule): string {
     skin: state.skin,
     body: bodyHtml(state, skins),
     script: CLIENT_SCRIPT,
+    assets,
   });
 }

@@ -28,7 +28,8 @@ import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
 import { readSkin } from './skins.js';
 import { StepDecorator } from './walk/editor.js';
 import { resolveInsideTarget } from './walk/paths.js';
-import { WalkSession, type Replanner, type WalkAdapters } from './walk/session.js';
+import { planEnds } from './walk/model.js';
+import { WalkSession, type Replanner, type WalkAdapters, type WalkView } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
 import { divergePlan } from './derive/diverge.js';
@@ -396,7 +397,7 @@ function isOpenableFile(target: string, absPath: string): boolean {
 function walkAdaptersFor(context: vscode.ExtensionContext, target: string): WalkAdapters {
   return {
     setTree: (view) => walkTree?.setView(view),
-    setPanel: (view) => walkPanel?.setView(view),
+    setPanel: (view) => { walkPanel?.setView(view); setEndsContext(view); },
     setStatus: (text) => walkStatus?.setText(text),
     revealEditor: (view) => { void walkDecorator?.revealStep(target, view.step); },
     clearEditor: () => walkDecorator?.clear(),
@@ -703,6 +704,7 @@ function registerWalk(context: vscode.ExtensionContext): void {
       back: () => { walkSession?.returnFromDetour(); },
     },
     () => walkSkins,
+    context.extensionUri,
   );
   walkStatus = new WalkStatusBar();
   walkPanel = new StepViewProvider(context, {
@@ -810,11 +812,53 @@ export interface ExtensionApi {
     useTutorCore: (core: TutorCore | undefined) => void;
     /** vscode-test only: what a press re-plans with; `undefined` restores the real one (`replannerFor`). */
     useReplanner: (replanner: Replanner | undefined) => void;
+    /** T-40: the detour narrator, so a test can read what it grants its webview (see `NarratorPanel.webview`). */
+    narrator: () => NarratorPanel | undefined;
   };
 }
 
 /** Exported so a test asserts the sentence the commands really use. */
 export const NO_WALK_OPEN_MESSAGE = 'Build Tutorials: no tutorial is open in this folder — run "Build Tutorials: Start" to build one.';
+
+/**
+ * T-51: what *Previous step* or *Next step* says when it runs at the end it cannot move past. In the UI it
+ * cannot (the title-bar arrow is disabled there and the palette leaves the command out, through its
+ * `enablement`), so this answers every other way in: a keybinding, another extension's `executeCommand`.
+ * From the second press at the same place it counts, because VS Code collapses a notification identical to
+ * one it is already showing, and an unchanged sentence would look like a press that was ignored.
+ */
+export function atEndMessage(end: 'first' | 'last', presses: number): string {
+  const where = end === 'first' ? 'the first step of the plan — there is nothing before it' : 'the last step of the plan — there is nothing after it';
+  return presses <= 1
+    ? `Build Tutorials: this is ${where}.`
+    : `Build Tutorials: still ${where} (pressed ${presses} times).`;
+}
+
+/**
+ * T-51: the two context keys the commands' `enablement` reads (`package.json`), kept current from every
+ * view the walk pushes, and both false when no walk is open, so that answer is unchanged. At an end VS
+ * Code greys out that end's title-bar arrow and leaves its command out of the palette.
+ */
+function setEndsContext(view: WalkView | undefined): void {
+  // Every move reaches here (a command, the panel's own buttons, a click in the tree), so this is where a
+  // move resets the end-of-plan count; a refresh of the same step does not.
+  if (!view || atEndPresses.step !== view.step.id) atEndPresses = { step: '', end: '', count: 0 };
+  const ends = view ? planEnds(view.plan, view.progress) : { atFirst: false, atLast: false };
+  void vscode.commands.executeCommand('setContext', 'buildTutorials.atFirstStep', ends.atFirst);
+  void vscode.commands.executeCommand('setContext', 'buildTutorials.atLastStep', ends.atLast);
+}
+
+/** Presses at one end of one step, counted so the repeat says something new (`atEndMessage`). Any move
+ *  resets it, by whatever path it came (`setEndsContext`, which every view push reaches). */
+let atEndPresses: { step: string; end: string; count: number } = { step: '', end: '', count: 0 };
+
+function sayAtEnd(end: 'first' | 'last'): void {
+  const step = walkSession?.getView()?.step.id ?? '';
+  atEndPresses = atEndPresses.step === step && atEndPresses.end === end
+    ? { step, end, count: atEndPresses.count + 1 }
+    : { step, end, count: 1 };
+  void vscode.window.showInformationMessage(atEndMessage(end, atEndPresses.count));
+}
 
 /**
  * What a palette command that needs a walk says when none is open, instead of doing nothing (T-43,
@@ -831,13 +875,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     vscode.commands.registerCommand('buildTutorials.doctor', () => runDoctorCommand(context)),
     vscode.commands.registerCommand('buildTutorials.start', () => runStartCommand(context)),
     vscode.commands.registerCommand('buildTutorials.openWalk', () => runOpenWalkCommand(context)),
+    // T-51: at the end a step command cannot move past, it says so rather than doing nothing.
     vscode.commands.registerCommand('buildTutorials.nextStep', () => {
-      if (walkSession?.getView()) walkSession.next();
-      else sayNoWalkOpen();
+      if (!walkSession?.getView()) { sayNoWalkOpen(); return; }
+      if (!walkSession.next()) sayAtEnd('last');
     }),
     vscode.commands.registerCommand('buildTutorials.prevStep', () => {
-      if (walkSession?.getView()) walkSession.prev();
-      else sayNoWalkOpen();
+      if (!walkSession?.getView()) { sayNoWalkOpen(); return; }
+      if (!walkSession.prev()) sayAtEnd('first');
     }),
     // The tree hands this the step's own id. `unknown`, and checked: the command is also
     // reachable by hand (it is hidden from the palette, not from `executeCommand`), and
@@ -872,6 +917,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
       tutorCore: () => ensureTutorCore(context),
       useTutorCore: (core: TutorCore | undefined) => { tutorCoreStandIn = core; },
       useReplanner: (replanner: Replanner | undefined) => { replannerStandIn = replanner; },
+      narrator: () => walkNarrator,
     },
   };
 }

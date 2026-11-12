@@ -18,6 +18,7 @@ dist/test/**
 scripts/**
 esbuild.mjs
 eslint.config.mjs
+.mocharc.cjs
 tsconfig.json
 .gitignore
 **/*.ts
@@ -32,6 +33,20 @@ vendor/**
 # Release tooling for THIS repository rather than part of the extension: the packaging and
 # publish decision logic that scripts/package.mjs and scripts/publish.mjs import.
 dist/publish.js
+
+# ── T-40: VS Code's own icon font (@vscode/codicons) ─────────────────────────────────────
+# The webviews load one of the package's ~700 files, the font, and both of its licences travel
+# with it: CC-BY-4.0 for the icons, and MIT for codicon.css, whose few rules the pages inline
+# (src/webview/codicons.ts says why the stylesheet itself is not linked). Its package.json stays
+# so the folder is still a package. Everything else (the stylesheet, the SVG sources, a 1.4 MB
+# preview page, its build scripts and CI) stays out. A `!` line re-includes a file the line above
+# it excluded; scripts/package.mjs reads the archive back and fails if any of the three is
+# missing (src/publish/disclosure.ts).
+node_modules/@vscode/codicons/**
+!node_modules/@vscode/codicons/package.json
+!node_modules/@vscode/codicons/LICENSE
+!node_modules/@vscode/codicons/LICENSE-CODE
+!node_modules/@vscode/codicons/dist/codicon.ttf
 #
 # WHAT MUST NEVER BE ADDED TO THIS FILE: `node_modules/**`.
 #

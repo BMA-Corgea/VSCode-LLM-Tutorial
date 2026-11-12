@@ -44,13 +44,15 @@
         "command": "buildTutorials.prevStep",
         "title": "Previous step",
         "category": "Build Tutorials",
-        "icon": "$(arrow-left)"
+        "icon": "$(arrow-left)",
+        "enablement": "!buildTutorials.atFirstStep"
       },
       {
         "command": "buildTutorials.nextStep",
         "title": "Next step",
         "category": "Build Tutorials",
-        "icon": "$(arrow-right)"
+        "icon": "$(arrow-right)",
+        "enablement": "!buildTutorials.atLastStep"
       },
       {
         "command": "buildTutorials.goToStep",
@@ -166,6 +168,7 @@
     "publish:dry-run": "node scripts/publish.mjs"
   },
   "dependencies": {
+    "@vscode/codicons": "0.0.46-24",
     "repo-tour": "file:../repo-tour"
   },
   "devDependencies": {
