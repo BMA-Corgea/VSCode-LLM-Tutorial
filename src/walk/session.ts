@@ -207,7 +207,7 @@ import { DetourSession, type DetourAdapters, type DetourView } from '../detour/s
 import { tutorialId } from '../detour/store.js';
 import { tutorContext } from '../tutor/context.js';
 import type { AskMessage, TutorCore } from '../tutor/core.js';
-import { REPLANNED_TRANSCRIPT_NOTE, REWRITTEN_TRANSCRIPT_NOTE, appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
+import { REPLANNED_TRANSCRIPT_NOTE, REWRITTEN_TRANSCRIPT_NOTE, appendAnswer, appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
 import {
   currentStep,
   nextStepId,
@@ -261,6 +261,8 @@ export const CHOICE_ALREADY_REPLANNING = 'The walk is already being re-planned. 
 export const REPLAN_UNAVAILABLE = 'The walk could not be re-planned here: the code reader or the model is not loaded. Nothing was changed, and the road is still there to press.';
 /** T-22: the same refusal `applyCheck` and the tutor give a folder with no `request.json`. */
 export const REPLAN_NO_REFERENCE = 'This tutorial has no reference repository recorded, so there is nothing to re-plan from. Nothing was changed.';
+/** T-22 (the stopped re-review, NF8): a new tree would be written without the code it cannot find, and the plan would then name only that tree. */
+export const REPLAN_CODE_MISSING = 'This walk cannot be re-planned while the code an earlier re-plan wrote for it cannot be found (another machine, another profile, or storage that was cleared): a new re-plan would lose that code for good. Nothing was changed.';
 /** T-22: a cancel before anything further was billed. */
 export const REPLAN_CANCELLED_UNSENT = 'Re-planning was cancelled. Nothing was changed, and nothing more will be asked.';
 /** T-22: a cancel while a question was with the model, which cannot be unsent (T-6's rule). */
@@ -749,7 +751,7 @@ export class WalkSession {
    *  header). A map of sets rather than one flat `${stepId} ${absPath}` set because an explicit
    *  `dial:set` on the current step has to be able to forget that step's answers in one move
    *  and no other step's (code review finding 5); see `setDial`. */
-  private readonly prompted = new Map<string, Set<string>>();
+  private readonly prompted = new Map<string, Map<string, 'asking' | 'keep' | 'overwrite'>>();
   /** The full report of the last check per step, this session only; the durable half lives in
    *  `progress.steps[id].check`. Keyed by step so a learner can check two steps and see both. */
   private readonly checks = new Map<string, CheckOutcome>();
@@ -1003,6 +1005,10 @@ export class WalkSession {
     const { request, plan } = this;
     if (request === null) {
       this.replanRefused(job, REPLAN_NO_REFERENCE);
+      return;
+    }
+    if (plan.steps.some((s) => derivedCodeMissing(request, s))) {
+      this.replanRefused(job, REPLAN_CODE_MISSING);
       return;
     }
     // At the press: what is walked is what the learner had walked when they chose.
@@ -1847,7 +1853,8 @@ export class WalkSession {
         // `TutorView.spend`. What is still forbidden is rendering `$0.00` at somebody who was
         // in fact billed: `metered: false` means unknown, never free, and `AskSpend.metered`
         // is the flag that carries that all the way to the sentence.
-        this.progress = appendTurn(this.progress, stepId, { role: 'assistant', content: outcome.text });
+        // Before a re-plan's line when the question went out before its landing (NF7): `appendAnswer`.
+        this.progress = appendAnswer(this.progress, stepId, { role: 'assistant', content: outcome.text });
         this.commit(false);
         return;
       case 'unreachable':
@@ -2262,16 +2269,22 @@ export class WalkSession {
 
     let overwriting = false;
     if (existing !== undefined) {
-      const asked = this.prompted.get(step.id) ?? new Set<string>();
-      if (asked.has(absPath)) {
+      const asked = this.prompted.get(step.id) ?? new Map<string, 'asking' | 'keep' | 'overwrite'>();
+      // Only a Keep is honoured without asking. A file that differs again after an Overwrite is a new question,
+      // and "you chose that earlier" is said only to someone who chose to keep it (T-22's stopped re-review: a
+      // re-plan can leave two steps writing one file, a walked file step and the symbol step that took it over).
+      const answered = asked.get(absPath);
+      if (answered === 'keep') {
         return {
           landed: false,
           note: `Your own ${step.target.file} was kept — you chose that earlier in this session, and you are not asked again.`,
         };
       }
-      asked.add(absPath);
+      if (answered === 'asking') return { landed: false };
+      asked.set(absPath, 'asking');
       this.prompted.set(step.id, asked);
       const overwrite = await this.adapters.confirmOverwrite(step.target.file);
+      asked.set(absPath, overwrite ? 'overwrite' : 'keep');
       // The learner's answer is honoured wherever the WALK has moved to while the dialog was
       // up (`applyDial`'s header argues why, and why the modal makes that a narrow case). A
       // SESSION torn down under it is the exception: its target may already belong to the

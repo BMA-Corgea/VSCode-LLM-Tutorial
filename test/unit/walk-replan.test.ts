@@ -202,6 +202,14 @@ function harness(options: Options = {}): Harness {
   };
 }
 
+/** What a real landing leaves in the tree: the code the plan says the model wrote, for D and for `fresh-1`. */
+function holdCode(tree: string, files: string[] = ['src/parse.ts', 'src/api/fresh.ts']): void {
+  for (const rel of files) {
+    fs.mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true });
+    fs.writeFileSync(path.join(tree, rel), `export const writtenByTheModel = ${JSON.stringify(rel)};\n`);
+  }
+}
+
 /** Lets a press reach the engine: past `await replanner()`. */
 async function reachedEngine(h: Harness, count = 1): Promise<Pending> {
   for (let i = 0; i < 50 && h.pending.length < count; i += 1) await new Promise((r) => { setImmediate(r); });
@@ -373,6 +381,7 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     const h = harness();
     h.session.choose(D, ANSWER);
     await finish(h, await reachedEngine(h), landed(h.plan, h.tree));
+    holdCode(h.tree);
     const afterFirst = fs.readFileSync(path.join(buildDir(h.target), 'plan.json'), 'utf8');
     h.session.choose(D, 'author');
     const second = await reachedEngine(h, 2);
@@ -946,9 +955,10 @@ suite('a second press at the same step, and a step that comes back under its old
     shape.decision.options = [...shape.decision.options, { id: 'flat', label: 'One folder', consequence: 'c', taken: false }];
     shape.decision.chosen = 'flat'; // the earlier press's road
     const earlier: StepLike = { ...plan.steps.find((s) => s.id === D)!, id: 'fresh-s', ordinal: 5, target: { file: 'src/fresh.ts' }, derivedFrom: SHAPE, dependsOn: [SHAPE] };
-    const before: PlanLike = { ...plan, steps: [...plan.steps, earlier], divergences: [{ stepId: SHAPE, answer: 'flat', staleDependents: [], at: 't', replanned: false }] };
+    const before: PlanLike = { ...plan, steps: [...plan.steps, earlier], divergences: [{ stepId: SHAPE, answer: 'flat', staleDependents: [], at: 't', replanned: false, tree: TREE }] };
     const allWalked = (p: PlanLike): Progress => setCurrent(p.steps.reduce((acc, s) => markDone(acc, s.id), fixtureProgress(p)), SHAPE);
     const h = harness({ plan: before, progress: allWalked });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
     h.session.choose(SHAPE, 'author');
     const recorded: PlanLike = {
       ...before,
@@ -964,6 +974,7 @@ suite('a second press at the same step, and a step that comes back under its old
   test('a second re-plan counts the steps it wrote, not the ones an earlier press wrote and the learner walked (NF5)', async () => {
     const first = once();
     const h = harness({ plan: first, progress: (p) => markDone(onD(p), 'fresh-1') });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
     h.session.choose(D, 'author');
     const second: PlanLike = {
       ...first,
@@ -981,6 +992,7 @@ suite('a second press at the same step, and a step that comes back under its old
   test('a step the learner finished while it re-planned, written again under its own id: refused, and named (NF4, SF6)', async () => {
     const first = once();
     const h = harness({ plan: first, progress: onD, navigates: true });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
     h.session.choose(D, 'author');
     const job = await reachedEngine(h);
     h.session.goTo('fresh-1');
@@ -1007,6 +1019,7 @@ suite('a second press at the same step, and a step that comes back under its old
         return { ...base, steps: { ...base.steps, 'fresh-1': { status: 'pending', check: { ok: false, at: 't' }, chosen: other, transcript: [{ role: 'user', content: 'why this?' }, { role: 'assistant', content: 'because of the earlier code' }] } } };
       },
     });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
     h.session.choose(D, 'author');
     const again: PlanLike = {
       ...first,
@@ -1032,6 +1045,7 @@ suite('a second press at the same step, and a step that comes back under its old
         return { ...base, steps: { ...base.steps, [D]: { ...base.steps[D]!, transcript: [{ role: 'user', content: 'why inline?' }, { role: 'assistant', content: 'because the model wrote it so' }] } } };
       },
     });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
     h.session.choose(D, 'author');
     const again: PlanLike = {
       ...first,
@@ -1046,3 +1060,50 @@ suite('a second press at the same step, and a step that comes back under its old
   });
 });
 
+// The stopped re-review (NF7, NF8): the landing meets a tutor question in flight, and a press meets a plan
+// whose earlier re-derived code cannot be found.
+suite('what a landing meets: a question in flight, a tree that is gone (T-22 re-review)', () => {
+  let realTutor: TutorCore;
+  suiteSetup(async () => {
+    const loaded = await loadCore(resolveCoreRoot('../repo-tour', process.cwd()));
+    assert.ok(loaded.found, loaded.reason ?? 'repo-tour should be found at the sibling checkout');
+    realTutor = tutorCoreFor(loaded.loaded);
+  });
+
+  test('a question at D in flight when the re-plan lands: its answer is put before the line, and not sent as history about the new code (NF7)', async () => {
+    let answer: ((reply: LlmReply) => void) | undefined;
+    const held = (): Promise<LlmReply> => new Promise((resolve) => { answer = resolve; });
+    const h = harness({
+      dial: 'manual',
+      progress: (p) => setDial(fixtureProgress(p), D, 'manual'),
+      tutorCore: () => Promise.resolve({ ...realTutor, availability: () => Promise.resolve({ ok: true, detail: 'a stand-in' }), runLlm: held }),
+      tutorSettings: () => ({ provider: 'claude', model: 'm', timeoutMs: 60_000 }),
+    });
+    h.session.ask('what does tokenize do?');
+    for (let i = 0; i < 100 && answer === undefined; i += 1) await turns(1);
+    assert.ok(answer, 'discriminates: the question is with the model');
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    job.finish(landed(h.plan, h.tree));
+    for (let i = 0; i < 50 && h.view().plan.steps.every((s) => s.id !== 'fresh-1'); i += 1) await turns(1);
+    assert.ok(h.view().plan.steps.some((s) => s.id === 'fresh-1'), 'discriminates: the re-plan landed while the question was out');
+    answer({ text: 'it splits on spaces, in the author\'s code', inputTokens: 1, outputTokens: 1, usd: 0, metered: false });
+    await h.session.settled();
+    const progress = loadProgress(h.target, loadPlan(h.target));
+    const order = getTranscript(progress, D).map((m) => (m.kind === 'note' ? 'note' : m.role));
+    assert.deepEqual(order, ['user', 'assistant', 'note'], `the answer was to a question about the code the press replaced: ${JSON.stringify(order)}`);
+    assert.deepEqual(sentTurns(progress, D), [], 'so a later question is sent none of it');
+  });
+
+  test('a press while the plan\'s earlier re-derived code cannot be found is refused in words, and asks nothing (NF8)', async () => {
+    const h = harness({ plan: replanned(fixturePlan()), progress: (p) => setCurrent(markDone(fixtureProgress(p), 'st-1-shape-src'), D) });
+    // The tree the plan names was never written into this store: another machine, or cleared storage.
+    assert.equal(fs.existsSync(path.join(h.tree, 'src', 'api', 'fresh.ts')), false, 'discriminates: fresh-1\'s code is not there');
+    const before = h.bytes();
+    h.session.choose(D, 'author');
+    await turns(20);
+    assert.equal(h.pending.length, 0, 'the engine is not asked: a new tree would be written without the code it cannot find');
+    assert.match(h.view().choiceNote ?? '', /cannot be found/, `the page says why; it says ${JSON.stringify(h.view().choiceNote)}`);
+    assert.deepEqual(h.bytes(), before, 'and nothing moved');
+  });
+});

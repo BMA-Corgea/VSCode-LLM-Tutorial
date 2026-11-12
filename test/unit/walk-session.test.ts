@@ -1888,6 +1888,22 @@ suite('the dial, the check and the commit (T-5)', () => {
         'the file now matches, so the second pass has nothing to ask about in the first place');
     });
 
+    // T-22's stopped re-review (NF1): the walk remembered that it ASKED, not what it was told, and said "you chose
+    // that earlier" of a file kept to a learner who had chosen to replace it. A re-plan made it reachable: two steps
+    // can now write one file with different code (a walked file step and the symbol step that took the file over).
+    test('after Overwrite, a file that differs again is asked about again: "you chose that earlier" is said only to someone who chose to keep', async () => {
+      writeTarget('src/parse.ts', LEARNER_VERSION);
+      const { session, fake } = await walking({ dial: 'automated', overwrite: true });
+      assert.ok(sameBytes('src/parse.ts'), 'discriminates: the first answer was Overwrite, and it was honoured');
+
+      writeTarget('src/parse.ts', 'changed again since\n');
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      assert.doesNotMatch(session.getView()?.writeNote ?? '', /you chose that earlier/,
+        `the learner chose to replace the file, not to keep it: ${JSON.stringify(session.getView()?.writeNote)}`);
+      assert.equal(pick(fake, 'confirmOverwrite').length, 2, 'a file that differs again is a new question');
+    });
+
     /**
      * Code review finding 5. The remembered answer was keyed by `${step.id} ${absPath}` and
      * nothing else, so it also answered an explicit `dial:set` on that very step — and one

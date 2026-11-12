@@ -213,6 +213,22 @@ export function appendTurn(progress: Progress, stepId: string, turn: AskMessage)
 }
 
 /**
+ * An answer, appended (T-22's stopped re-review, NF7). When the last turn is the line a re-plan's landing wrote,
+ * the question this answers was sent before that landing, about the code it replaced: the answer goes BEFORE the
+ * line, so the history a later question sends (cut at the line, `sentTurns`) does not carry it either.
+ */
+export function appendAnswer(progress: Progress, stepId: string, answer: AskMessage): Progress {
+  const turns = getTranscript(progress, stepId);
+  const last = turns.at(-1);
+  if (last === undefined || last.kind !== 'note' || (last.content !== REPLANNED_TRANSCRIPT_NOTE && last.content !== REWRITTEN_TRANSCRIPT_NOTE)) {
+    return appendTurn(progress, stepId, answer);
+  }
+  const existing = progress.steps[stepId];
+  const transcript = sanitizeTranscript([...turns.slice(0, -1), answer, last]).slice(-MAX_TURNS_KEPT);
+  return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, transcript } } };
+}
+
+/**
  * Empties one step's transcript back to `[]` — not an absent field, so a step that never had a
  * transcript and a step just cleared read back identically through `getTranscript`. Same
  * field-preserving shape as `appendTurn`/`setDial`/`setCheck`: a step with no entry yet gets a
