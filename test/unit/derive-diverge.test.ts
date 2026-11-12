@@ -456,6 +456,24 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.ok(walkedA.staleDependents.includes('s-a'), `walked, a.ts stood on the old road and is named: ${JSON.stringify(walkedA.staleDependents)}`);
   });
 
+  // The re-review of the fixes, R6: MF2's property for a cycle that runs THROUGH the decision. D is never replaced, so
+  // its edges were copied as they were, and it went on standing on the step of the file that imports it, now gone.
+  test('an import cycle through the decision: D is left standing on nothing the re-plan removed', async () => {
+    const root = tempDir('diverge-cycle-d-');
+    for (const [rel, text] of Object.entries({ 'src/api.ts': "import { Z } from './zed';\nexport const API = (): number => Z;\n", 'src/zed.ts': "import { API } from './api';\nexport const Z = 1;\nexport const twice = (): number => API() * 2;\n" })) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), text);
+    }
+    const plan: PlanLike = { ...repoPlan(), chapters: [{ key: 'src', title: 'src', subtitle: 's', tierPath: 'src' }], steps: [
+      step('s-src', 1, 'src', 'shape', 'src'), step('s-api', 2, 'src', 'file', 'src/api.ts', ['s-zed']), step('s-zed', 3, 'src', 'file', 'src/zed.ts', ['s-api']),
+    ] };
+    const out = await divergePlan(input(plan, root, 's-api', 'alt-1', ['s-src']), depsFor(model().run, tempDir('diverge-gs-'), tempDir('diverge-target-')));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(stepNamed(out.plan, 's-zed'), undefined, 'discriminates: zed.ts imports the decision, so it was replaced');
+    const ids = new Set(out.plan.steps.map((s) => s.id));
+    assert.deepEqual(out.plan.steps.flatMap((s) => s.dependsOn.filter((dep) => !ids.has(dep)).map((dep) => `${s.id} -> ${dep}`)), [], 'no step depends on one the re-plan removed');
+  });
+
   // T-22's code review, SF2: the file is the unit, so a symbol step goes only with a file being rewritten.
   test('a kept file keeps its symbol steps: a decision upstream of a walked file does not delete its un-walked symbols', async () => {
     const { plan, root, gs, target } = setup();
@@ -501,6 +519,40 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.ok(second.replaced.includes(routes.id), 'its code is gone, so it was replaced');
     assert.ok(second.written.includes(routes.id), 'and the step under that id is one this press wrote');
   });
+
+  // The re-review of the review fixes, R10 (must-fix): a new file was never shown a new file it stands on, because
+  // the map of new files was keyed by path and looked up by step id. Its code then dropped the import the plan
+  // records, or imported it anyway and was refused, and billed again, on every press.
+  for (const order of ['in the order they stand', 'in the opposite order'] as const) {
+    test(`a new file that stands on another new file is shown it, with its new code, and may import it (${order})`, async () => {
+      const { root, gs, target } = setup();
+      const plan = repoPlan();
+      plan.steps = plan.steps.map((s) => (s.id === 's-render' ? { ...s, dependsOn: ['s-routes'] } : s));
+      const asked: Asked[] = [];
+      const run: TutorCore['runLlm'] = (prompt) => {
+        const line = prompt.split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
+        const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
+        asked.push({ task: String(input['task']), input });
+        if (input['task'] === 'code') {
+          const file = (input['node'] as { path: string }).path;
+          const content = file === 'src/view/render.ts'
+            ? "import { handle } from '../api/routes';\n\nexport function render(): string {\n  return String(handle('x'));\n}\n"
+            : file === 'src/api/routes.ts' ? 'export function handle(body: string): number {\n  return body.length;\n}\n' : `export const from = ${JSON.stringify(file)};\n`;
+          return Promise.resolve({ text: JSON.stringify({ content }), inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
+        }
+        const replacing = (input['replacing'] as Array<{ kind: string; chapter: string; path: string; question: string; options: unknown[]; chosen: string; why: string }>).filter((r) => r.kind === 'file');
+        const nodes = replacing.map((r) => ({ kind: r.kind, chapter: r.chapter, path: r.path, question: `${r.question} (new)`, options: r.options, recommended: r.chosen, why: r.why, dependsOn: r.path === 'src/view/render.ts' ? ['src/api/routes.ts'] : [] }));
+        const steps = order === 'in the order they stand' ? nodes : [...nodes].reverse();
+        return Promise.resolve({ text: JSON.stringify({ steps }), inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
+      };
+      const out = await divergePlan(input(plan, root, 's-parse', 'alt-1', ['s-src']), depsFor(run, gs, target));
+      const renderAsked = asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/view/render.ts');
+      const shown = ((renderAsked?.input['dependencies'] as Array<{ path: string; content?: string }> | undefined) ?? []);
+      assert.ok(out.ok, `a new file may import the new file it stands on; refused: ${out.ok ? '' : out.reason}`);
+      assert.ok(shown.some((s) => s.path === 'src/api/routes.ts' && (s.content ?? '').includes('export function handle')),
+        `render.ts's code question is shown the new routes.ts with its new code: ${JSON.stringify(shown.map((s) => `${s.path} (${(s.content ?? '').length} chars)`))}`);
+    });
+  }
 
   test('a chapter decision whose every dependent is walked lands a record naming them, and asks the model nothing', async () => {
     const { plan, root, gs, target } = setup();

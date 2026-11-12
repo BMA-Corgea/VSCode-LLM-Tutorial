@@ -92,6 +92,27 @@ function asCodeLanguage(language: string | undefined): CodeLanguage | null {
   return language === 'typescript' || language === 'tsx' || language === 'javascript' || language === 'python' ? language : null;
 }
 
+/**
+ * New files, each after the new files it stands on, so that its code question is shown their new code (the re-review
+ * of the fixes, R10). The model's own order otherwise. A cycle is broken where it is met, as repo-tour breaks one.
+ */
+function inDependencyOrder<T extends { id: string; dependsOn: readonly string[] }>(files: readonly T[]): T[] {
+  const byId = new Map(files.map((f) => [f.id, f] as const));
+  const seen = new Set<string>();
+  const out: T[] = [];
+  const visit = (f: T): void => {
+    if (seen.has(f.id)) return; // written already, or on the way there: a cycle, broken here
+    seen.add(f.id);
+    for (const id of f.dependsOn) {
+      const dep = byId.get(id);
+      if (dep !== undefined) visit(dep);
+    }
+    out.push(f);
+  };
+  for (const f of files) visit(f);
+  return out;
+}
+
 /** The step that owns a decision's file: itself, unless it is a symbol inside one. */
 function fileStepOf(d: StepLike, steps: readonly StepLike[]): StepLike {
   if (d.kind !== 'symbol') return d;
@@ -288,8 +309,10 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       merged = reply;
     }
 
-    // ── the code: the decision's own file, then every new file ──
-    const freshById = new Map(merged.fresh.map((f) => [f.node.path, f] as const));
+    // ── the code: the decision's own file, then every new file, each after the new files it stands on ──
+    // Keyed by step id, as `dependsOn` names them: keyed by path, the lookup below always missed, and a new file was
+    // never shown the new file it stands on, nor allowed to import it (the re-review of the fixes, R10).
+    const freshById = new Map(merged.fresh.map((f) => [f.id, f] as const));
     const written = new Map<string, string>();
     const plannedFiles = new Set([
       // D's own file is in the plan whether or not the file step it took over stays.
@@ -327,7 +350,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       const refused = await writeFile(ownFile, `derive:code:${d.id}`, shapeDecision(d.chapter), { ...decisionOf(d, answer), path: ownFile }, dependencies, new Set(fileDeps.map((dep) => dep.target.file)));
       if (refused !== null) return fail(refused.refused);
     }
-    for (const f of merged.fresh.filter((x) => x.node.kind === 'file')) {
+    for (const f of inDependencyOrder(merged.fresh.filter((x) => x.node.kind === 'file'))) {
       deps.onProgress?.(`writing ${f.node.path}…`);
       const dependencies: DependencyForPrompt[] = [];
       const allowed = new Set<string>();
@@ -339,7 +362,9 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
           dependencies.push({ ...decisionOf(dep, roadOf(dep)), ...shownContent(dep.target.file, written, contentOf) });
         } else if (earlier !== undefined && earlier.node.kind === 'file') {
           allowed.add(earlier.node.path);
-          dependencies.push({ path: earlier.node.path, question: earlier.node.question, chosen: { label: earlier.node.options[0]?.label ?? '', consequence: '' }, why: earlier.node.why, content: written.get(earlier.node.path) ?? '' });
+          // Its code follows the road it recommends, which is the road its `why` was written for (`whyForRoad`).
+          const road = earlier.node.options.find((o) => o.id === earlier.node.recommended) ?? earlier.node.options[0];
+          dependencies.push({ path: earlier.node.path, question: earlier.node.question, chosen: { label: road?.label ?? '', consequence: road?.consequence ?? '' }, why: earlier.node.why, content: written.get(earlier.node.path) ?? '' });
         }
       }
       const chapter = shapeFor(f.node, merged, realKey, shapeDecision);
@@ -366,13 +391,22 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const at = (deps.now?.() ?? new Date()).toISOString();
     const stepsById = new Map<string, StepLike>();
     for (const s of steps) if (!replaced.has(s.id)) stepsById.set(s.id, s);
+    // D is never replaced, so in a cycle through D it can stand on a step the press did replace: that edge now names
+    // the new step at the same file, or goes (the re-review of the fixes, R6; MF2's "nothing depends on a removed step").
+    const freshAtFile = new Map(merged.fresh.filter((f) => f.node.kind === 'file').map((f) => [f.node.path, f.id] as const));
+    const dEdges = [...new Set((ownerGoes ? owner.dependsOn : d.dependsOn).flatMap((id) => {
+      if (!replaced.has(id)) return [id];
+      const gone = byId.get(id);
+      const now = gone === undefined || gone.kind === 'shape' ? undefined : freshAtFile.get(gone.target.file);
+      return now === undefined || now === d.id ? [] : [now];
+    }))];
     const answered: StepLike = {
       ...d,
       decision: { ...d.decision, chosen: answer },
       // Its code is the model's now. A step the model wrote in the first place keeps saying where it came from.
       ...(ownFile === null ? {} : { kind: 'file' as const, target: { file: ownFile }, scaffold: scaffoldOf(ownFile, derivedFiles, extracts), derivedFrom: d.derivedFrom ?? d.id }),
       // The file step it took over is gone, so D stands on what that step stood on.
-      ...(ownerGoes ? { dependsOn: [...owner.dependsOn] } : {}),
+      dependsOn: dEdges,
     };
     stepsById.set(d.id, answered);
     for (const f of merged.fresh) stepsById.set(f.id, freshStep(f, d.id, realKey, derivedFiles, extracts));
