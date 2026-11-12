@@ -207,7 +207,7 @@ import { DetourSession, type DetourAdapters, type DetourView } from '../detour/s
 import { tutorialId } from '../detour/store.js';
 import { tutorContext } from '../tutor/context.js';
 import type { AskMessage, TutorCore } from '../tutor/core.js';
-import { REPLANNED_TRANSCRIPT_NOTE, appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
+import { REPLANNED_TRANSCRIPT_NOTE, REWRITTEN_TRANSCRIPT_NOTE, appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
 import {
   currentStep,
   nextStepId,
@@ -228,6 +228,7 @@ import {
   withChosen,
   type PlanLike,
   type Progress,
+  type ProgressStep,
   type StepLike,
 } from './model.js';
 import { resolveInsideTarget } from './paths.js';
@@ -294,8 +295,9 @@ function replanCostText(cost: DeriveCost): string {
 export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost, at: string | null = null, fileAsItWas = false): string {
   // Every later step that stood on a chapter decision was walked: nothing re-derived, nothing asked (code review MF1).
   if (fresh === 0 && !ownCode) {
+    // On D's own page the page's note (`RECORDED_NOTE`) says why nothing was re-planned; said here too, it is said twice.
     return at === null
-      ? 'Your choice is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned.'
+      ? REPLAN_NOTHING_FOLLOWS
       : `Your choice at ${at} is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned; that step's page names them.`;
   }
   const its = at === null ? 'This step\u2019s code' : 'Its code';
@@ -304,6 +306,26 @@ export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost
     : `${its} now follows your choice. No later step needed re-planning.`;
   const file = fileAsItWas && at === null ? ' Your file is as you left it: come back to this step to have the new code written.' : '';
   return `${at === null ? 'Re-planned.' : `Re-planned from your choice at ${at}.`} ${what}${file} ${replanCostText(cost)}`;
+}
+
+/**
+ * A step a press wrote under the id of one it replaced, starting again (the stopped re-review's NF4). Its tick,
+ * its verdict and the choice made there were about the code that is gone; the learner's own dial for the step
+ * is theirs and stays. The conversation stays on the page, with a line that cuts its history off from the new
+ * code (`sentTurns`).
+ */
+export function restartedStep(progress: Progress, stepId: string): Progress {
+  const old = progress.steps[stepId];
+  if (old === undefined) return progress;
+  const fresh: ProgressStep = {
+    status: 'pending',
+    ...(old.dial === undefined ? {} : { dial: old.dial }),
+    ...(old.transcript === undefined ? {} : { transcript: old.transcript }),
+  };
+  const restarted: Progress = { ...progress, steps: { ...progress.steps, [stepId]: fresh } };
+  return getTranscript(restarted, stepId).length > 0
+    ? appendTurn(restarted, stepId, { role: 'assistant', content: REWRITTEN_TRANSCRIPT_NOTE, kind: 'note' })
+    : restarted;
 }
 
 /** How a step is named on another step's page: its place, and its file or chapter. */
@@ -1039,7 +1061,9 @@ export class WalkSession {
     // What the learner finished while this ran, and the new plan would replace (code review SF6): walked
     // is fixed at the press, so their work there would leave the walk without a word. Refused, and said.
     const stays = new Set(outcome.plan.steps.map((s) => s.id));
-    const finished = derivedFrom.steps.filter((s) => !stays.has(s.id) && this.progress.steps[s.id]?.status === 'done');
+    // Replaced means its code is gone, whether or not a step the press wrote came back with its id (NF4).
+    const replacedIds = new Set(outcome.replaced);
+    const finished = derivedFrom.steps.filter((s) => (!stays.has(s.id) || replacedIds.has(s.id)) && this.progress.steps[s.id]?.status === 'done');
     if (finished.length > 0) {
       const named = finished.slice(0, 8).map(stepLabel).join(', ') + (finished.length > 8 ? `, and ${finished.length - 8} more` : '');
       this.replanRefused(job, replanRefusedText(`you finished ${named} while it re-planned, and the new plan would have replaced ${finished.length === 1 ? 'it' : 'them'}. Press the road again to re-plan with your work kept`));
@@ -1057,7 +1081,11 @@ export class WalkSession {
     this.request = outcome.derivedRoot === null ? request : { ...request, derivedRoot: outcome.derivedRoot };
     this.progress = setChosenIn(this.progress, job.stepId, job.optionId);
     if (this.progress.current === null || !this.hasStep(this.progress.current)) this.progress = setCurrent(this.progress, job.stepId);
-    this.forgetOldCode(job.stepId);
+    // A step the press wrote under the id of one it replaced is a new step with an old key: what the learner
+    // did at the old one (a tick, a verdict, a choice, a conversation) is about code that is gone (NF4).
+    const rewritten = outcome.replaced.filter((id) => id !== job.stepId && stays.has(id));
+    for (const id of rewritten) this.progress = restartedStep(this.progress, id);
+    this.forgetOldCode(job.stepId, rewritten);
     // Only D's own notes describe code that is gone: an unrelated step the learner moved on to keeps its
     // "What to write" (code review SF9).
     const atD = this.progress.current === job.stepId;
@@ -1066,11 +1094,14 @@ export class WalkSession {
     const ownCode = decided !== undefined && decided.kind !== 'shape';
     // D keeps its id, so its conversation is about the author's code: a line in it says so, and the history
     // a later question sends starts there (code review N12; `sentTurns`).
+    // After an earlier press at D its code was already the model's, and the line says so.
+    const wasModels = derivedFrom.steps.find((s) => s.id === job.stepId)?.derivedFrom !== undefined;
     if (ownCode && getTranscript(this.progress, job.stepId).length > 0) {
-      this.progress = appendTurn(this.progress, job.stepId, { role: 'assistant', content: REPLANNED_TRANSCRIPT_NOTE, kind: 'note' });
+      this.progress = appendTurn(this.progress, job.stepId, { role: 'assistant', content: wasModels ? REWRITTEN_TRANSCRIPT_NOTE : REPLANNED_TRANSCRIPT_NOTE, kind: 'note' });
     }
-    // D marks its own code as re-derived, so it is not one of the steps that followed it.
-    const followed = outcome.plan.steps.filter((s) => s.derivedFrom === job.stepId && s.id !== job.stepId).length;
+    // The steps THIS press wrote: not D, whose own code is counted apart, and not a step an earlier press at D
+    // wrote and this one kept (the stopped re-review's NF5).
+    const followed = outcome.written.filter((id) => id !== job.stepId).length;
     const fileAsItWas = ownCode && stepDial(this.progress, job.stepId, request.dial) !== 'manual';
     this.sayChoice(job, replanDoneText(followed, ownCode, outcome.cost, atD || decided === undefined ? null : stepLabel(decided), fileAsItWas));
     this.commit(false);
@@ -1082,8 +1113,8 @@ export class WalkSession {
   }
 
   /** What this session remembers about code a re-plan has replaced: a check of the old file, an Overwrite answer about it. */
-  private forgetOldCode(stepId: string): void {
-    const stale = (id: string): boolean => id === stepId || !this.hasStep(id);
+  private forgetOldCode(stepId: string, rewritten: readonly string[] = []): void {
+    const stale = (id: string): boolean => id === stepId || rewritten.includes(id) || !this.hasStep(id);
     for (const id of [...this.checks.keys()]) if (stale(id)) this.checks.delete(id);
     for (const id of [...this.prompted.keys()]) if (stale(id)) this.prompted.delete(id);
   }

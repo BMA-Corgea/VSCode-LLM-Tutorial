@@ -69,6 +69,7 @@ import {
   stepScript, turnsOmittedMessage,
 } from '../../src/walk/step-view.js';
 import { fixturePlan, fixtureProgress } from './walk-fixtures.js';
+import { replanDoneText } from '../../src/walk/session.js';
 
 /** A note the host might send — any sentence at all. T-4's tests used `A_NOTE` for this,
  *  which T-5 deleted along with the placeholder reply it named; the note CHANNEL is what these
@@ -3279,6 +3280,17 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
     assert.ok(page.includes(escapeForHtml(RECORDED_NOTE)), 'it says the choice is recorded and why nothing was re-planned');
     assert.ok(!page.includes(escapeForHtml(REPLANNED_NOTE)), 'not that the model re-planned anything');
     assert.ok(page.includes(escapeForHtml(staleStepsNote(['step 1 (src)'], 0))), 'and the walked step that stood on the old road is named');
+  });
+
+  // The stopped re-review's NF6: on D's own page, the landing's line and the page's note said one fact twice.
+  test('on D\'s own page a record that re-planned nothing says so once, not in the landing\'s line and again in the note', () => {
+    const base = replannedHere(['st-1-shape-src']);
+    const plan = { ...base.plan, divergences: [{ stepId: ON, answer: 'stream', staleDependents: ['st-1-shape-src'], at: 't', replanned: false }] };
+    const free = { provider: 'none', model: 'none', metered: true, calls: 0, cachedStops: 0, interpretedStops: 0, inputTokens: 0, outputTokens: 0, usd: 0, failures: [] };
+    const text = html({ ...base, plan, choiceNote: replanDoneText(0, false, free, null) }).replace(/<[^>]*>/g, ' ');
+    assert.ok(text.includes(RECORDED_NOTE), 'discriminates: the note is on the page');
+    const times = (text.match(/nothing was re-planned/g) ?? []).length;
+    assert.equal(times, 1, `the fact is drawn ${times} times on D's page`);
   });
 
   test('an untouched step says none of it', () => {

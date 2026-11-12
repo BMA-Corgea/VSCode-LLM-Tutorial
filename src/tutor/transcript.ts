@@ -156,12 +156,15 @@ export function sentTurns(progress: Progress, stepId: string): AskMessage[] {
   const all = getTranscript(progress, stepId);
   // A re-plan rewrote this step's code (T-22's code review, N12): what was asked before is about code
   // that is gone, so it is kept on the page and not sent as history about the new code.
-  const cut = all.map((m) => m.kind === 'note' && m.content === REPLANNED_TRANSCRIPT_NOTE).lastIndexOf(true);
+  const cut = all.map((m) => m.kind === 'note' && (m.content === REPLANNED_TRANSCRIPT_NOTE || m.content === REWRITTEN_TRANSCRIPT_NOTE)).lastIndexOf(true);
   return all.slice(cut + 1).filter((m) => m.kind !== 'note');
 }
 
 /** The line a landed re-plan writes into its step's conversation (T-22). */
 export const REPLANNED_TRANSCRIPT_NOTE = 'Re-planned from your choice: this step\u2019s code is now the model\u2019s. What was asked here before was about the author\u2019s version.';
+
+/** The same line where the code a press replaced was already the model's: a second press at D, or a step written again. */
+export const REWRITTEN_TRANSCRIPT_NOTE = 'Re-planned from your choice: the model wrote this step\u2019s code again. What was asked here before was about its earlier version.';
 
 /**
  * Every stored turn for one step, or `[]` — for a step id `progress.steps` has no entry for, a

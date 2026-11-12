@@ -64,8 +64,13 @@ export interface DivergeDeps extends DeriveAskDeps {
 export type DivergeOutcome =
   /** Nothing follows from this decision and it owns no file: there is nothing to re-derive. */
   | { ok: true; changed: false; staleDependents: string[]; cost: DeriveCost }
-  /** `derivedRoot` is `null` only when no divergence has ever written a tree (a record that re-planned nothing). */
-  | { ok: true; changed: true; plan: PlanLike; derivedRoot: string | null; staleDependents: string[]; cost: DeriveCost }
+  /**
+   * `derivedRoot` is `null` only when no divergence has ever written a tree (a record that re-planned nothing).
+   * `replaced`: the plan's steps this press replaced, D never among them. `written`: the steps it wrote. A step
+   * it writes can carry the id of one it replaced (an id is a hash of kind, path, question and labels, T-17's
+   * F9), so an id that is in the new plan is not proof that its step's code is the one it had.
+   */
+  | { ok: true; changed: true; plan: PlanLike; derivedRoot: string | null; staleDependents: string[]; replaced: string[]; written: string[]; cost: DeriveCost }
   | { ok: false; reason: string; cost: DeriveCost };
 
 /** How many files all of a plan's divergences together may have written. */
@@ -177,7 +182,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
         cost: costOf(tally, deps),
         divergences: [...prior, { stepId: d.id, answer, staleDependents, at, replanned: false, ...(priorTree === undefined ? {} : { tree: priorTree }) }],
       };
-      return { ok: true, changed: true, plan: recorded, derivedRoot, staleDependents, cost: costOf(tally, deps) };
+      return { ok: true, changed: true, plan: recorded, derivedRoot, staleDependents, replaced: [], written: [], cost: costOf(tally, deps) };
     }
 
     // The file D owns is D's to write, so its old file step is not one the model is asked to re-plan.
@@ -384,7 +389,7 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       ...plan, chapters, steps: nextSteps, generatedAt: at, cost: costOf(tally, deps),
       divergences: [...prior, { stepId: d.id, answer, staleDependents, at, tree: tree.storeKey }],
     };
-    return { ok: true, changed: true, plan: next, derivedRoot: tree.root, staleDependents, cost: costOf(tally, deps) };
+    return { ok: true, changed: true, plan: next, derivedRoot: tree.root, staleDependents, replaced: [...replaced], written: merged.fresh.map((f) => f.id), cost: costOf(tally, deps) };
   } catch (err) {
     return fail(`the re-plan stopped unexpectedly: ${thrownSentence(err)}`);
   }

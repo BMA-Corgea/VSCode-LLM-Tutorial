@@ -68,7 +68,7 @@ function replanned(plan: PlanLike, tree = TREE, answer = ANSWER): PlanLike {
 }
 
 function landed(plan: PlanLike, derivedRoot: string, tree = TREE): DivergeOutcome {
-  return { ok: true, changed: true, plan: replanned(plan, tree), derivedRoot, staleDependents: [], cost: COST };
+  return { ok: true, changed: true, plan: replanned(plan, tree), derivedRoot, staleDependents: [], replaced: [LATER], written: ['fresh-1'], cost: COST };
 }
 
 interface Pending {
@@ -329,7 +329,7 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
         .map((s, i) => ({ ...s, ordinal: i + 1, ...(s.id === SHAPE ? { decision: { ...s.decision, chosen: ROAD } } : {}) })),
       divergences: [{ stepId: SHAPE, answer: ROAD, staleDependents: [], at: 't', tree: TREE }],
     };
-    await finish(h, await reachedEngine(h), { ok: true, changed: true, plan: next, derivedRoot: h.tree, staleDependents: [], cost: COST });
+    await finish(h, await reachedEngine(h), { ok: true, changed: true, plan: next, derivedRoot: h.tree, staleDependents: [], replaced: [LATER], written: ['fresh-1'], cost: COST });
     assert.deepEqual(loadPlan(h.target), next, 'discriminates: it landed');
     // The learner stands on D, not on the chapter step: the note names where the press was (code review SF3).
     assert.equal(h.view().choiceNote, replanDoneText(1, false, COST, 'step 1 (src)'), 'one later step follows the choice, and no code of the shape step\'s own');
@@ -864,7 +864,7 @@ suite('what a landing says, and what it leaves alone (T-22; code review MF1, SF3
     const recorded: PlanLike = { ...plan, steps: plan.steps.map((s) => (s.id === SHAPE ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s)), divergences: [{ stepId: SHAPE, answer: 'author', staleDependents: [D], at: 't', replanned: false }] };
     const h2 = harness({ plan: { ...plan, steps: plan.steps.map((s) => (s.id === SHAPE ? { ...s, decision: { ...s.decision, options: [...s.decision.options, { id: 'flat', label: 'One folder', consequence: 'c', taken: false }] } } : s)) } });
     h2.session.choose(SHAPE, 'flat');
-    await finish(h2, await reachedEngine(h2), { ok: true, changed: true, plan: recorded, derivedRoot: null, staleDependents: [D], cost: { ...COST, calls: 0, usd: 0 } });
+    await finish(h2, await reachedEngine(h2), { ok: true, changed: true, plan: recorded, derivedRoot: null, staleDependents: [D], replaced: [], written: [], cost: { ...COST, calls: 0, usd: 0 } });
     assert.equal(h2.view().choiceNote, replanDoneText(0, false, { ...COST, calls: 0, usd: 0 }, 'step 1 (src)'));
     assert.match(h2.view().choiceNote ?? '', /nothing was re-planned/);
     assert.doesNotMatch(h2.view().choiceNote ?? '', /^Re-planned/, 'nothing was re-planned, so it does not say it was');
@@ -927,3 +927,122 @@ suite('what a landing says, and what it leaves alone (T-22; code review MF1, SF3
     assert.deepEqual(sentTurns(progress, D), [], 'and nothing from before it is sent as history about the new code');
   });
 });
+
+// The stopped re-review of the review fixes (NF4, NF5) and what follows from it: a press after an earlier
+// one at the same step, and a step a press writes under the id of one it replaced (a step's id is a hash of
+// its kind, path, question and labels, so a model that keeps those mints the same id; T-17's F9).
+suite('a second press at the same step, and a step that comes back under its old id (T-22 re-review)', () => {
+  const SHAPE = 'st-1-shape-src';
+  /** The fixture after one press at D: D re-derived, `fresh-1` written in place of the last step. */
+  const once = (): PlanLike => replanned(fixturePlan());
+  const fresh1 = (plan: PlanLike): StepLike => plan.steps.find((s) => s.id === 'fresh-1')!;
+  const onD = (plan: PlanLike): Progress => setCurrent(markDone(fixtureProgress(plan), 'st-1-shape-src'), D);
+  const outcome = (plan: PlanLike, replaced: string[], written: string[], staleDependents: string[] = []): DivergeOutcome =>
+    ({ ok: true, changed: true, plan, derivedRoot: null, staleDependents, replaced, written, cost: COST });
+
+  test('a record on a chapter pressed before does not say it re-planned the steps the earlier press wrote (NF5)', async () => {
+    const plan = fixturePlan();
+    const shape = plan.steps.find((s) => s.id === SHAPE)!;
+    shape.decision.options = [...shape.decision.options, { id: 'flat', label: 'One folder', consequence: 'c', taken: false }];
+    shape.decision.chosen = 'flat'; // the earlier press's road
+    const earlier: StepLike = { ...plan.steps.find((s) => s.id === D)!, id: 'fresh-s', ordinal: 5, target: { file: 'src/fresh.ts' }, derivedFrom: SHAPE, dependsOn: [SHAPE] };
+    const before: PlanLike = { ...plan, steps: [...plan.steps, earlier], divergences: [{ stepId: SHAPE, answer: 'flat', staleDependents: [], at: 't', replanned: false }] };
+    const allWalked = (p: PlanLike): Progress => setCurrent(p.steps.reduce((acc, s) => markDone(acc, s.id), fixtureProgress(p)), SHAPE);
+    const h = harness({ plan: before, progress: allWalked });
+    h.session.choose(SHAPE, 'author');
+    const recorded: PlanLike = {
+      ...before,
+      steps: before.steps.map((s) => (s.id === SHAPE ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s)),
+      divergences: [...(before['divergences'] as unknown[]), { stepId: SHAPE, answer: 'author', staleDependents: [D, 'fresh-s'], at: 't2', replanned: false }],
+    };
+    await finish(h, await reachedEngine(h), outcome(recorded, [], [], [D, 'fresh-s']));
+    const note = h.view().choiceNote ?? '';
+    assert.doesNotMatch(note, /^Re-planned/, `nothing was re-planned, and the step the earlier press wrote is not this press's: "${note}"`);
+    assert.match(note, /^Your choice is recorded\./);
+  });
+
+  test('a second re-plan counts the steps it wrote, not the ones an earlier press wrote and the learner walked (NF5)', async () => {
+    const first = once();
+    const h = harness({ plan: first, progress: (p) => markDone(onD(p), 'fresh-1') });
+    h.session.choose(D, 'author');
+    const second: PlanLike = {
+      ...first,
+      steps: [
+        ...first.steps.filter((s) => s.id !== 'st-3-symbol-handle').map((s) => (s.id === D ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s)),
+        { ...fresh1(first), id: 'fresh-2', target: { file: 'src/api/fresh2.ts' } },
+      ].map((s, i) => ({ ...s, ordinal: i + 1 })),
+      divergences: [...(first['divergences'] as unknown[]), { stepId: D, answer: 'author', staleDependents: [], at: 't2', tree: TREE }],
+    };
+    await finish(h, await reachedEngine(h), outcome(second, ['st-3-symbol-handle'], ['fresh-2']));
+    const note = h.view().choiceNote ?? '';
+    assert.match(note, /^Re-planned\. This step’s code and 1 later step now follow your choice\./, `only fresh-2 is this press's: "${note}"`);
+  });
+
+  test('a step the learner finished while it re-planned, written again under its own id: refused, and named (NF4, SF6)', async () => {
+    const first = once();
+    const h = harness({ plan: first, progress: onD, navigates: true });
+    h.session.choose(D, 'author');
+    const job = await reachedEngine(h);
+    h.session.goTo('fresh-1');
+    h.session.markDone('fresh-1');
+    await turns();
+    const finishedBytes = h.bytes();
+    const again: PlanLike = {
+      ...first,
+      steps: first.steps.map((s) => (s.id === D ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s.id === 'fresh-1' ? { ...s, scaffold: { loadBearing: [{ startLine: 1, endLine: 3 }], boilerplate: [] } } : s)),
+      divergences: [...(first['divergences'] as unknown[]), { stepId: D, answer: 'author', staleDependents: [], at: 't2', tree: TREE }],
+    };
+    await finish(h, job, outcome(again, ['fresh-1'], ['fresh-1']));
+    assert.match(h.view().choiceNote ?? '', /you finished step 4 \(src\/api\/fresh\.ts\) while it re-planned/, `the finished step's code was replaced; the page says ${JSON.stringify(h.view().choiceNote)}`);
+    assert.deepEqual(h.bytes(), finishedBytes, 'and nothing moved: not the plan, not a version');
+  });
+
+  test('a step written again under its own id starts again: no tick, no verdict, no choice, and its conversation is cut (NF4)', async () => {
+    const first = once();
+    const other = fresh1(first).decision.options[1]!.id;
+    const h = harness({
+      plan: first,
+      progress: (p) => {
+        const base = onD(p);
+        return { ...base, steps: { ...base.steps, 'fresh-1': { status: 'pending', check: { ok: false, at: 't' }, chosen: other, transcript: [{ role: 'user', content: 'why this?' }, { role: 'assistant', content: 'because of the earlier code' }] } } };
+      },
+    });
+    h.session.choose(D, 'author');
+    const again: PlanLike = {
+      ...first,
+      steps: first.steps.map((s) => (s.id === D ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s)),
+      divergences: [...(first['divergences'] as unknown[]), { stepId: D, answer: 'author', staleDependents: [], at: 't2', tree: TREE }],
+    };
+    await finish(h, await reachedEngine(h), outcome(again, ['fresh-1'], ['fresh-1']));
+    const progress = loadProgress(h.target, loadPlan(h.target));
+    const entry = progress.steps['fresh-1'];
+    assert.equal(entry?.check, undefined, `the verdict was about the code the press replaced: ${JSON.stringify(entry)}`);
+    assert.equal(entry?.chosen, undefined, 'and so was the choice made there');
+    assert.notEqual(entry?.status, 'done');
+    assert.deepEqual(sentTurns(progress, 'fresh-1'), [], 'nothing asked about the replaced code is sent as history');
+    assert.match(String(getTranscript(progress, 'fresh-1').at(-1)?.content), /earlier version/, 'and the conversation says why');
+  });
+
+  test('a second press at D does not tell D\'s conversation its earlier code was the author\'s (N12, after a first press)', async () => {
+    const first = once();
+    const h = harness({
+      plan: first,
+      progress: (p) => {
+        const base = onD(p);
+        return { ...base, steps: { ...base.steps, [D]: { ...base.steps[D]!, transcript: [{ role: 'user', content: 'why inline?' }, { role: 'assistant', content: 'because the model wrote it so' }] } } };
+      },
+    });
+    h.session.choose(D, 'author');
+    const again: PlanLike = {
+      ...first,
+      steps: first.steps.map((s) => (s.id === D ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s)),
+      divergences: [...(first['divergences'] as unknown[]), { stepId: D, answer: 'author', staleDependents: [], at: 't2', tree: TREE }],
+    };
+    await finish(h, await reachedEngine(h), outcome(again, [], []));
+    const progress = loadProgress(h.target, loadPlan(h.target));
+    const last = String(getTranscript(progress, D).at(-1)?.content);
+    assert.doesNotMatch(last, /author/, `D's code before this press was the model's: "${last}"`);
+    assert.deepEqual(sentTurns(progress, D), [], 'and the history is still cut');
+  });
+});
+

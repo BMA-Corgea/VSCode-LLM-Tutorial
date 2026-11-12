@@ -478,6 +478,30 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
   });
 
   // T-22's code review, MF1: "nothing follows" is about what is downstream, not about what is left to re-derive.
+  // The stopped re-review's NF4 and NF5: the walk has to know which steps a press replaced and which it wrote,
+  // and an id in the new plan does not say so, because a step's id is a hash of its kind, path, question and labels.
+  test('the outcome names the steps the press replaced and the ones it wrote, D in neither; a step written again under its old id is in both', async () => {
+    const { plan, root, gs, target } = setup();
+    const keepsItsWords = (input: Record<string, unknown>): unknown => ({
+      steps: (input['replacing'] as Array<{ kind: string; chapter: string; path: string; question: string; options: unknown[]; chosen: string; why: string; dependsOn: string[] }>)
+        .map((r) => ({ kind: r.kind, chapter: r.chapter, path: r.path, question: r.question, options: [{ id: 'one', label: 'One way', consequence: 'c1' }, { id: 'two', label: 'Another way', consequence: 'c2' }], recommended: 'one', why: r.why, dependsOn: r.dependsOn })),
+    });
+    const first = await divergePlan(input(plan, root, 's-parse'), depsFor(model(undefined, keepsItsWords).run, gs, target));
+    if (!first.ok || !first.changed) assert.fail(first.ok ? 'nothing changed' : first.reason);
+    const before = new Set(plan.steps.map((s) => s.id));
+    const after = new Set(first.plan.steps.map((s) => s.id));
+    assert.deepEqual([...first.replaced].sort(), plan.steps.filter((s) => !after.has(s.id)).map((s) => s.id).sort(), 'replaced: exactly the steps the plan lost');
+    assert.deepEqual([...first.written].sort(), first.plan.steps.filter((s) => !before.has(s.id)).map((s) => s.id).sort(), 'written: exactly the steps it gained');
+    assert.ok(!first.replaced.includes('s-parse') && !first.written.includes('s-parse'), 'D is in neither: it keeps its id, and its own code is counted apart');
+
+    const routes = first.plan.steps.find((s) => s.target.file === 'src/api/routes.ts' && s.kind === 'file')!;
+    const second = await divergePlan(input(first.plan, root, 's-parse', 'author', [], treeOf(first)), depsFor(model(undefined, keepsItsWords).run, gs, target));
+    if (!second.ok || !second.changed) assert.fail(second.ok ? 'nothing changed' : second.reason);
+    assert.ok(second.plan.steps.some((s) => s.id === routes.id), 'discriminates: the model kept the words, so the step came back under its old id');
+    assert.ok(second.replaced.includes(routes.id), 'its code is gone, so it was replaced');
+    assert.ok(second.written.includes(routes.id), 'and the step under that id is one this press wrote');
+  });
+
   test('a chapter decision whose every dependent is walked lands a record naming them, and asks the model nothing', async () => {
     const { plan, root, gs, target } = setup();
     const m = model();
