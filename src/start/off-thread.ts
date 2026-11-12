@@ -142,7 +142,8 @@ export function offThreadCore(deps: OffThreadDeps): BuildCore {
       // 'error', which would read as the phase having failed part-way through. This is an install
       // with a file missing, and the person reading the sentence can do something about that.
       if (!fs.existsSync(deps.workerFile)) {
-        reject(new Error(`could not start the build: the build worker is missing from this install (${deps.workerFile}); reinstalling the extension should restore it`));
+        // `retryWontHelp`: pressing again cannot cure it, so the build adds no "try again" (T-71 review F3).
+        reject(Object.assign(new Error(`could not start the build: the build worker is missing from this install (${deps.workerFile}); reinstalling the extension should restore it`), { retryWontHelp: true }));
         return;
       }
       if (diedBecause !== undefined) {
@@ -168,7 +169,12 @@ export function offThreadCore(deps: OffThreadDeps): BuildCore {
         finish(() => { if (reply.ok) resolve(reply.value as T); else reject(new Error(reply.message)); });
       }
       function onError(err: unknown): void {
-        finish(() => { stopWorker(); reject(new Error(`${phase} stopped unexpectedly: ${err instanceof Error ? err.message : String(err)}`)); });
+        // The worker's heap limit, reached: the same repository reaches it again (T-71 review F3).
+        const outOfMemory = (err as { code?: unknown } | null)?.code === 'ERR_WORKER_OUT_OF_MEMORY';
+        const why = new Error(outOfMemory
+          ? `${phase} stopped: this repository is too large to read here (the build's worker reached its memory limit)`
+          : `${phase} stopped unexpectedly: ${err instanceof Error ? err.message : String(err)}`);
+        finish(() => { stopWorker(); reject(outOfMemory ? Object.assign(why, { retryWontHelp: true }) : why); });
       }
       function onExit(code: number): void {
         finish(() => { stopWorker(); reject(new Error(`${phase} stopped unexpectedly (the build worker exited with code ${code})`)); });
