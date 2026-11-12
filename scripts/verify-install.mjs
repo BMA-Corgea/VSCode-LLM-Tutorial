@@ -231,7 +231,8 @@ async function verifyOne(editor) {
     '--disable-gpu', '--disable-updates', '--new-window', workspace,
   ]);
   // T-131: the launch command's own stdout and stderr, kept (the last 64 KiB of each) for the failures below: xvfb-run,
-  // and the editor's `code` command, which starts the editor itself detached and returns. A launch that fails at once
+  // and the editor's `code` command, which starts the editor itself detached (and, with no DISPLAY, waits for it: the
+  // `--wait` above). A launch that fails at once
   // (a missing library, a display that will not start, a refused flag) says why there, before any log is written. The
   // editor's own output does not come this way (the command starts it with its output ignored); its logs say the rest.
   const child = spawn(runBin, runArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
