@@ -19,8 +19,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { emptyRequest, IDEA_FIRST_MESSAGE } from '../../src/start/request.js';
-import { handleStartMessage, type PanelState, type StartEffects } from '../../src/start/protocol.js';
-import { renderStartHtml, SUBMIT_NOTES, type SkinsModule } from '../../src/start/view.js';
+import { failedInARowAfter, handleStartMessage, type PanelState, type StartEffects } from '../../src/start/protocol.js';
+import { FAILED_AGAIN, renderStartHtml, SUBMIT_NOTES, type SkinsModule } from '../../src/start/view.js';
 
 const FAKE_SKINS: SkinsModule = {
   SKINS: [
@@ -387,6 +387,37 @@ suite('a press always changes something on the page (T-15)', () => {
       assert.notEqual(observable(dom), building);
     });
   }
+
+  test('T-71: a failure that repeats itself changes the WORDS: the 2nd says so with its count, and the 3rd differs from the 2nd', () => {
+    const dom = buildFakeDom();
+    runScript(dom);
+    const handlers = dom.windowListeners.get('message') ?? [];
+    const notes: string[] = [];
+    for (const inARow of [1, 2, 3]) {
+      handlers[0]!({ data: { type: 'form:accepted' } });
+      handlers[0]!({ data: { type: 'form:idle', payload: { ended: 'failed', inARow } } });
+      notes.push(dom.elements.get('submit-note')?.textContent ?? '');
+    }
+    assert.equal(notes[0], SUBMIT_NOTES.failed);
+    assert.equal(notes[1], FAILED_AGAIN.replace('{n}', '2'));
+    assert.equal(notes[2], FAILED_AGAIN.replace('{n}', '3'));
+    assert.equal(new Set(notes).size, 3, 'two failures in a row left the same words on screen');
+    // An ending with no count (a host from before T-71) still says how it ended.
+    handlers[0]!({ data: { type: 'form:idle', payload: { ended: 'failed' } } });
+    assert.equal(dom.elements.get('submit-note')?.textContent, SUBMIT_NOTES.failed);
+  });
+
+  test('T-71: a re-render keeps the count, and the count is reset by an edit, a pick or any other ending', async () => {
+    const html = renderStartHtml(state({ ended: 'failed', failedInARow: 2 }), FAKE_SKINS);
+    assert.ok(html.includes(FAILED_AGAIN.replace('{n}', '2')), 'a tab switch forgot that it was the second failure');
+    assert.ok(renderStartHtml(state({ ended: 'failed', failedInARow: 1 }), FAKE_SKINS).includes(SUBMIT_NOTES.failed));
+    assert.deepEqual([failedInARowAfter(undefined, 'failed'), failedInARowAfter(1, 'failed'), failedInARowAfter(2, 'failed')], [1, 2, 3]);
+    assert.deepEqual([failedInARowAfter(3, 'built'), failedInARowAfter(3, 'cancelled')], [0, 0]);
+    const edited = await handleStartMessage(state({ ended: 'failed', failedInARow: 2 }), { type: 'form:changed', payload: { request: emptyRequest() } }, effects());
+    assert.equal(edited.state.failedInARow, 0, 'an edit must reset the count');
+    const picked = await handleStartMessage(state({ ended: 'failed', failedInARow: 2 }), { type: 'pick:target' }, { ...effects(), pickFolder: () => Promise.resolve('/a/folder') });
+    assert.equal(picked.state.failedInARow, 0, 'a folder pick must reset the count');
+  });
 
   test('a SECOND press with no edit changes the WORDS on screen, not an attribute nobody sees (review finding 3, AC2)', async () => {
     // September's version of this test asserted a data-press attribute, and passed, while a person

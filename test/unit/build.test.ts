@@ -9,7 +9,7 @@
  */
 
 import * as assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,12 +19,12 @@ import {
   buildDir, buildFromRequest, coreFor, completionMessage, costLine, detectUnsupportedLanguages,
   GIT_KILL_GRACE_MS, gitRunnerWith, gitTimedOut, gitTimeoutMs, GIT_TIMEOUT_MS, GitTimeoutError,
   languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, resolveRepo,
-  realGit, resumeIfMarked, stoppableRunner, writeJsonAtomic,
+  HOST_EXIT_WAIT_MS, realGit, resumeIfMarked, stoppableRunner, TRY_AGAIN, writeJsonAtomic,
   type BuildContext, type ModelProvider, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
   type ExecFileLike, type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
 import { offThreadCore } from '../../src/start/off-thread.js';
-import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
+import { emptyRequest, MARKER_FILE, pidSpace, pidSpaceFor, samePidSpace, unfinishedBuildIn, validateRequest, type BuildRequest } from '../../src/start/request.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
 
@@ -331,6 +331,365 @@ suite('the write-ahead marker (AC4)', () => {
     const marker = readMarker(target);
     assert.ok(marker, 'an unexpected failure should leave the marker for a later Resume');
     assert.equal(marker.phase, 'digest');
+  });
+
+  // T-71: what the learner is told after a build that fails partway, and what the next press does.
+  // Made inside each test: `realCore` is only assigned in suiteSetup, after this loop has run.
+  const failing: Array<[BuildPhase, (core: BuildCore) => BuildCore]> = [
+    ['digest', (core) => ({ ...core, digest: () => Promise.reject(new Error('disk exploded.')) })],
+    ['plan', (core) => ({ ...core, buildPlan: () => Promise.reject(new Error('no order to be had')) })],
+  ];
+  for (const [phase, failingAt] of failing) {
+    test(`T-71: a build that fails at ${phase} says the next step, its marker names this host, and the SAME form builds again`, async () => {
+      const repo = makeTsFixture();
+      const target = tmpDir('build-tutorials-target-');
+      const request = requestFor(repo, target);
+      const outcome = await buildFromRequest(request, baseContext({ core: failingAt(realCore) }));
+      assert.equal(outcome.ok, false);
+      assert.ok(outcome.reason?.endsWith(` — ${TRY_AGAIN}`), `the reason does not say what to do next: ${outcome.reason}`);
+      assert.doesNotMatch(outcome.reason ?? '', /\. —/, 'a reason that ends in a full stop gets one, not two');
+      assert.equal(readMarker(target)?.phase, phase);
+      assert.equal(typeof readMarker(target)?.heartbeatAt, 'string', 'a running build beats');
+      assert.equal(typeof readMarker(target)?.endedAt, 'string', 'and a build that kept its marker says, as it leaves, that it ended');
+      // The very next press, on the unedited form: accepted, where it used to be "not empty".
+      assert.deepEqual(validateRequest(request).problems, {}, 'the same form was refused after a failure that keeps its marker');
+    });
+  }
+
+  test('T-71 review F1: while a build runs, its folder is refused, however that build started; once it has failed, the same form builds again', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held: BuildCore = { ...realCore, digest: async () => { await gate; throw new Error('the network blinked'); } };
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    const running = buildFromRequest(request, baseContext({ core: held })); // a Resume runs exactly this
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(validateRequest(request).problems.target, `a build is running in ${target} now — wait for it to finish, or pick an empty or new folder`);
+    release?.();
+    const outcome = await running;
+    assert.equal(outcome.ok, false);
+    assert.deepEqual(validateRequest(request).problems, {}, 'the same form is built again once that build is over');
+  });
+
+  test('T-71 review F1: a Resume or a Discard answered after a build has started there since does nothing to it', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let digests = 0;
+    const counted: BuildCore = { ...realCore, digest: async (...args) => { digests += 1; await gate; return realCore.digest(...args); } };
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    fs.mkdirSync(path.dirname(markerPath(target)), { recursive: true });
+    fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'interpret', request }));
+    for (const answer of ['Resume', 'Discard'] as const) {
+      let answerNow: (() => void) | undefined;
+      const asked = new Promise<void>((resolve) => { answerNow = resolve; });
+      const prompt = resumeIfMarked(target, { ...baseContext({ core: counted }), confirm: async () => { await asked; return answer; } });
+      const fromTheForm = buildFromRequest(request, baseContext({ core: counted })); // pressed while the prompt is open
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const theirs = readMarker(target)?.startedAt;
+      answerNow?.();
+      assert.equal(await prompt, undefined, `${answer} after a build started there must do nothing`);
+      assert.equal(readMarker(target)?.startedAt, theirs, `${answer} touched the running build's marker`);
+      assert.equal(digests, answer === 'Resume' ? 1 : 2, 'only the form\'s builds ran');
+      release?.();
+      await fromTheForm;
+    }
+  });
+
+  test('T-71 review F2: a cancelled retry of a build that failed in its write leaves the folder empty, not "not empty"', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const repo = makeTsFixture();
+    const failingPlanWrite: FsWriteOps = { ...realFsWriteOps, renameSync: (from, to) => { if (to.endsWith('plan.json')) throw new Error('disk full'); realFsWriteOps.renameSync(from, to); } };
+    const failed = await buildFromRequest(requestFor(repo, target), baseContext({ writeOps: failingPlanWrite }));
+    assert.equal(failed.ok, false);
+    assert.ok(fs.existsSync(path.join(buildDir(target), 'request.json')), 'the failed write left request.json, as the scenario needs');
+    const cancelled = await buildFromRequest(requestFor(repo, target), baseContext({ isCancelled: () => true }));
+    assert.equal(cancelled.cancelled, true);
+    assert.deepEqual(fs.readdirSync(target), [], 'the cancelled retry left the folder as it found nothing');
+  });
+
+  test('T-71 review F3: no "try again" where pressing again cannot help, plain words for a silent error, and a path keeps its dots', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const repo = makeTsFixture();
+    const wontHelp = Object.assign(new Error('could not start the build: the build worker is missing from this install (x); reinstalling the extension should restore it'), { retryWontHelp: true });
+    const missing = await buildFromRequest(requestFor(repo, target), baseContext({ core: { ...realCore, digest: () => Promise.reject(wontHelp) } }));
+    assert.equal(missing.reason, wontHelp.message, 'a failure pressing again cannot cure says only what it says');
+    const silent = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('')) } }));
+    assert.equal(silent.reason, `the build stopped without saying why — ${TRY_AGAIN}`);
+    const dotted = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('could not read /work/my.project...')) } }));
+    assert.equal(dotted.reason, `could not read /work/my.project... — ${TRY_AGAIN}`, 'the dots are the text, not a sentence\'s end');
+    const sentence = await buildFromRequest(requestFor(repo, tmpDir('build-tutorials-target-')), baseContext({ core: { ...realCore, digest: () => Promise.reject(new Error('the network blinked.')) } }));
+    assert.equal(sentence.reason, `the network blinked — ${TRY_AGAIN}`, 'one full stop ending a sentence goes');
+  });
+
+  test("T-71: the language refusal keeps its own words (no \"try again\": the same repository fails the same way)", async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const outcome = await buildFromRequest(requestFor(makeGoFixture(), target), baseContext());
+    assert.equal(outcome.ok, false);
+    assert.doesNotMatch(outcome.reason ?? '', /try again/);
+  });
+});
+
+// ── T-71's re-review: another window, a crash, a trimmed target, a full disk ────────────────────
+
+suite('T-71 re-review: the marker of a build another window may be running', () => {
+  const DEAD_PID = 2 ** 22 + 54_321; // above Linux's default pid_max: no process has it
+  const markerOf = (target: string, request: BuildRequest, fields: Partial<BuildMarker>): void => {
+    fs.mkdirSync(path.dirname(markerPath(target)), { recursive: true });
+    fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'interpret', request, ...fields }));
+  };
+  const liveElsewhere = (): Partial<BuildMarker> => ({ id: 'another-window', pid: process.ppid, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+
+  test('R1: the reload prompt never offers to Resume or Discard a build another window is running now', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, liveElsewhere());
+    let asked = 0;
+    // Its host is alive and stays alive: not a closing one (re-check N1), so after the wait, still not offered.
+    const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Discard'); }, hostExitWaitMs: 300 });
+    assert.equal(outcome, undefined);
+    assert.equal(asked, 0, 'the prompt was shown for a build that is running in another window');
+    assert.equal(readMarker(target)?.id, 'another-window', "the other window's marker was touched");
+  });
+
+  test('R1: a crashed build of THIS machine (its host gone, its heartbeat still fresh) is offered at once, and pressed for at once', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, { id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+    assert.equal(unfinishedBuildIn(target), 'build-again', 'a press must not wait 90 s for a host that is gone');
+    let asked = 0;
+    await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve(undefined); } });
+    assert.equal(asked, 1, 'the interrupted build was not offered after the reload that interrupted it');
+  });
+
+  test('N2: a build whose host has another set of process ids (WSL beside Windows, a host-network container) is never declared dead by its pid', async () => {
+    for (const space of ['linux:another-boot:pid:[4026531836]', undefined]) {
+      const label = space === undefined ? 'a marker that does not say its pid space' : 'a marker from another pid space';
+      const target = tmpDir('build-tutorials-target-');
+      const request = requestFor(makeTsFixture(), target);
+      // The same hostname, a pid that is not alive HERE, and a heartbeat from now: alive where it runs.
+      markerOf(target, request, { id: 'in-wsl', pid: DEAD_PID, host: os.hostname(), pidSpace: space, heartbeatAt: new Date().toISOString() });
+      assert.equal(unfinishedBuildIn(target), 'maybe-running', `${label}: a live build was read as dead, by a pid that means nothing here`);
+      let asked = 0;
+      await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Discard'); }, hostExitWaitMs: 300 });
+      assert.equal(asked, 0, `${label}: the reload offered to Resume or Discard a build that is running`);
+      assert.equal(readMarker(target)?.id, 'in-wsl', `${label}: its marker was touched`);
+    }
+  });
+
+  test("N1: a reload that comes while the interrupted build's old host is still closing waits for it to go, then offers the Resume", async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    // The old host, a pid this test starts: alive 0.6 s more (VS Code gives a closing host up to 6 s), its build beating until it goes.
+    const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600)'], { stdio: 'ignore' });
+    const gone = new Promise<void>((resolve) => { old.on('exit', () => { resolve(); }); });
+    try {
+      assert.equal(typeof old.pid, 'number');
+      markerOf(target, request, { id: 'interrupted', pid: old.pid, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+      let asked = 0;
+      await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve(undefined); }, hostExitWaitMs: 15_000 });
+      assert.equal(asked, 1, 'the reload said nothing: the build it interrupted was not offered, because its old host was still closing');
+      assert.equal(readMarker(target)?.id, 'interrupted', 'a dismissed prompt must leave the marker for next time');
+    } finally {
+      await gone; // it ends on its own, well before the bound
+    }
+  });
+
+  // The check of the N1 and N2 fixes (D1): the pins above hand the rule its pid space and the wait its bound.
+  // These two hold the code that supplies them in a real build and a real reload.
+  test("D1: the marker a real build writes says its host's pid, machine and pid space", async () => {
+    const target = tmpDir('build-tutorials-target-');
+    let seen: BuildMarker | null = null;
+    const outcome = await buildFromRequest(requestFor(makeTsFixture(), target), baseContext({ onPhase: (phase) => { if (phase === 'interpret') seen = readMarker(target); } }));
+    assert.equal(outcome.ok, true, outcome.reason);
+    const marker = seen as BuildMarker | null;
+    assert.ok(marker, 'no marker was on disk while the build interpreted');
+    assert.deepEqual({ pid: marker.pid, host: marker.host, pidSpace: marker.pidSpace }, { pid: process.pid, host: os.hostname(), pidSpace: pidSpace() },
+      'a real marker that does not say its pid space switches off the pid rule and the reload\'s wait without a sound');
+  });
+
+  test("D1: a reload's own wait outlasts VS Code's 6 s for a closing host", async function () {
+    this.timeout(20_000);
+    assert.ok(HOST_EXIT_WAIT_MS > 6_000, `HOST_EXIT_WAIT_MS is ${HOST_EXIT_WAIT_MS}: VS Code 1.145 gives a closing extension host 6 s (windowLifecycleGraceTime), so a shorter wait gives up on a host that is still closing`);
+    // And the default is what a reload uses: no bound given here, an old host that takes a second to go.
+    const target = tmpDir('build-tutorials-target-');
+    const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], { stdio: 'ignore' });
+    const gone = new Promise<void>((resolve) => { old.on('exit', () => { resolve(); }); });
+    try {
+      markerOf(target, requestFor(makeTsFixture(), target), { id: 'interrupted', pid: old.pid, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+      let asked = 0;
+      await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve(undefined); } });
+      assert.equal(asked, 1, 'with its own default bound, the reload gave up on an old host that took a second to close');
+    } finally {
+      await gone;
+    }
+  });
+
+  test('a Cancel of the progress while the reload waits ends the wait, and nothing is asked', async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    markerOf(target, requestFor(makeTsFixture(), target), liveElsewhere());
+    let asked = 0;
+    const started = Date.now();
+    await resumeIfMarked(target, { ...baseContext({ isCancelled: () => Date.now() - started > 300 }), confirm: () => { asked += 1; return Promise.resolve('Discard'); }, hostExitWaitMs: 6_000 });
+    assert.ok(Date.now() - started < 3_000, `the wait went on for ${Date.now() - started} ms after the Cancel`);
+    assert.equal(asked, 0);
+    assert.equal(readMarker(target)?.id, 'another-window');
+  });
+
+  test('a build that fails while the reload waits for its host is offered as soon as its marker says so, not at the end of the wait', async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, liveElsewhere());
+    setTimeout(() => { markerOf(target, request, { ...liveElsewhere(), endedAt: new Date().toISOString() }); }, 300);
+    let askedAfter: number | undefined;
+    const started = Date.now();
+    await resumeIfMarked(target, { ...baseContext(), confirm: () => { askedAfter = Date.now() - started; return Promise.resolve(undefined); }, hostExitWaitMs: 6_000 });
+    assert.ok(askedAfter !== undefined, 'the build that failed during the wait was not offered');
+    assert.ok(askedAfter < 3_000, `it was offered only after ${askedAfter} ms, at the end of the wait, not when its marker said it had ended`);
+  });
+
+  test('N2, off Linux: the pid space is the platform and the boot, so two machines that share a hostname have two', () => {
+    const reads = (bootSecond: number) => ({ bootId: () => { throw new Error('no /proc here'); }, pidNamespace: () => { throw new Error('no /proc here'); }, bootSecond: () => bootSecond });
+    assert.equal(pidSpaceFor('darwin', reads(1_731_300_000)), 'darwin:boot:1731300000');
+    assert.equal(pidSpaceFor('win32', reads(1_731_300_000)), 'win32:boot:1731300000');
+    assert.equal(pidSpaceFor('linux', { bootId: () => 'b00t', pidNamespace: () => 'pid:[4026531836]', bootSecond: () => 1 }), 'linux:b00t:pid:[4026531836]');
+    assert.equal(pidSpaceFor('linux', reads(1)), undefined, 'a Linux whose /proc cannot be read must not claim a pid space');
+    assert.equal(pidSpaceFor('darwin', reads(Number.NaN)), undefined);
+    // One boot, read a second apart or a clock slew later, is one space; another Mac that booted a minute later is not.
+    assert.equal(samePidSpace('darwin:boot:1731300000', 'darwin:boot:1731300001'), true);
+    assert.equal(samePidSpace('darwin:boot:1731300000', 'darwin:boot:1731300060'), false, 'two Macs with one hostname were taken for one machine');
+    assert.equal(samePidSpace('darwin:boot:1731300000', 'win32:boot:1731300000'), false);
+    assert.equal(samePidSpace('linux:b00t:pid:[1]', 'linux:b00t:pid:[2]'), false);
+    assert.equal(samePidSpace('linux:b00t:pid:[1]', 'linux:b00t:pid:[1]'), true);
+  });
+
+  test('R2: a build that finds another live build in its folder just before its first write refuses, and leaves that marker alone', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, liveElsewhere());
+    const outcome = await buildFromRequest(request, baseContext()); // as if it had passed the press before the other build began
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.reason ?? '', /another build started in .* while this one was fetching the repository/);
+    assert.equal(readMarker(target)?.id, 'another-window', "the other build's marker was overwritten or deleted");
+  });
+
+  test('R1: a build another window starts while the prompt is open is left alone, whichever button is pressed', async () => {
+    for (const answer of ['Discard', 'Resume'] as const) {
+      const target = tmpDir('build-tutorials-target-');
+      const request = requestFor(makeTsFixture(), target);
+      markerOf(target, request, { id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date(Date.now() - 600_000).toISOString() });
+      const phases: string[] = [];
+      const outcome = await resumeIfMarked(target, {
+        ...baseContext({ onPhase: (p) => { phases.push(p); } }),
+        confirm: () => { markerOf(target, request, liveElsewhere()); return Promise.resolve(answer); },
+      });
+      assert.equal(outcome, undefined, `${answer}: acted on a folder another window's build had taken`);
+      assert.deepEqual(phases, [], `${answer}: a second build ran there`);
+      assert.equal(readMarker(target)?.id, 'another-window', `${answer}: the other window's marker was touched`);
+    }
+  });
+
+  test('R1: the build the prompt asked about, found alive while it was open (another machine woke), is left alone', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    // One build throughout: the same id and start, only its heartbeat moves.
+    const elsewhere = { id: 'on-a-laptop', pid: 4242, host: 'another-machine', startedAt: new Date(Date.now() - 900_000).toISOString() };
+    markerOf(target, request, { ...elsewhere, heartbeatAt: new Date(Date.now() - 600_000).toISOString() });
+    let asked = 0;
+    const outcome = await resumeIfMarked(target, {
+      ...baseContext(),
+      confirm: () => { asked += 1; markerOf(target, request, { ...elsewhere, heartbeatAt: new Date().toISOString() }); return Promise.resolve('Discard'); },
+    });
+    assert.equal(asked, 1, 'a build silent for 10 minutes on another machine should be offered');
+    assert.equal(outcome, undefined);
+    assert.equal(readMarker(target)?.id, 'on-a-laptop', 'Discard deleted the marker of a build that had just beaten again');
+  });
+
+  test('R2: a tutorial another build finished while this one was fetching is left as it is', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const storage = tmpDir('storage-');
+    const clone = path.join(storage, 'refs', 'BMA-Corgea-fixture');
+    fs.cpSync(makeTsFixture(), clone, { recursive: true });
+    fs.mkdirSync(path.join(clone, '.git'), { recursive: true });
+    const theirs = JSON.stringify({ chapters: [{ id: 'theirs' }] });
+    const fetchWhileAnotherFinishes: GitRunner = (args) => {
+      if (args.includes('fetch')) {
+        fs.mkdirSync(buildDir(target), { recursive: true });
+        fs.writeFileSync(path.join(buildDir(target), 'plan.json'), theirs);
+      }
+      return Promise.resolve('');
+    };
+    const request = { ...requestFor(makeTsFixture(), target), repo: 'https://github.com/BMA-Corgea/fixture' };
+    const outcome = await buildFromRequest(request, { ...baseContext(), globalStorageRoot: storage, git: fetchWhileAnotherFinishes });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.reason ?? '', /another build finished a tutorial in .* while this one was fetching the repository/);
+    assert.equal(fs.readFileSync(path.join(buildDir(target), 'plan.json'), 'utf8'), theirs, 'the finished tutorial was overwritten');
+    assert.equal(readMarker(target), null, 'this build wrote its marker into a finished tutorial');
+  });
+
+  test('R2: a Resume of a build that crashed just after writing its plan still finishes (the plan was there before it began)', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, { phase: 'write', id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+    fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify(request));
+    fs.writeFileSync(path.join(buildDir(target), 'plan.json'), JSON.stringify({ chapters: [] }));
+    const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => Promise.resolve('Resume') });
+    assert.equal(outcome?.ok, true, outcome?.reason);
+    assert.equal(readMarker(target), null);
+  });
+
+  test('R2: a build whose folder another build took over mid-build stops at its next phase, and writes nothing more', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    let interpreted = 0;
+    const core: BuildCore = {
+      ...realCore,
+      // As when this build's heartbeat looked stale (its laptop slept) and another window built over it.
+      buildPlan: (...args) => { markerOf(target, request, liveElsewhere()); return realCore.buildPlan(...args); },
+      interpretPlan: (...args) => { interpreted += 1; return realCore.interpretPlan(...args); },
+    };
+    const outcome = await buildFromRequest(request, baseContext({ core }));
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.reason ?? '', /another build took over .* while this one was running — it stopped and wrote nothing more/);
+    assert.equal(interpreted, 0, 'it went on to ask the model about a folder that was no longer its own');
+    assert.equal(readMarker(target)?.id, 'another-window', "the other build's marker was overwritten");
+    assert.equal(readMarker(target)?.endedAt, undefined, "the other build's marker was marked as ended");
+    assert.equal(fs.existsSync(path.join(buildDir(target), 'plan.json')), false);
+  });
+
+  test('R2: a Cancel of a build whose folder another build has taken over leaves that build\'s marker alone', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    let cancelled = false;
+    const core: BuildCore = {
+      ...realCore,
+      digest: (...args) => { markerOf(target, request, liveElsewhere()); cancelled = true; return realCore.digest(...args); },
+    };
+    const outcome = await buildFromRequest(request, baseContext({ core, isCancelled: () => cancelled }));
+    assert.equal(outcome.cancelled, true, outcome.reason);
+    assert.equal(readMarker(target)?.id, 'another-window', "the Cancel deleted the other build's marker");
+  });
+
+  test('R5: a first marker write that fails (a full disk) leaves nothing of ours behind, so the same form builds there once the disk is freed', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    // The reviewer's case: the temp file is begun, 7 bytes land, and the disk is full.
+    const full: FsWriteOps = {
+      ...realFsWriteOps,
+      writeFileSync: (file, data) => {
+        if (path.basename(file).startsWith(`${MARKER_FILE}.`)) {
+          fs.writeFileSync(file, data.slice(0, 7));
+          throw new Error('ENOSPC: no space left on device, write');
+        }
+        realFsWriteOps.writeFileSync(file, data);
+      },
+    };
+    await assert.rejects(buildFromRequest(request, baseContext({ writeOps: full })), /ENOSPC/);
+    assert.deepEqual(fs.readdirSync(target), [], 'a temp file or an empty build folder was left');
+    assert.equal(validateRequest(request).problems.target, undefined, 'the form refuses the folder');
   });
 });
 

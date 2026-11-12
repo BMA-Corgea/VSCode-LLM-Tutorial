@@ -26,7 +26,7 @@ import { runBuild, type ExtensionApi } from '../src/extension.js';
 import { buildFromRequest, markerPath, type BuildContext, type BuildOutcome } from '../src/start/build.js';
 import { StartPanel, type StartPanelDeps } from '../src/start/panel.js';
 import type { BuildRequest } from '../src/start/request.js';
-import { SUBMIT_NOTES } from '../src/start/view.js';
+import { FAILED_AGAIN, SUBMIT_NOTES } from '../src/start/view.js';
 import { Screen, nextFrame, sleep, type Frame } from './support/screen.js';
 import { STALL_BOUND_MS } from './support/stall-bound.js';
 
@@ -672,5 +672,57 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     }
     assert.ok(!left.some((n) => n.includes('Cancel')), `a progress notification with Cancel outlived the build: ${JSON.stringify(left)}`);
     assert.ok(left.some((n) => n.includes('refused for the test')), `and the outcome itself was never shown: ${JSON.stringify(left)}`);
+  });
+
+  test('T-71: after a build that fails partway, the very next press on the same form builds again, and the reason said it would', async () => {
+    // The first build is the REAL one with a digest that throws, so its real write-ahead marker is
+    // left in the target, as after a network blip or a model error. The press after it used to be
+    // refused: "<target> is not empty — pick an empty or new folder". The retry is held, so the
+    // screen shows "Building…" for as long as this test needs to read it (T-80's lesson).
+    const retry = heldBuild();
+    const request = validRequest();
+    let builds = 0;
+    const { page, read } = await open((r) => {
+      builds += 1;
+      if (builds > 1) { void runBuild(context, core, r, retry.build); return; }
+      void runBuild(context, core, r, (rr, ctx) =>
+        buildFromRequest(rr, { ...ctx, core: { ...ctx.core, digest: () => Promise.reject(new Error('the network blinked')) } }));
+    });
+    await fill(page, request);
+    await until(read, filled, 'valid form');
+    await press(page);
+    const failed = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the first build fails');
+    assert.ok(fs.existsSync(markerPath(request.target)), 'the failed build should leave its marker, for a resume');
+    assert.match(failed.problems[1] ?? '', /the network blinked — nothing is lost: press Build the plan to try again\./,
+      'the reason under Reference repo does not say what to do next');
+
+    await press(page); // the same form, unedited
+    const again = await until(read, (s) => s.note === SUBMIT_NOTES.building || s.problems[2] !== '', 'the next press is answered');
+    assert.equal(again.problems[2], '', `the same form was refused after the failure: ${again.problems[2]}`);
+    assert.equal(again.note, SUBMIT_NOTES.building);
+    assert.equal(builds, 2);
+  });
+
+  test('T-71: a build that fails twice in a row changes the words on screen the second time', async () => {
+    // Driven for T-80: a second failure with the same reason, as a language refusal gives, left the
+    // screen after the press exactly as it was before it. Consecutive frames must differ.
+    const first = heldBuild();
+    const second = heldBuild();
+    let builds = 0;
+    const { page, read } = await open((r) => { builds += 1; void runBuild(context, core, r, (builds === 1 ? first : second).build); });
+    await fill(page, validRequest());
+    await until(read, filled, 'valid form');
+    await press(page);
+    await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+    first.end({ ok: false, reason: 'the same reason both times' });
+    const once = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the first failure');
+
+    await press(page);
+    await until(read, (s) => s.note === SUBMIT_NOTES.building, 'the second build');
+    second.end({ ok: false, reason: 'the same reason both times' });
+    const twice = await until(read, (s) => s.button === 'Build the plan', 'the second failure gives the button back');
+    assert.notDeepEqual({ ...twice, focus: '' }, { ...once, focus: '' }, 'the second failure left the screen exactly as the first did');
+    assert.equal(twice.note, FAILED_AGAIN.replace('{n}', '2'));
+    assert.equal(builds, 2);
   });
 });
