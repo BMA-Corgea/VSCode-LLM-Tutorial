@@ -7,9 +7,10 @@ here and found via the reference table below.
 
 ## Live edge
 
-> **The foreman AFK run of 2026-11-10 ended on the owner's stop: read [`kb/RESUME.md`](RESUME.md) first.**
-> Six tickets landed (five pushed; T-51 merged locally, NOT pushed); T-22, T-71, T-70, T-72 and T-83 are on local
-> branches. It supersedes "Where that stands" and "Waiting on" below, which still describe September.
+> **The foreman burn run of 2026-11-11 ended cleanly at 91% of the week: read [`kb/RESUME.md`](RESUME.md) first.**
+> GitHub CI is green on every step at `f841827`. T-51, T-71, T-83, T-70 and T-131 landed and are pushed; T-72 and
+> T-22 are held on local branches with exact handoffs. It supersedes "Where that stands" and "Waiting on" below,
+> which still describe September.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live.
@@ -57,15 +58,15 @@ that undo and the deferred replan diff need the same substrate.
 - **T-61** (feature) — Model-written code runs as the learner: tell them first, and decide which built… — intake
 - **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — auto-review
 - **T-73** (bug) — A second Check my work with nothing changed leaves the panel exactly as it was:… — intake
-- **T-81** (bug) — The unit and screen suites leave about 390 temp folders per run in /tmp and nev… — uat
-- **T-40** (feature) — Codicons in the webviews, and waiting states that move — uat
-- **T-80** (bug) — T-15's folder-picker screen test fails on clean main: the press after a failed … — uat
-- **T-71** (bug) — After a failed build the same form is refused as 'not empty', with no word that… — gate
+- **T-81** (bug) — The unit and screen suites leave about 390 temp folders per run in /tmp and nev… — monitor
+- **T-40** (feature) — Codicons in the webviews, and waiting states that move — monitor
+- **T-80** (bug) — T-15's folder-picker screen test fails on clean main: the press after a failed … — monitor
+- **T-71** (bug) — After a failed build the same form is refused as 'not empty', with no word that… — uat
 - **T-100** (bug) — Every vscode-test host run leaves a dead vscode-git-*.sock in XDG_RUNTIME_DIR — intake
-- **T-70** (bug) — Cancel during 'asking about each decision…' does not stop the model calls — the… — auto-review
-- **T-72** (bug) — A .gitattributes committed as a symlink to /dev/zero makes repo-tour's read end… — auto-review
-- **T-82** (bug) — CI has been red since Sep 8: a newer git (2.56) no longer prints the index.lock… — uat
-- **T-52** (feature) — The Start form's fields: the theme's placeholder colour and focus outline — uat
+- **T-70** (bug) — Cancel during 'asking about each decision…' does not stop the model calls — the… — uat
+- **T-72** (bug) — A .gitattributes committed as a symlink to /dev/zero makes repo-tour's read end… — gate
+- **T-82** (bug) — CI has been red since Sep 8: a newer git (2.56) no longer prints the index.lock… — monitor
+- **T-52** (feature) — The Start form's fields: the theme's placeholder colour and focus outline — monitor
 - **T-90** (feature) — A symbol press rewrites its whole file from the decision alone: show the code q… — intake
 - **T-91** (bug) — The Start build writes request.json and plan.json through a linked .repo-tour/b… — intake
 - **T-92** (bug) — The dial and the tutor read a taught step's file from an attacker-chosen refere… — intake
@@ -73,8 +74,14 @@ that undo and the deferred replan diff need the same substrate.
 - **T-94** (techdebt) — Derived trees: a lifetime cap of 200 files per plan, and orphan trees never pru… — intake
 - **T-110** (bug) — The Start form's checkbox, radios and skin picker show no focus outline under S… — intake
 - **T-111** (techdebt) — native-polish.test.ts's CSS-rule helpers squeeze out every space, so a selector… — intake
-- **T-51** (bug) — Previous and Next at the ends of the plan are enabled and answer nothing — verify
-- **T-83** (bug) — On GitHub's runner the step panel's Check my work verdict ends below the panel:… — refine
+- **T-51** (bug) — Previous and Next at the ends of the plan are enabled and answer nothing — uat
+- **T-120** (bug) — A Resume or Discard the reload declines does nothing and says nothing — intake
+- **T-121** (bug) — A build's heartbeat is a wall-clock time compared across clocks: a clock ahead … — intake
+- **T-122** (bug) — A reload during a build's clone offers to Resume the previous build's request, … — intake
+- **T-83** (bug) — On GitHub's runner the step panel's Check my work verdict ends below the panel:… — uat
+- **T-123** (bug) — The step panel's hold (T-83) misses a refusal that comes over 20 s after the pr… — intake
+- **T-130** (bug) — T-30's committed-cache test leans on the core following a link out of the tree — uat
+- **T-131** (bug) — CI's install-and-activate step fails on VS Code 1.146.0: no exthost.log is prod… — uat
 
 ## Waiting on
 
@@ -95,6 +102,9 @@ that undo and the deferred replan diff need the same substrate.
 - **T-82** — waiting at spec_ready on human:owner since 2026-11-11
 - **T-52** — waiting at spec_ready on human:owner since 2026-11-11
 - **T-51** — waiting at spec_ready on human:owner since 2026-11-11
+- **T-83** — waiting at spec_ready on human:owner since 2026-11-12
+- **T-130** — waiting at spec_ready on human:owner since 2026-11-12
+- **T-131** — waiting at spec_ready on human:owner since 2026-11-12
 
 
 ## Known landmines (not bugs today; they bite on a named trigger)
