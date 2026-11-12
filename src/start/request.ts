@@ -250,30 +250,64 @@ export function markerHostAlive(marker: Record<string, unknown>): boolean {
 function pidIsAskable(marker: Record<string, unknown>): boolean {
   const here = pidSpace();
   return typeof marker.pid === 'number' && marker.host === os.hostname()
-    && here !== undefined && marker.pidSpace === here;
+    && here !== undefined && typeof marker.pidSpace === 'string' && samePidSpace(marker.pidSpace, here);
+}
+
+/** What `pidSpaceFor` reads: injected so that each platform's answer can be pinned on any one. */
+export interface PidSpaceReads {
+  bootId: () => string;
+  pidNamespace: () => string;
+  /** This machine's boot, in whole seconds since the epoch, as the clock and the uptime put it. */
+  bootSecond: () => number;
+}
+
+const REAL_PID_SPACE_READS: PidSpaceReads = {
+  bootId: () => fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
+  pidNamespace: () => fs.readlinkSync('/proc/self/ns/pid'),
+  bootSecond: () => Math.round(Date.now() / 1000 - os.uptime()),
+};
+
+/**
+ * The set of process ids a process on `platform` belongs to (T-71 re-check N2 and its check), recorded
+ * with the pid in a build's marker. On Linux that is this boot of this kernel (`boot_id`) and this pid
+ * namespace: a container, WSL and another Linux machine each have their own. Elsewhere there is one set
+ * per boot of one machine, so it is the platform and the second the machine booted (the check's "two
+ * Macs with one hostname"); across platforms, as with WSL beside Windows, the names differ. `undefined`
+ * when it cannot be told, and then the pid rule is not used at all.
+ */
+export function pidSpaceFor(platform: string, reads: PidSpaceReads = REAL_PID_SPACE_READS): string | undefined {
+  try {
+    if (platform === 'linux') {
+      const boot = reads.bootId();
+      const namespace = reads.pidNamespace();
+      return boot !== '' && namespace !== '' ? `linux:${boot}:${namespace}` : undefined;
+    }
+    const second = reads.bootSecond();
+    return Number.isSafeInteger(second) && second > 0 ? `${platform}:boot:${second}` : undefined;
+  } catch {
+    return undefined; // not told: leave every marker to its heartbeat
+  }
+}
+
+/**
+ * Whether two `pidSpaceFor` answers name one set of process ids. A Linux one is exact. A boot second is
+ * worked out from the clock and the uptime, so the same boot can read a second either way, and a slewed
+ * clock moves it a little: within 2 s is the same boot. Two machines of one platform and one hostname
+ * that booted within 2 s of each other are taken for one; that is the residual.
+ */
+export function samePidSpace(a: string, b: string): boolean {
+  if (a === b) return true;
+  const boot = /^([a-z0-9]+):boot:(\d+)$/;
+  const x = boot.exec(a);
+  const y = boot.exec(b);
+  return x !== null && y !== null && x[1] === y[1] && Math.abs(Number(x[2]) - Number(y[2])) <= 2;
 }
 
 let ownPidSpace: string | null | undefined;
 
-/**
- * The set of process ids this process's own id belongs to (T-71 re-check N2), recorded with the pid in
- * a build's marker. On Linux that is this boot of this kernel (`boot_id`) and this pid namespace. Every
- * other platform has one set per machine; across platforms, as with WSL beside Windows, the names
- * differ. `undefined` when it cannot be told, and then the pid rule is not used at all.
- */
+/** This process's own `pidSpaceFor`, worked out once. */
 export function pidSpace(): string | undefined {
-  if (ownPidSpace === undefined) {
-    ownPidSpace = null;
-    if (process.platform === 'linux') {
-      try {
-        const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-        const namespace = fs.readlinkSync('/proc/self/ns/pid');
-        if (boot !== '' && namespace !== '') ownPidSpace = `linux:${boot}:${namespace}`;
-      } catch { /* not told: leave every marker to its heartbeat */ }
-    } else {
-      ownPidSpace = process.platform;
-    }
-  }
+  if (ownPidSpace === undefined) ownPidSpace = pidSpaceFor(process.platform) ?? null;
   return ownPidSpace ?? undefined;
 }
 

@@ -19,11 +19,11 @@ import {
   buildDir, buildFromRequest, coreFor, completionMessage, costLine, detectUnsupportedLanguages,
   GIT_KILL_GRACE_MS, gitRunnerWith, gitTimedOut, gitTimeoutMs, GIT_TIMEOUT_MS, GitTimeoutError,
   languageRefusalMessage, markerPath, readFreshMarker, readMarker, realFsWriteOps, resolveRepo,
-  realGit, resumeIfMarked, TRY_AGAIN, writeJsonAtomic,
+  HOST_EXIT_WAIT_MS, realGit, resumeIfMarked, TRY_AGAIN, writeJsonAtomic,
   type BuildContext, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
   type ExecFileLike, type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
-import { emptyRequest, MARKER_FILE, pidSpace, unfinishedBuildIn, validateRequest, type BuildRequest } from '../../src/start/request.js';
+import { emptyRequest, MARKER_FILE, pidSpace, pidSpaceFor, samePidSpace, unfinishedBuildIn, validateRequest, type BuildRequest } from '../../src/start/request.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
 
@@ -493,6 +493,76 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     } finally {
       await gone; // it ends on its own, well before the bound
     }
+  });
+
+  // The check of the N1 and N2 fixes (D1): the pins above hand the rule its pid space and the wait its bound.
+  // These two hold the code that supplies them in a real build and a real reload.
+  test("D1: the marker a real build writes says its host's pid, machine and pid space", async () => {
+    const target = tmpDir('build-tutorials-target-');
+    let seen: BuildMarker | null = null;
+    const outcome = await buildFromRequest(requestFor(makeTsFixture(), target), baseContext({ onPhase: (phase) => { if (phase === 'interpret') seen = readMarker(target); } }));
+    assert.equal(outcome.ok, true, outcome.reason);
+    const marker = seen as BuildMarker | null;
+    assert.ok(marker, 'no marker was on disk while the build interpreted');
+    assert.deepEqual({ pid: marker.pid, host: marker.host, pidSpace: marker.pidSpace }, { pid: process.pid, host: os.hostname(), pidSpace: pidSpace() },
+      'a real marker that does not say its pid space switches off the pid rule and the reload\'s wait without a sound');
+  });
+
+  test("D1: a reload's own wait outlasts VS Code's 6 s for a closing host", async function () {
+    this.timeout(20_000);
+    assert.ok(HOST_EXIT_WAIT_MS > 6_000, `HOST_EXIT_WAIT_MS is ${HOST_EXIT_WAIT_MS}: VS Code 1.145 gives a closing extension host 6 s (windowLifecycleGraceTime), so a shorter wait gives up on a host that is still closing`);
+    // And the default is what a reload uses: no bound given here, an old host that takes a second to go.
+    const target = tmpDir('build-tutorials-target-');
+    const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], { stdio: 'ignore' });
+    const gone = new Promise<void>((resolve) => { old.on('exit', () => { resolve(); }); });
+    try {
+      markerOf(target, requestFor(makeTsFixture(), target), { id: 'interrupted', pid: old.pid, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+      let asked = 0;
+      await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve(undefined); } });
+      assert.equal(asked, 1, 'with its own default bound, the reload gave up on an old host that took a second to close');
+    } finally {
+      await gone;
+    }
+  });
+
+  test('a Cancel of the progress while the reload waits ends the wait, and nothing is asked', async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    markerOf(target, requestFor(makeTsFixture(), target), liveElsewhere());
+    let asked = 0;
+    const started = Date.now();
+    await resumeIfMarked(target, { ...baseContext({ isCancelled: () => Date.now() - started > 300 }), confirm: () => { asked += 1; return Promise.resolve('Discard'); }, hostExitWaitMs: 6_000 });
+    assert.ok(Date.now() - started < 3_000, `the wait went on for ${Date.now() - started} ms after the Cancel`);
+    assert.equal(asked, 0);
+    assert.equal(readMarker(target)?.id, 'another-window');
+  });
+
+  test('a build that fails while the reload waits for its host is offered as soon as its marker says so, not at the end of the wait', async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, liveElsewhere());
+    setTimeout(() => { markerOf(target, request, { ...liveElsewhere(), endedAt: new Date().toISOString() }); }, 300);
+    let askedAfter: number | undefined;
+    const started = Date.now();
+    await resumeIfMarked(target, { ...baseContext(), confirm: () => { askedAfter = Date.now() - started; return Promise.resolve(undefined); }, hostExitWaitMs: 6_000 });
+    assert.ok(askedAfter !== undefined, 'the build that failed during the wait was not offered');
+    assert.ok(askedAfter < 3_000, `it was offered only after ${askedAfter} ms, at the end of the wait, not when its marker said it had ended`);
+  });
+
+  test('N2, off Linux: the pid space is the platform and the boot, so two machines that share a hostname have two', () => {
+    const reads = (bootSecond: number) => ({ bootId: () => { throw new Error('no /proc here'); }, pidNamespace: () => { throw new Error('no /proc here'); }, bootSecond: () => bootSecond });
+    assert.equal(pidSpaceFor('darwin', reads(1_731_300_000)), 'darwin:boot:1731300000');
+    assert.equal(pidSpaceFor('win32', reads(1_731_300_000)), 'win32:boot:1731300000');
+    assert.equal(pidSpaceFor('linux', { bootId: () => 'b00t', pidNamespace: () => 'pid:[4026531836]', bootSecond: () => 1 }), 'linux:b00t:pid:[4026531836]');
+    assert.equal(pidSpaceFor('linux', reads(1)), undefined, 'a Linux whose /proc cannot be read must not claim a pid space');
+    assert.equal(pidSpaceFor('darwin', reads(Number.NaN)), undefined);
+    // One boot, read a second apart or a clock slew later, is one space; another Mac that booted a minute later is not.
+    assert.equal(samePidSpace('darwin:boot:1731300000', 'darwin:boot:1731300001'), true);
+    assert.equal(samePidSpace('darwin:boot:1731300000', 'darwin:boot:1731300060'), false, 'two Macs with one hostname were taken for one machine');
+    assert.equal(samePidSpace('darwin:boot:1731300000', 'win32:boot:1731300000'), false);
+    assert.equal(samePidSpace('linux:b00t:pid:[1]', 'linux:b00t:pid:[2]'), false);
+    assert.equal(samePidSpace('linux:b00t:pid:[1]', 'linux:b00t:pid:[1]'), true);
   });
 
   test('R2: a build that finds another live build in its folder just before its first write refuses, and leaves that marker alone', async () => {

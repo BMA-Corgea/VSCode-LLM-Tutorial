@@ -878,9 +878,16 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
   // is alive while it closes, beating as it goes. Wait for that host to go before deciding. Not for a
   // pid this process itself has, which would never go.
   const closing = (m: BuildMarker): boolean => m.pid !== process.pid && markerHostAlive(m as unknown as Record<string, unknown>);
+  // The marker is read again at every poll: a build that ends, goes or changes hands while this waits
+  // decides it at once (the check's note), and so does a Cancel of the progress this runs under.
   if (running(marker) && closing(marker)) {
     const until = Date.now() + (ctx.hostExitWaitMs ?? HOST_EXIT_WAIT_MS);
-    while (closing(marker) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, HOST_EXIT_POLL_MS));
+    let waitingOn: BuildMarker | null = marker;
+    while (waitingOn && running(waitingOn) && closing(waitingOn) && Date.now() < until && !ctx.isCancelled?.()) {
+      await new Promise((resolve) => setTimeout(resolve, HOST_EXIT_POLL_MS));
+      waitingOn = readFreshMarker(target, ctx.now ?? Date.now);
+    }
+    if (ctx.isCancelled?.()) return undefined;
     marker = readFreshMarker(target, ctx.now ?? Date.now);
     if (!marker) return undefined;
   }
