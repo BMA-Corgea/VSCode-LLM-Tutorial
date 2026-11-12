@@ -547,6 +547,8 @@ interface ReplanJob {
   previous: { stepId: string; reason: string; inARow: number } | undefined;
   /** settles when the job is over, for `settled()` */
   done: Promise<void>;
+  /** steps the automated dial completed on arrival while this ran: the dial's work, not the learner's (re-review R5) */
+  arrivals: Set<string>;
 }
 
 export interface WalkAdapters {
@@ -981,7 +983,7 @@ export class WalkSession {
    * exactly as they were.
    */
   private startReplan(stepId: string, optionId: string): void {
-    const job: ReplanJob = { stepId, optionId, message: REPLAN_STARTING, cancelled: false, previous: this.choiceRefusal, done: Promise.resolve() };
+    const job: ReplanJob = { stepId, optionId, message: REPLAN_STARTING, cancelled: false, previous: this.choiceRefusal, done: Promise.resolve(), arrivals: new Set() };
     this.replan = job;
     this.choiceRefusal = undefined;
     this.pushReplanFrame();
@@ -1069,7 +1071,8 @@ export class WalkSession {
     const stays = new Set(outcome.plan.steps.map((s) => s.id));
     // Replaced means its code is gone, whether or not a step the press wrote came back with its id (NF4).
     const replacedIds = new Set(outcome.replaced);
-    const finished = derivedFrom.steps.filter((s) => (!stays.has(s.id) || replacedIds.has(s.id)) && this.progress.steps[s.id]?.status === 'done');
+    // Only the learner's own work: a step the automated dial completed on arrival meanwhile is not (re-review R5).
+    const finished = derivedFrom.steps.filter((s) => (!stays.has(s.id) || replacedIds.has(s.id)) && this.progress.steps[s.id]?.status === 'done' && !job.arrivals.has(s.id));
     if (finished.length > 0) {
       const named = finished.slice(0, 8).map(stepLabel).join(', ') + (finished.length > 8 ? `, and ${finished.length - 8} more` : '');
       this.replanRefused(job, replanRefusedText(`you finished ${named} while it re-planned, and the new plan would have replaced ${finished.length === 1 ? 'it' : 'them'}. Press the road again to re-plan with your work kept`));
@@ -2210,7 +2213,11 @@ export class WalkSession {
     // tree re-fires `goTo` for the step already current, and `git commit` on an unchanged file
     // fails with "nothing to commit", which would surface as a refusal that never happened.
     const complete = dial === 'automated' && attempt.landed && !wasDone;
-    if (complete) this.progress = markDoneIn(this.progress, stepId);
+    if (complete) {
+      this.progress = markDoneIn(this.progress, stepId);
+      // A re-plan running meanwhile must not take this for the learner's own work (SF6's refusal; re-review R5).
+      this.replan?.arrivals.add(stepId);
+    }
 
     // The reveal this pass owes the learner (AC4; code review finding 2), and every part of
     // the condition is load-bearing. The file APPEARED — `landed` measured against the existence taken

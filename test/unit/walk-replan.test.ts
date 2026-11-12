@@ -1064,10 +1064,38 @@ suite('a second press at the same step, and a step that comes back under its old
 // whose earlier re-derived code cannot be found.
 suite('what a landing meets: a question in flight, a tree that is gone (T-22 re-review)', () => {
   let realTutor: TutorCore;
+  let dialCore: DialCore;
   suiteSetup(async () => {
     const loaded = await loadCore(resolveCoreRoot('../repo-tour', process.cwd()));
     assert.ok(loaded.found, loaded.reason ?? 'repo-tour should be found at the sibling checkout');
     realTutor = tutorCoreFor(loaded.loaded);
+    dialCore = dialCoreFor(loaded.loaded);
+  });
+
+  // The re-review of the fixes, R5: SF6 refuses a landing that would replace work the learner finished while it
+  // re-planned. In automated mode the dial marks a step done when it writes the step's file on arrival, so moving
+  // on with Next while the re-plan ran stopped a landing the learner had paid for, over work they never did.
+  test('a step the automated dial completed on arrival while it re-planned does not stop the landing (R5)', async () => {
+    const plan = fixturePlan();
+    plan.steps = plan.steps.map((s) => (s.id === 'st-3-symbol-handle' ? { ...s, kind: 'file' as const, target: { file: 'src/api/routes.ts' } } : s));
+    const h = harness({
+      plan, dial: 'automated', navigates: true, core: () => Promise.resolve(dialCore),
+      reference: { 'src/api/routes.ts': 'export function handle(body: string): number {\n  return body.length;\n}\n' },
+      progress: (p) => setCurrent(markDone(fixtureProgress(p), 'st-1-shape-src'), D),
+    });
+    h.session.choose(D, ANSWER);
+    const job = await reachedEngine(h);
+    h.session.goTo('st-3-symbol-handle');
+    for (let i = 0; i < 200 && loadProgress(h.target, loadPlan(h.target)).steps['st-3-symbol-handle']?.status !== 'done'; i += 1) await turns(1);
+    assert.equal(loadProgress(h.target, loadPlan(h.target)).steps['st-3-symbol-handle']?.status, 'done', 'discriminates: the dial wrote the file and completed the step on arrival');
+    const next: PlanLike = {
+      ...plan,
+      steps: plan.steps.filter((s) => s.id !== 'st-3-symbol-handle').map((s) => (s.id === D ? { ...s, derivedFrom: D, decision: { ...s.decision, chosen: ANSWER } } : s))
+        .concat([{ ...plan.steps.find((s) => s.id === 'st-3-symbol-handle')!, id: 'fresh-routes', derivedFrom: D }]).map((s, i) => ({ ...s, ordinal: i + 1 })),
+      divergences: [{ stepId: D, answer: ANSWER, staleDependents: [], at: 't', tree: TREE }],
+    };
+    await finish(h, job, { ok: true, changed: true, plan: next, derivedRoot: h.tree, staleDependents: [], replaced: ['st-3-symbol-handle'], written: ['fresh-routes'], cost: COST });
+    assert.match(h.view().choiceNote ?? '', /^Re-planned/, `the learner did no work there, so the press lands: ${JSON.stringify(h.view().choiceNote)}`);
   });
 
   test('a question at D in flight when the re-plan lands: its answer is put before the line, and not sent as history about the new code (NF7)', async () => {
