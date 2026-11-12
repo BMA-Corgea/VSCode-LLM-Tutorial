@@ -194,6 +194,29 @@ suite('saveDivergedPlan — a version is never overwritten, whatever is planted 
   });
 });
 
+// The stopped re-review's NF9: the store promises a version is never written over, and the listing that
+// picks the number cannot be the whole of that promise, because a second window can write that number
+// after the listing. Nothing failed with the check after it removed.
+suite('saveDivergedPlan — a version written by someone else after the listing is not written over', () => {
+  test('a number taken between the listing and the write is refused in words, and its file kept', () => {
+    const { target, planFile, bytes } = setup();
+    const versions = versionsOf(target);
+    fs.mkdirSync(versions);
+    fs.writeFileSync(path.join(versions, '1.json'), 'the other window\'s version');
+    // The listing as it was a moment before the other window wrote `1.json`.
+    const realReaddir = fs.readdirSync;
+    const listedEarly = ((dir: fs.PathLike, ...rest: unknown[]) => (path.resolve(String(dir)) === path.resolve(versions) ? [] : (realReaddir as (...a: unknown[]) => unknown)(dir, ...rest))) as typeof fs.readdirSync;
+    fs.readdirSync = listedEarly;
+    try {
+      assert.throws(() => saveDivergedPlan(target, planNaming('k/next')), /version 1 already exists, and a version is never overwritten/, 'a version another window wrote after the listing was written over');
+    } finally {
+      fs.readdirSync = realReaddir;
+    }
+    assert.equal(fs.readFileSync(path.join(versions, '1.json'), 'utf8'), 'the other window\'s version', 'its version is kept');
+    assert.equal(fs.readFileSync(planFile, 'utf8'), bytes, 'and the plan is not replaced');
+  });
+});
+
 // T-22's code review, N6: the version must be the plan the press was derived from. If the plan on disk
 // changed meanwhile (the folder open in a second window), replacing it would drop that change silently.
 suite('saveDivergedPlan — the plan the press was derived from (code review N6)', () => {

@@ -397,4 +397,22 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     const reloaded = await d.onStep(D);
     assert.match(reloaded.stale, /step 4 \(src\/api\/routes\.ts\)/, 'the plan itself remembers it');
   }));
+
+  // T-22's code review N6, through the real replanner: the store refuses to replace a plan that changed on
+  // disk since the press, but only when the replanner hands it the plan the press was made from. No unit
+  // test can see the wiring in `src/extension.ts` (the stopped re-review's NF9): this one can.
+  test('a plan another window changed while it re-planned is not replaced: refused in words, and the change stands (N6)', () => drive(async (d) => {
+    await d.onStep(D);
+    d.model.hold();
+    await d.press(choose(ROAD));
+    await until(d.read, (p) => p.cancel, 'it is re-planning');
+    const planFile = path.join(d.build, 'plan.json');
+    const edited = `${JSON.stringify({ ...(JSON.parse(d.planBefore.toString('utf8')) as Record<string, unknown>), editedElsewhere: true }, null, 3)}\n`;
+    fs.writeFileSync(planFile, edited);
+    d.model.release();
+    const ended = await until(d.read, (p) => !p.cancel && p.note !== '', 'the press ends');
+    assert.match(ended.note, /the plan on disk changed while this re-planned/, `the landing is refused in words; the page says ${JSON.stringify(ended.note)}`);
+    assert.equal(fs.readFileSync(planFile, 'utf8'), edited, 'the other window\'s change stands');
+    assert.equal(fs.existsSync(path.join(d.build, 'versions')), false, 'and nothing was versioned');
+  }));
 });
