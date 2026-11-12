@@ -9,7 +9,7 @@
  */
 
 import * as assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,7 +23,7 @@ import {
   type BuildContext, type BuildCore, type BuildMarker, type BuildPhase, type DigestResultLike,
   type ExecFileLike, type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
-import { emptyRequest, MARKER_FILE, unfinishedBuildIn, validateRequest, type BuildRequest } from '../../src/start/request.js';
+import { emptyRequest, MARKER_FILE, pidSpace, unfinishedBuildIn, validateRequest, type BuildRequest } from '../../src/start/request.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
 
@@ -437,14 +437,15 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     fs.mkdirSync(path.dirname(markerPath(target)), { recursive: true });
     fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'interpret', request, ...fields }));
   };
-  const liveElsewhere = (): Partial<BuildMarker> => ({ id: 'another-window', pid: process.ppid, host: os.hostname(), heartbeatAt: new Date().toISOString() });
+  const liveElsewhere = (): Partial<BuildMarker> => ({ id: 'another-window', pid: process.ppid, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
 
   test('R1: the reload prompt never offers to Resume or Discard a build another window is running now', async () => {
     const target = tmpDir('build-tutorials-target-');
     const request = requestFor(makeTsFixture(), target);
     markerOf(target, request, liveElsewhere());
     let asked = 0;
-    const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Discard'); } });
+    // Its host is alive and stays alive: not a closing one (re-check N1), so after the wait, still not offered.
+    const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Discard'); }, hostExitWaitMs: 300 });
     assert.equal(outcome, undefined);
     assert.equal(asked, 0, 'the prompt was shown for a build that is running in another window');
     assert.equal(readMarker(target)?.id, 'another-window', "the other window's marker was touched");
@@ -453,11 +454,45 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
   test('R1: a crashed build of THIS machine (its host gone, its heartbeat still fresh) is offered at once, and pressed for at once', async () => {
     const target = tmpDir('build-tutorials-target-');
     const request = requestFor(makeTsFixture(), target);
-    markerOf(target, request, { id: 'crashed', pid: DEAD_PID, host: os.hostname(), heartbeatAt: new Date().toISOString() });
+    markerOf(target, request, { id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
     assert.equal(unfinishedBuildIn(target), 'build-again', 'a press must not wait 90 s for a host that is gone');
     let asked = 0;
     await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve(undefined); } });
     assert.equal(asked, 1, 'the interrupted build was not offered after the reload that interrupted it');
+  });
+
+  test('N2: a build whose host has another set of process ids (WSL beside Windows, a host-network container) is never declared dead by its pid', async () => {
+    for (const space of ['linux:another-boot:pid:[4026531836]', undefined]) {
+      const label = space === undefined ? 'a marker that does not say its pid space' : 'a marker from another pid space';
+      const target = tmpDir('build-tutorials-target-');
+      const request = requestFor(makeTsFixture(), target);
+      // The same hostname, a pid that is not alive HERE, and a heartbeat from now: alive where it runs.
+      markerOf(target, request, { id: 'in-wsl', pid: DEAD_PID, host: os.hostname(), pidSpace: space, heartbeatAt: new Date().toISOString() });
+      assert.equal(unfinishedBuildIn(target), 'maybe-running', `${label}: a live build was read as dead, by a pid that means nothing here`);
+      let asked = 0;
+      await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Discard'); }, hostExitWaitMs: 300 });
+      assert.equal(asked, 0, `${label}: the reload offered to Resume or Discard a build that is running`);
+      assert.equal(readMarker(target)?.id, 'in-wsl', `${label}: its marker was touched`);
+    }
+  });
+
+  test("N1: a reload that comes while the interrupted build's old host is still closing waits for it to go, then offers the Resume", async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    // The old host, a pid this test starts: alive 0.6 s more (VS Code gives a closing host up to 6 s), its build beating until it goes.
+    const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600)'], { stdio: 'ignore' });
+    const gone = new Promise<void>((resolve) => { old.on('exit', () => { resolve(); }); });
+    try {
+      assert.equal(typeof old.pid, 'number');
+      markerOf(target, request, { id: 'interrupted', pid: old.pid, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+      let asked = 0;
+      await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve(undefined); }, hostExitWaitMs: 15_000 });
+      assert.equal(asked, 1, 'the reload said nothing: the build it interrupted was not offered, because its old host was still closing');
+      assert.equal(readMarker(target)?.id, 'interrupted', 'a dismissed prompt must leave the marker for next time');
+    } finally {
+      await gone; // it ends on its own, well before the bound
+    }
   });
 
   test('R2: a build that finds another live build in its folder just before its first write refuses, and leaves that marker alone', async () => {
@@ -474,7 +509,7 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     for (const answer of ['Discard', 'Resume'] as const) {
       const target = tmpDir('build-tutorials-target-');
       const request = requestFor(makeTsFixture(), target);
-      markerOf(target, request, { id: 'crashed', pid: DEAD_PID, host: os.hostname(), heartbeatAt: new Date(Date.now() - 600_000).toISOString() });
+      markerOf(target, request, { id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date(Date.now() - 600_000).toISOString() });
       const phases: string[] = [];
       const outcome = await resumeIfMarked(target, {
         ...baseContext({ onPhase: (p) => { phases.push(p); } }),
@@ -527,7 +562,7 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
   test('R2: a Resume of a build that crashed just after writing its plan still finishes (the plan was there before it began)', async () => {
     const target = tmpDir('build-tutorials-target-');
     const request = requestFor(makeTsFixture(), target);
-    markerOf(target, request, { phase: 'write', id: 'crashed', pid: DEAD_PID, host: os.hostname(), heartbeatAt: new Date().toISOString() });
+    markerOf(target, request, { phase: 'write', id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
     fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify(request));
     fs.writeFileSync(path.join(buildDir(target), 'plan.json'), JSON.stringify({ chapters: [] }));
     const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => Promise.resolve('Resume') });

@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
-import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerSaysRunning, parseGithubUrl, type BuildRequest } from './request.js';
+import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, pidSpace, type BuildRequest } from './request.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
 // repo-tour's real types — see src/core.ts's header for why the boundary is typed this loosely). ──
@@ -447,6 +447,8 @@ export interface BuildMarker {
   /** The extension host that ran it, and its machine: a gone host on this machine is a dead build at once. */
   pid?: number;
   host?: string;
+  /** The set of process ids `pid` belongs to (`pidSpace()`, re-check N2): the pid is asked about only from the same set. */
+  pidSpace?: string;
 }
 
 /** How long an interrupted build stays worth offering to resume (plan step 6e). */
@@ -642,7 +644,7 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
   const target = request.target;
   const marker: BuildMarker = {
     startedAt: new Date().toISOString(), phase: 'digest', request,
-    id: randomBytes(8).toString('hex'), pid: process.pid, host: os.hostname(),
+    id: randomBytes(8).toString('hex'), pid: process.pid, host: os.hostname(), pidSpace: pidSpace(),
   };
   // T-71 review F1: this host is building this folder until the build is over, however it started.
   const key = path.resolve(target);
@@ -847,7 +849,19 @@ export interface ResumeContext extends BuildContext {
   now?: () => number;
   /** Prompts Resume/Discard; `undefined` = dismissed (leaves the marker for next time). */
   confirm(message: string): Promise<'Resume' | 'Discard' | undefined>;
+  /** How long to wait for a closing extension host before deciding; `HOST_EXIT_WAIT_MS` when absent. */
+  hostExitWaitMs?: number;
 }
+
+/**
+ * How long a reload waits for the old extension host of the build it found, before deciding whether to
+ * offer it (T-71 re-check N1). A reload starts this window's new host while the old one, the one that
+ * ran the build, is still closing. VS Code 1.145 gives a closing host 6 s
+ * (`windowLifecycleGraceTime`) and then kills it. A host still alive after this wait is not closing: it
+ * is another window's, running that build now.
+ */
+export const HOST_EXIT_WAIT_MS = 8_000;
+const HOST_EXIT_POLL_MS = 200;
 
 /**
  * `target` is whatever `workspaceState.get('buildTutorials.currentBuild')` remembers — the
@@ -856,10 +870,20 @@ export interface ResumeContext extends BuildContext {
  */
 export async function resumeIfMarked(target: string | undefined, ctx: ResumeContext): Promise<BuildOutcome | undefined> {
   if (!target) return undefined;
-  const marker = readFreshMarker(target, ctx.now ?? Date.now);
+  let marker = readFreshMarker(target, ctx.now ?? Date.now);
   if (!marker) return undefined;
   // T-71 re-review R1: a build that may still be running, in this window or another, is not offered.
   const running = (m: BuildMarker): boolean => BUILDING_NOW.has(path.resolve(target)) || markerSaysRunning(m as unknown as Record<string, unknown>, Date.now(), 'not-running');
+  // T-71 re-check N1: the build this reload interrupted can still read as running, because its old host
+  // is alive while it closes, beating as it goes. Wait for that host to go before deciding. Not for a
+  // pid this process itself has, which would never go.
+  const closing = (m: BuildMarker): boolean => m.pid !== process.pid && markerHostAlive(m as unknown as Record<string, unknown>);
+  if (running(marker) && closing(marker)) {
+    const until = Date.now() + (ctx.hostExitWaitMs ?? HOST_EXIT_WAIT_MS);
+    while (closing(marker) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, HOST_EXIT_POLL_MS));
+    marker = readFreshMarker(target, ctx.now ?? Date.now);
+    if (!marker) return undefined;
+  }
   if (running(marker)) return undefined;
 
   const answer = await ctx.confirm(`A build for ${target} was interrupted (in progress: ${marker.phase}). Resume it?`);

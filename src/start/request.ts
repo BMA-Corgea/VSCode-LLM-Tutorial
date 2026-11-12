@@ -206,9 +206,10 @@ export function unfinishedBuildIn(target: string, now: number = Date.now()): 'bu
  * Whether the build that wrote `marker` may still be running (T-71 reviews F1, F4 and the re-review's
  * R1, R3). The one rule the form's press and the reload's Resume prompt both apply:
  *   - it says it ended (`endedAt`): not running;
- *   - its extension host was on THIS machine and that process is gone (a reload, a crash): not
- *     running, at once, whatever its heartbeat says. A pid only ever declares a build dead early; it
- *     never makes one alive (ids are reused), and a clock that jumped cannot keep a dead build alive;
+ *   - its extension host was on THIS machine, among the same process ids (`pidSpace`, re-check N2),
+ *     and that process is gone (a reload, a crash): not running, at once, whatever its heartbeat says.
+ *     A pid only ever declares a build dead early; it never makes one alive (ids are reused), and a
+ *     clock that jumped cannot keep a dead build alive;
  *   - otherwise its heartbeat decides: fresh, running (perhaps in another window, or on another
  *     machine sharing the folder); older than `HEARTBEAT_STALE_MS`, not;
  *   - a marker from before heartbeats: running for 6 hours from its start, then not, when a press
@@ -222,12 +223,58 @@ export function markerSaysRunning(
   withoutHeartbeat: 'running' | 'not-running' = 'running',
 ): boolean {
   if (typeof marker.endedAt === 'string') return false;
-  if (typeof marker.pid === 'number' && marker.host === os.hostname() && !processAlive(marker.pid)) return false;
+  if (pidIsAskable(marker) && !processAlive(marker.pid as number)) return false;
   const beat = typeof marker.heartbeatAt === 'string' ? Date.parse(marker.heartbeatAt) : Number.NaN;
   if (!Number.isNaN(beat)) return now - beat < HEARTBEAT_STALE_MS;
   if (withoutHeartbeat === 'not-running') return false;
   const started = typeof marker.startedAt === 'string' ? Date.parse(marker.startedAt) : Number.NaN;
   return Number.isNaN(started) || now - started < NO_HEARTBEAT_STALE_MS;
+}
+
+/**
+ * Whether the extension host that wrote `marker` is a live process that this one can see by its pid
+ * (T-71 re-check N1). True for the window whose build it is, and also, for up to 6 s after a reload,
+ * for that window's old host while it closes.
+ */
+export function markerHostAlive(marker: Record<string, unknown>): boolean {
+  return pidIsAskable(marker) && processAlive(marker.pid as number);
+}
+
+/**
+ * Whether `marker.pid` names a process that THIS process can ask about (T-71 re-check N2). That holds
+ * only on the same machine AND among the same set of process ids. WSL beside Windows, a host-network
+ * container, and two machines with a stock hostname each share a hostname, not their pids: there, a
+ * live build's pid reads as gone. A marker that does not say its pid space (one from before this rule,
+ * or one written where it cannot be told) is left to its heartbeat.
+ */
+function pidIsAskable(marker: Record<string, unknown>): boolean {
+  const here = pidSpace();
+  return typeof marker.pid === 'number' && marker.host === os.hostname()
+    && here !== undefined && marker.pidSpace === here;
+}
+
+let ownPidSpace: string | null | undefined;
+
+/**
+ * The set of process ids this process's own id belongs to (T-71 re-check N2), recorded with the pid in
+ * a build's marker. On Linux that is this boot of this kernel (`boot_id`) and this pid namespace. Every
+ * other platform has one set per machine; across platforms, as with WSL beside Windows, the names
+ * differ. `undefined` when it cannot be told, and then the pid rule is not used at all.
+ */
+export function pidSpace(): string | undefined {
+  if (ownPidSpace === undefined) {
+    ownPidSpace = null;
+    if (process.platform === 'linux') {
+      try {
+        const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+        const namespace = fs.readlinkSync('/proc/self/ns/pid');
+        if (boot !== '' && namespace !== '') ownPidSpace = `linux:${boot}:${namespace}`;
+      } catch { /* not told: leave every marker to its heartbeat */ }
+    } else {
+      ownPidSpace = process.platform;
+    }
+  }
+  return ownPidSpace ?? undefined;
 }
 
 /** Whether a process with this id exists. EPERM means it does, under another user. */
