@@ -64,6 +64,23 @@ function stringsOf(value: unknown, at: string): Array<{ at: string; text: string
   return [];
 }
 
+/** What the manifest shows a person: its name and description, its contributions, and the trust dialog's words. */
+export function manifestShown(manifest: Record<string, unknown>): Array<{ at: string; text: string }> {
+  return [
+    ...stringsOf(manifest['displayName'], 'displayName'),
+    ...stringsOf(manifest['description'], 'description'),
+    ...stringsOf(manifest['contributes'], 'contributes'),
+    // The workspace-trust dialog shows this (review F6).
+    ...stringsOf(manifest['capabilities'], 'capabilities'),
+  ];
+}
+
+/** The README's lines a ticket number is on. Only an HTML comment is not drawn: a `//` line in a code block is (review F8). */
+export function readmeTicketLines(readme: string): string[] {
+  const drawn = readme.replace(/<!--[\s\S]*?-->/g, '');
+  return drawn.split('\n').flatMap((line, i) => (TICKET_NUMBER.test(line) ? [`README.md:${i + 1}: ${line.trim()}`] : []));
+}
+
 suite('T-141: no internal ticket number reaches a screen', () => {
   test('no string in src/ carries one: webview text, notifications, progress lines, reasons, the output channel', () => {
     const files = sourcesUnder(path.join(ROOT, 'src'));
@@ -84,11 +101,7 @@ suite('T-141: no internal ticket number reaches a screen', () => {
 
   test("no command or setting title, and nothing else the manifest shows, carries one", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as Record<string, unknown>;
-    const shown = [
-      ...stringsOf(manifest['displayName'], 'displayName'),
-      ...stringsOf(manifest['description'], 'description'),
-      ...stringsOf(manifest['contributes'], 'contributes'),
-    ];
+    const shown = manifestShown(manifest);
     assert.ok(shown.filter((s) => s.at.startsWith('contributes.commands')).length >= 3, 'the manifest\'s commands were not read');
     const found = shown.filter((s) => TICKET_NUMBER.test(s.text)).map((s) => `${s.at}: ${JSON.stringify(s.text)}`);
     assert.deepEqual(found, [], `a ticket number in the manifest:\n${found.join('\n')}`);
@@ -97,8 +110,14 @@ suite('T-141: no internal ticket number reaches a screen', () => {
   test('the README, which the Extensions view shows, carries none', () => {
     const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
     assert.ok(readme.length > 2_000, 'the README was not read');
-    const found = readme.split('\n').flatMap((line, i) => (TICKET_NUMBER.test(withoutEmbeddedComments(line)) ? [`README.md:${i + 1}: ${line.trim()}`] : []));
+    const found = readmeTicketLines(readme);
     assert.deepEqual(found, [], `a ticket number in the README:\n${found.join('\n')}`);
+  });
+
+  test('the manifest and README checks can see one: the trust dialog\'s words, a code block\'s comment line, and not an HTML comment', () => {
+    const shown = manifestShown({ capabilities: { untrustedWorkspaces: { supported: false, description: 'arrives with T-9' } } });
+    assert.ok(shown.some((s) => TICKET_NUMBER.test(s.text)), 'the trust dialog\'s words are not read');
+    assert.deepEqual(readmeTicketLines('# Title\n\n    // run it: fixed in T-9\n<!-- T-15: an editor\'s note -->\nplain'), ['README.md:3: // run it: fixed in T-9']);
   });
 
   test('the check can see one: in a plain string, a template, a reason, and not in a comment', () => {
