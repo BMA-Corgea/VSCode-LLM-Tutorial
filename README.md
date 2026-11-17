@@ -26,14 +26,14 @@ from somebody's machine, and the release notes name its sha256, the CI run and t
 
 **What it needs:**
 
-- VS Code 1.95 or later, or VSCodium.
+- VS Code or VSCodium 1.95 or later.
 - git.
 - The `claude` CLI on your PATH and logged in. It is what the build asks for each step's *why*,
   and what the tutor and the detour talk to. Everything else works without it, and the doctor
   tells you plainly whether it is there.
 
-Proven on Linux only: VS Code 1.145.2 and VSCodium on the build machine, and VS Code 1.146.0 on
-GitHub's runner. macOS and Windows are unproven. It builds from an existing repository only.
+Proven on Linux only: VS Code 1.145.2 and VSCodium on the maintainer's machine, and VS Code 1.146.0
+on GitHub's runner. macOS and Windows are unproven. It builds from an existing repository only.
 Building from an idea, in your own words, is not available yet.
 
 **The `.vsix` carries its own engine.** repo-tour's core, `web-tree-sitter` and the

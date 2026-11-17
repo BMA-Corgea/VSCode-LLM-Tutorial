@@ -56,13 +56,15 @@
  * unchanged, holding this extension at that version. None of them says the run tested what it
  * should have. That is what "every step green, and the three named steps present" is for.
  *
- * ── What is a recorded claim rather than a check ──────────────────────────────────────────
+ * ── What the notes say was proven, and where that comes from ──────────────────────────────
  *
- * `PROVEN_ON_LINUX` names the editor versions the install check passed on when 0.1.0 was cut: VS
- * Code 1.145.2 and VSCodium here, and 1.146.0 on GitHub's runner (run 43141446029's log). The
- * notes repeat it word for word, as CHANGELOG.md does. A later run may install into a newer VS
- * Code; this module does not read that from the run's log, so the sentence is the project's
- * record of what has been proven, revised with the CHANGELOG, not a measurement of each run.
+ * The notes name only what THIS file's own run proved: its install check installed this .vsix into
+ * VS Code <X> on GitHub's Ubuntu runner, where <X> is read from that run's own job log
+ * (`readRunnerVscode`: the one version its tests validated, beside the install check's
+ * "PROVEN   Visual Studio Code"). They used to carry `PROVEN_ON_LINUX` word for word, whose "1.146.0
+ * on GitHub's runner" was run 43141446029's proof of the 0.0.1 build, not of the file a later run
+ * builds (review S3). `PROVEN_ON_LINUX` stays as the project's dated record, in CHANGELOG.md and the
+ * README, where it says which machines proved which build.
  */
 
 import { createHash } from 'node:crypto';
@@ -86,6 +88,8 @@ export type ReleaseRefusalCode =
   | 'no-run'
   | 'run-not-green'
   | 'jobs-unreadable'
+  | 'job-log-unreadable'
+  | 'runner-version-unknown'
   | 'step-not-green'
   | 'job-not-green'
   | 'required-step-missing'
@@ -152,15 +156,19 @@ export const EXTENSION_PUBLISHER = 'bma-corgea';
  * ran. Renaming one of these steps in ci.yml without renaming it here makes every release refuse,
  * and the unit suite goes red first.
  */
+const INSTALL_STEP_PREFIX = 'Install the .vsix';
 export const REQUIRED_STEPS: readonly { prefix: string; why: string }[] = [
   { prefix: 'Package', why: 'the step that builds the .vsix and reads the finished archive back' },
-  { prefix: 'Install the .vsix', why: 'the step that installs that .vsix into an isolated profile and proves it activates' },
+  { prefix: INSTALL_STEP_PREFIX, why: 'the step that installs that .vsix into an isolated profile and proves it activates' },
   { prefix: 'Upload .vsix', why: 'the step that uploads the artifact a release carries' },
 ];
 
-/** What has been proven, word for word as CHANGELOG.md's entry says it (unit-tested). See the header. */
+/**
+ * The project's dated record of what has been proven, word for word as CHANGELOG.md's 0.1.0 entry
+ * and the README say it (unit-tested). NOT what the release notes say: see the header.
+ */
 export const PROVEN_ON_LINUX =
-  "Proven on Linux only: VS Code 1.145.2 and VSCodium on the build machine, and VS Code 1.146.0 on GitHub's runner. macOS and Windows are unproven.";
+  "Proven on Linux only: VS Code 1.145.2 and VSCodium on the maintainer's machine, and VS Code 1.146.0 on GitHub's runner. macOS and Windows are unproven.";
 /** What is not built yet, as CHANGELOG.md says it. */
 export const REPOSITORY_ONLY =
   'It builds from an existing repository only. Building from an idea, in your own words, is not available yet.';
@@ -212,6 +220,8 @@ export const ghRead = {
   tagRef: (version: string): string[] => ['api', `repos/${RELEASE_REPO}/git/ref/tags/${releaseTag(version)}`],
   /** An annotated tag's own object, which names the commit. */
   tagObject: (tagObjectSha: string): string[] => ['api', `repos/${RELEASE_REPO}/git/tags/${tagObjectSha}`],
+  /** The plain-text log of the job that ran the install check, which names the VS Code it ran in. */
+  jobLog: (jobId: number): string[] => ['api', `repos/${RELEASE_REPO}/actions/jobs/${jobId}/logs`],
 };
 
 /**
@@ -411,7 +421,7 @@ export function chooseRun(list: CommandResult, sha: string): Checked<CiRun> {
  * notes rely on are among them. A run whose jobs or steps cannot be read is not a run whose steps
  * passed, so an empty list is a refusal of its own rather than a vacuous pass.
  */
-export function checkRunSteps(view: CommandResult, run: CiRun): Checked<{ jobs: number; steps: number }> {
+export function checkRunSteps(view: CommandResult, run: CiRun): Checked<{ jobs: number; steps: number; installJobId: number }> {
   const unreadable = (why: string): Refusal => refuse('jobs-unreadable',
     `The jobs of ${RELEASE_WORKFLOW} run ${run.id} could not be read: ${why}.`,
     'Check `gh auth status` and run this again: a run whose steps cannot be read is not a run whose steps passed.');
@@ -422,8 +432,10 @@ export function checkRunSteps(view: CommandResult, run: CiRun): Checked<{ jobs: 
   if (jobs.length === 0) return unreadable('it reports no jobs at all');
 
   const stepNames: string[] = [];
+  let installJobId: number | null = null;
   for (const job of jobs) {
     if (!isRecord(job) || typeof job.name !== 'string' || !Array.isArray(job.steps)) return unreadable(`one of its jobs is not a job: ${show(job)}`);
+    if (typeof job.databaseId !== 'number') return unreadable(`its job ${job.name} has no id (${show(job.databaseId)}), so its log cannot be named`);
     if (job.steps.length === 0) return unreadable(`its job ${job.name} reports no steps`);
     for (const step of job.steps) {
       if (!isRecord(step) || typeof step.name !== 'string') return unreadable(`a step of its job ${job.name} is not a step: ${show(step)}`);
@@ -438,6 +450,7 @@ export function checkRunSteps(view: CommandResult, run: CiRun): Checked<{ jobs: 
           'Release only a commit whose run passed every step: a step that was skipped or cancelled checked nothing, so the artifact is not a verified one.');
       }
       stepNames.push(step.name);
+      if (installJobId === null && step.name.startsWith(INSTALL_STEP_PREFIX)) installJobId = job.databaseId;
     }
     if (job.conclusion !== 'success') {
       return refuse('job-not-green',
@@ -453,7 +466,42 @@ export function checkRunSteps(view: CommandResult, run: CiRun): Checked<{ jobs: 
         'Release a commit whose workflow still runs that step: without it the run did not verify what the release notes say it did.');
     }
   }
-  return accept({ jobs: jobs.length, steps: stepNames.length });
+  if (installJobId === null) {
+    return unreadable(`no job of it ran a step named "${INSTALL_STEP_PREFIX}…"`);
+  }
+  return accept({ jobs: jobs.length, steps: stepNames.length, installJobId });
+}
+
+/**
+ * `gh api repos/<repo>/actions/jobs/<install job>/logs`: which VS Code this run's install check proved
+ * the file on (review S3). The tests' `@vscode/test-electron` logs "Validated version: X" for the build
+ * it downloads into `.vscode-test/`, which is the build the install check then runs; the install
+ * check itself (`scripts/verify-install.mjs`) ends with "PROVEN   Visual Studio Code". Both must be
+ * there, and the validated version must be ONE version: otherwise the notes would be guessing, so
+ * this refuses rather than name a version the run did not show.
+ */
+export function readRunnerVscode(log: CommandResult, run: CiRun, jobId: number): Checked<{ version: string }> {
+  if (log.status !== 0) {
+    return refuse('job-log-unreadable', `The log of job ${jobId} in ${RELEASE_WORKFLOW} run ${run.id} could not be read: gh said ${said(log.stderr)}.`,
+      'Run this again; if the log has expired or been deleted, release a newer green commit, whose log says what its install check proved.');
+  }
+  // eslint-disable-next-line no-control-regex -- the escape sequences colour codes are made of
+  const text = log.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+  const versions = [...new Set([...text.matchAll(/Validated version:\s*(\d+\.\d+\.\d+)/g)].map((m) => m[1] ?? ''))];
+  const remedy = 'Look at the run\'s log on GitHub, and release a commit whose run shows one VS Code version and its install check proving it; if the log\'s wording has changed, change readRunnerVscode with it.';
+  if (versions.length !== 1) {
+    return refuse('runner-version-unknown',
+      versions.length === 0
+        ? `The log of job ${jobId} in ${RELEASE_WORKFLOW} run ${run.id} names no "Validated version", so which VS Code its install check ran in is not on record.`
+        : `The log of job ${jobId} in ${RELEASE_WORKFLOW} run ${run.id} names ${versions.length} validated VS Code versions (${versions.join(', ')}), so which one its install check ran in would be a guess.`,
+      remedy);
+  }
+  if (!/(?:^|\s)PROVEN\s+Visual Studio Code\b/m.test(text)) {
+    return refuse('runner-version-unknown',
+      `The log of job ${jobId} in ${RELEASE_WORKFLOW} run ${run.id} has no "PROVEN   Visual Studio Code" from its install check, so it does not show the file proven on VS Code ${versions[0] ?? ''}.`,
+      remedy);
+  }
+  return accept({ version: versions[0] ?? '' });
 }
 
 // ── 4. the artifact that run uploaded ────────────────────────────────────────────────────
@@ -643,6 +691,8 @@ export interface NotesInput {
   vsixSha256: string;
   /** from the .vsix's own `engines.vscode`, so the notes promise what the file enforces */
   minimumVscode: string;
+  /** the VS Code this file's own run installed it into, from that run's job log (`readRunnerVscode`) */
+  runnerVscode: string;
 }
 
 /**
@@ -660,13 +710,13 @@ export function composeReleaseNotes(input: NotesInput): string {
     '',
     '## What it needs',
     '',
-    `- VS Code ${input.minimumVscode} or later, or VSCodium.`,
+    `- VS Code or VSCodium ${input.minimumVscode} or later.`,
     '- git.',
     "- The `claude` CLI on your PATH and logged in. The build asks it for each step's why, and the tutor and the detour talk to it.",
     '',
     '## What is proven, and what is not',
     '',
-    `- ${PROVEN_ON_LINUX}`,
+    `- Proven on Linux only: the install check in the CI run below installed this file into VS Code ${input.runnerVscode} on GitHub's Ubuntu runner and proved it activates. VSCodium is not on that runner, and macOS and Windows are unproven.`,
     `- ${REPOSITORY_ONLY}`,
     '',
     '## Install it from the file',

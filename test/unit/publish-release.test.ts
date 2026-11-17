@@ -34,7 +34,7 @@ import {
   checkArtifactDigest, checkArtifactEntries, checkDraftAsset, checkDraftRelease, checkDraftsVisible, checkExtraction,
   checkOnMain, checkReleaseList, checkResolvedSha, checkRunSteps, checkTagTarget, checkVsixManifest, chooseArtifact, chooseRun,
   composeReleaseNotes, ghRead, isReadOnlyGh, minimumVscode, parseShaArgument, peelTagObject, readCommitManifest,
-  readExistingRelease, readTagRef, refusalText, releaseCommands, releaseTag, releaseTitle, sha256Hex, vsixFileName,
+  readExistingRelease, readRunnerVscode, readTagRef, refusalText, releaseCommands, releaseTag, releaseTitle, sha256Hex, vsixFileName,
   type Checked, type CiArtifact, type CiRun, type CommandResult, type ExistingRelease, type Refusal,
 } from '../../src/publish/release.js';
 import { expectedArtifactName } from '../../src/publish/plan.js';
@@ -278,10 +278,15 @@ suite('release: choosing the CI run', () => {
 // ── every step of every job ──────────────────────────────────────────────────────────────
 
 suite('release: every step of every job is green', () => {
-  test('the real workflow, every step green, is accepted', () => {
+  test('the real workflow, every step green, is accepted, naming the job that ran the install check', () => {
     const counted = accepted(checkRunSteps(jobsView(), RUN));
     assert.equal(counted.jobs, 1);
     assert.equal(counted.steps, ciStepNames().length + 3);
+    assert.equal(counted.installJobId, 130929135909, 'its log is where the runner\'s VS Code version is read (review S3)');
+  });
+
+  test('a job without a numeric id cannot name the log the notes are read from', () => {
+    refused(checkRunSteps(jobsView(undefined, { databaseId: 'x' }), RUN), 'jobs-unreadable', 'build-and-test');
   });
 
   test('a skipped step refuses, naming the step, its job and how it ended', () => {
@@ -315,6 +320,61 @@ suite('release: every step of every job is green', () => {
 
   test('a job that did not succeed refuses even when every step it reports says success', () => {
     refused(checkRunSteps(jobsView(undefined, { conclusion: 'failure' }), RUN), 'job-not-green', 'build-and-test', 'failure');
+  });
+});
+
+// ── which VS Code the run proved it on (review S3) ───────────────────────────────────────
+
+suite('release: the runner\'s VS Code, as the run\'s own job log names it', () => {
+  const JOB = 130929135909;
+  // The shape of run 43141446029's job log (gh api …/actions/jobs/130929135909/logs), trimmed to the lines
+  // the reader looks at, with the runner's work paths left out.
+  const LOG = [
+    '2026-11-12T02:28:25.0346631Z ✔ Validated version: 1.146.0',
+    '2026-11-12T02:29:31.8210616Z ✔ Validated version: 1.146.0',
+    '2026-11-12T02:30:20.2544169Z verifying build-tutorials-0.0.1.vsix (6.72 MB)',
+    '2026-11-12T02:30:26.0096182Z AC1 - installs and activates on both editors',
+    '2026-11-12T02:30:26.0096627Z   UNPROVEN VSCodium - not on PATH',
+    '2026-11-12T02:30:26.0097330Z   PROVEN   Visual Studio Code (downloaded by @vscode/test-electron into .vscode-test/, not a system install)',
+  ].join('\n');
+
+  test('the version its tests validated, beside its install check\'s PROVEN Visual Studio Code, is the runner\'s', () => {
+    assert.deepEqual(accepted(readRunnerVscode(ran(LOG), RUN, JOB)), { version: '1.146.0' });
+  });
+
+  test('colour codes in the log hide neither line', () => {
+    const coloured = LOG
+      .replace('Validated version: 1.146.0', 'Validated version: \x1b[1m1.146.0\x1b[22m')
+      .replace('PROVEN   Visual', '\x1b[32mPROVEN\x1b[0m   Visual');
+    assert.deepEqual(accepted(readRunnerVscode(ran(coloured), RUN, JOB)), { version: '1.146.0' });
+  });
+
+  test('a log naming no validated version, or two different ones, is refused: the notes would be guessing', () => {
+    const none = LOG.split('\n').filter((l) => !l.includes('Validated version')).join('\n');
+    refused(readRunnerVscode(ran(none), RUN, JOB), 'runner-version-unknown', String(JOB), 'Validated version');
+    const two = `${LOG}\n2026-11-12T02:31:00.0000000Z ✔ Validated version: 1.147.0`;
+    refused(readRunnerVscode(ran(two), RUN, JOB), 'runner-version-unknown', '1.146.0', '1.147.0');
+  });
+
+  test('an install check that proved no VS Code is refused, and UNPROVEN never reads as PROVEN', () => {
+    const unproven = LOG.replace('  PROVEN   Visual Studio Code (downloaded', '  UNPROVEN Visual Studio Code - not on PATH (downloaded');
+    refused(readRunnerVscode(ran(unproven), RUN, JOB), 'runner-version-unknown', String(JOB), 'PROVEN');
+  });
+
+  test('a job log that could not be read is refused, never read as a version', () => {
+    refused(readRunnerVscode(failed('gh: Not Found (HTTP 404)'), RUN, JOB), 'job-log-unreadable', String(JOB), 'HTTP 404');
+  });
+
+  test('the job log is a read of this repository', () => {
+    assert.deepEqual(ghRead.jobLog(JOB), ['api', `repos/${RELEASE_REPO}/actions/jobs/${JOB}/logs`]);
+    assert.equal(isReadOnlyGh(ghRead.jobLog(JOB)), true);
+  });
+
+  test('the lines it reads are the ones this repository prints: verify-install\'s verdict, on ci.yml\'s Ubuntu runner', () => {
+    const verifyInstall = read('scripts/verify-install.mjs');
+    assert.ok(verifyInstall.includes("label: 'Visual Studio Code'"), 'verify-install labels the editor "Visual Studio Code"');
+    assert.match(verifyInstall, /PROVEN\$\{OFF\} {3}\$\{r\.editor\.label\}/, 'verify-install prints "PROVEN   <label>"');
+    assert.match(CI, /^\s*runs-on:\s*ubuntu-latest\s*$/m, 'the notes call the runner GitHub\'s Ubuntu runner');
   });
 });
 
@@ -451,8 +511,9 @@ suite('release: the notes a stranger reads', () => {
   const V = MANIFEST.version;
   const NAME = vsixFileName(V);
   const VSIX_SHA = 'ef14025732e191e8c4f0742be9eef2e277bc3affc88d4ba817d058ecf3e1af08';
-  const notes = (minimum = '1.95'): string => composeReleaseNotes({
+  const notes = (minimum = '1.95', runner = '1.146.0'): string => composeReleaseNotes({
     version: V, sha: SHA, run: { id: RUN_ID, url: RUN_URL }, vsixName: NAME, vsixSha256: VSIX_SHA, minimumVscode: minimum,
+    runnerVscode: runner,
   });
   /** Prose wraps; what is being compared is the words. */
   const flat = (s: string): string => s.replace(/\s+/g, ' ');
@@ -462,26 +523,39 @@ suite('release: the notes a stranger reads', () => {
     assert.ok(text.includes('VS Code extension that turns an existing repository into a step-by-step tutorial for rebuilding it'), text);
   });
 
-  test('they say what it needs: VS Code 1.95 or later or VSCodium, git, and a logged-in claude CLI', () => {
+  test('they say what it needs: VS Code or VSCodium 1.95 or later, git, and a logged-in claude CLI', () => {
+    // Review N12: VSCodium is held to the same engines.vscode floor as VS Code.
     const text = flat(notes());
-    for (const needed of ['VS Code 1.95 or later, or VSCodium', 'git', '`claude` CLI', 'logged in']) {
+    for (const needed of ['VS Code or VSCodium 1.95 or later', 'git', '`claude` CLI', 'logged in']) {
       assert.ok(text.includes(needed), `the notes should say ${needed}`);
     }
   });
 
   test('the minimum VS Code they state is the one passed in (the .vsix\'s own engines), not a literal', () => {
     const text = flat(notes('1.99'));
-    assert.ok(text.includes('VS Code 1.99 or later'), text);
+    assert.ok(text.includes('VS Code or VSCodium 1.99 or later'), text);
     assert.ok(!text.includes('1.95'), 'a second, typed copy of the minimum would drift from the manifest');
   });
 
-  test('they say it is proven on Linux only and builds from a repository only, in the CHANGELOG\'s words', () => {
-    const text = flat(notes());
+  test('they say what THIS file\'s own run proved: the runner\'s VS Code as that run reported it, Linux only', () => {
+    // Review S3. The notes used to carry the project's dated record word for word, "VS Code 1.146.0 on
+    // GitHub's runner", which run 43141446029 proved of the 0.0.1 build. The run the notes link is a
+    // different one, so the version they name is now the one that run's own log names, passed in.
+    const text = flat(notes('1.95', '1.147.3'));
+    assert.ok(text.includes("Proven on Linux only: the install check in the CI run below installed this file into VS Code 1.147.3 on GitHub's Ubuntu runner and proved it activates."), text);
+    assert.ok(text.includes('macOS and Windows are unproven'), text);
+    assert.ok(text.includes(REPOSITORY_ONLY), text);
+    for (const never of ['1.146.0', '1.145.2', 'maintainer', 'build machine', PROVEN_ON_LINUX]) {
+      assert.ok(!text.includes(never), `the notes must not carry a claim this file's run did not make: ${never}`);
+    }
+  });
+
+  test('the project\'s dated record names the maintainer\'s machine, not "the build machine" a stranger reads as CI', () => {
     assert.ok(PROVEN_ON_LINUX.startsWith('Proven on Linux only'), PROVEN_ON_LINUX);
+    assert.ok(PROVEN_ON_LINUX.includes("the maintainer's machine"), PROVEN_ON_LINUX);
+    assert.ok(!PROVEN_ON_LINUX.includes('build machine'), PROVEN_ON_LINUX);
     assert.ok(PROVEN_ON_LINUX.includes('macOS and Windows are unproven'), PROVEN_ON_LINUX);
     assert.ok(REPOSITORY_ONLY.includes('existing repository only'), REPOSITORY_ONLY);
-    assert.ok(text.includes(PROVEN_ON_LINUX), text);
-    assert.ok(text.includes(REPOSITORY_ONLY), text);
   });
 
   test('they say how to install from the file, with the file\'s exact name', () => {
@@ -851,9 +925,14 @@ suite('release: every name this holds is the one that ships', () => {
     const next = changelog.indexOf('\n## ', start + 1);
     const entry = changelog.slice(start, next < 0 ? undefined : next).replace(/\s+/g, ' ');
     const minimum = minimumVscode(MANIFEST.engines.vscode) ?? '(unreadable engines.vscode)';
-    for (const needed of [PROVEN_ON_LINUX, REPOSITORY_ONLY, `VS Code ${minimum} or later, or VSCodium`, 'git', '`claude` CLI', 'logged in']) {
+    for (const needed of [
+      PROVEN_ON_LINUX, REPOSITORY_ONLY, `VS Code or VSCodium ${minimum} or later`, 'git', '`claude` CLI', 'logged in',
+      // Review N7: imports are present or missing, never "extra" (src/dial/core.ts).
+      'the imports that are present or missing',
+    ]) {
       assert.ok(entry.includes(needed), `the ${MANIFEST.version} entry should say ${needed}`);
     }
+    assert.ok(!entry.includes('exports and imports that are present, missing or extra'), 'imports are never "extra"');
   });
 
   test('README.md\'s Install links the Releases page, names this version\'s .vsix, and states the same requirements', () => {
@@ -869,7 +948,7 @@ suite('release: every name this holds is the one that ships', () => {
     const minimum = minimumVscode(MANIFEST.engines.vscode) ?? '(unreadable engines.vscode)';
     for (const needed of [
       RELEASES_URL, 'latest release', `codium --install-extension ${name}`, `code --install-extension ${name}`,
-      `VS Code ${minimum} or later, or VSCodium`, 'git', '`claude` CLI', 'logged in', PROVEN_ON_LINUX, REPOSITORY_ONLY,
+      `VS Code or VSCodium ${minimum} or later`, 'git', '`claude` CLI', 'logged in', PROVEN_ON_LINUX, REPOSITORY_ONLY,
     ]) {
       assert.ok(text.includes(needed), `the Install section should say ${needed}`);
     }

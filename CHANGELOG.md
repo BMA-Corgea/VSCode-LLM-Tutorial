@@ -17,7 +17,8 @@ you do the rebuilding.
 - **The dial**: *manual*, *scaffolded* or *automated* on every step, which decides how much of
   the code you type yourself.
 - **Check my work**: a structural check of your file against the original. It names the exports
-  and imports that are present, missing or extra, and says whether the file parses.
+  that are present, missing or extra, and the imports that are present or missing, and says whether
+  the file parses.
 - **The tutor**: a chat under each step that already knows the decision, the roads not taken and
   how your file differs from the author's.
 - **The detour**: a small worked example of the same idea in an unrelated domain, opened as real
@@ -28,15 +29,15 @@ you do the rebuilding.
 
 ### What it needs
 
-- VS Code 1.95 or later, or VSCodium.
+- VS Code or VSCodium 1.95 or later.
 - git.
 - The `claude` CLI on your PATH and logged in. The build asks it for each step's why, and the tutor
   and the detour talk to it.
 
 ### Known limits
 
-- Proven on Linux only: VS Code 1.145.2 and VSCodium on the build machine, and VS Code 1.146.0 on
-  GitHub's runner. macOS and Windows are unproven.
+- Proven on Linux only: VS Code 1.145.2 and VSCodium on the maintainer's machine, and VS Code
+  1.146.0 on GitHub's runner. macOS and Windows are unproven.
 - It builds from an existing repository only. Building from an idea, in your own words, is not
   available yet.
 

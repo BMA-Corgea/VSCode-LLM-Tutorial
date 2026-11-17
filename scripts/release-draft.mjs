@@ -18,7 +18,9 @@
 //   [1] the commit    hex sha -> full sha (`git rev-parse`); version from `git show <sha>:package.json`
 //   [2] on main       `gh api .../compare/<sha>...main` is identical or ahead: main contains it
 //   [3] its CI run    the push to main of exactly that sha, completed, success, and every step of
-//                     every job success (`gh run list`, then `gh run view <id> --json jobs`)
+//                     every job success (`gh run list`, then `gh run view <id> --json jobs`); and the
+//                     VS Code its install check proved the file on, from that job's own log
+//                     (`gh api .../actions/jobs/<id>/logs`), which is the only version the notes name
 //   [4] its artifact  build-tutorials-vsix of that run, unexpired; the zip, downloaded into a NEW
 //                     empty directory, hashes to the digest GitHub recorded when the run uploaded it
 //   [5] the .vsix     exactly build-tutorials-<version>.vsix inside, unpacked into a NEW empty
@@ -161,6 +163,9 @@ const ciRun = must(R.chooseRun(gh(R.ghRead.runList(sha)), sha));
 ok(`run ${ciRun.id}: ${ciRun.event} to ${ciRun.headBranch}, ${ciRun.status}, ${ciRun.conclusion} - ${ciRun.url}`);
 const counted = must(R.checkRunSteps(gh(R.ghRead.runView(ciRun.id)), ciRun));
 ok(`every step green: ${counted.steps} steps in ${counted.jobs} job${counted.jobs === 1 ? '' : 's'}, ${R.REQUIRED_STEPS.map((s) => `"${s.prefix}…"`).join(', ')} among them`);
+// What the notes may say this run proved: the VS Code its own job log names (review S3).
+const runner = must(R.readRunnerVscode(gh(R.ghRead.jobLog(counted.installJobId)), ciRun, counted.installJobId));
+ok(`its install check proved the file on VS Code ${runner.version} (job ${counted.installJobId}'s log)`);
 
 // -- [4] its artifact -------------------------------------------------------------------------
 
@@ -203,6 +208,7 @@ if (!verifyDraft) {
   notesPath = path.join(runDir, 'notes.md');
   fs.writeFileSync(notesPath, R.composeReleaseNotes({
     version, sha, run: { id: ciRun.id, url: ciRun.url }, vsixName, vsixSha256: vsixSha, minimumVscode: vsix.minimumVscode,
+    runnerVscode: runner.version,
   }));
   ok(`wrote ${rel(notesPath)}`);
 }
