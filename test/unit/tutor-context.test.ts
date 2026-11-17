@@ -803,6 +803,20 @@ suite('MAX_CONTEXT_CHARS is the sum of the budgets — on a REFLECTIVELY hostile
   });
 });
 
+// The re-check of 2026-11-17, C9: at a step whose file a re-plan took over, the tutor was told the author's question and
+// reason and nothing about the file being written elsewhere now, though the learner's copy may hold the model's code.
+suite('a step whose file a re-plan took over (T-22, R3)', () => {
+  test('the tutor is told first that the file is written at another step now, and the learner\'s copy may be the model\'s', async () => {
+    const step = stepById('st-2-file-parse');
+    const writer: StepLike = { ...step, id: 'st-9-writer', ordinal: 9, derivedFrom: 'st-9-writer' };
+    const ctx = await tutorContext(step, refRoot, target, realGit, undefined, writer);
+    assert.match(ctx.build?.why ?? '', /^This step's file is no longer written from here: after the learner chose a different road at step 9, a model rewrote the file/);
+    assert.ok((ctx.build?.why ?? '').includes(step.decision.why), 'and it is still given the author\'s reason, since the step is the author\'s');
+    const plain = await tutorContext(step, refRoot, target, realGit);
+    assert.doesNotMatch(plain.build?.why ?? '', /no longer written from here/, 'discriminates: a step nobody took over is told nothing of it');
+  });
+});
+
 suite('a step a re-plan wrote has no author (T-22, AC7)', () => {
   function rederived(chosen: string | null): StepLike {
     const base = stepById('st-4-symbol-render');

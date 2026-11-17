@@ -941,7 +941,10 @@ suite('choose — the learner takes a road at a step (T-21, T-10 E1)', () => {
     assert.equal(fake.stored()?.steps[STEP]?.chosen, 'template-string');
     session.choose(STEP, 'author');
     await session.settled();
-    assert.equal(fake.stored()?.steps[STEP]?.chosen, 'author');
+    // The stand-in re-plans nothing, so these choices are in progress only: the walk never left the author's road, and the
+    // author's option drops the choice rather than re-planning the author's road (the re-check of 2026-11-17, C2).
+    assert.equal(fake.stored()?.steps[STEP]?.chosen, undefined, 'back on the author\'s road');
+    assert.equal(session.getView()?.step.decision.chosen ?? 'author', 'author');
   });
 
   test('an id that is not one of the step\'s options writes nothing and SAYS so (the page is a stale or forged one)', () => {

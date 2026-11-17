@@ -17,7 +17,7 @@ import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
 import type { Dial } from '../../src/start/request.js';
 import { tutorCoreFor, type LlmReply, type TutorCore } from '../../src/tutor/core.js';
 import { DERIVED_CODE_MISSING_MESSAGE } from '../../src/walk/reference.js';
-import { REPLANNED_TRANSCRIPT_NOTE, getTranscript, sentTurns } from '../../src/tutor/transcript.js';
+import { REPLANNED_TRANSCRIPT_NOTE, REWRITTEN_TRANSCRIPT_NOTE, getTranscript, sentTurns } from '../../src/tutor/transcript.js';
 import { setCurrent, setDial, markDone, type PlanLike, type Progress, type StepLike } from '../../src/walk/model.js';
 import {
   CHOICE_ALREADY_REPLANNING, CHOICE_ALREADY_TAKEN, REPLAN_CANCELLED_BILLED, REPLAN_CANCELLED_UNSENT, REPLAN_NOTHING_FOLLOWS,
@@ -115,6 +115,9 @@ interface Options {
   /** a test that navigates on purpose lets the editor move; by default a move is a failure */
   navigates?: boolean;
   git?: WalkAdapters['git'];
+  /** what the learner's disk holds and what they answer when asked to overwrite: nothing, and Keep, by default */
+  readText?: WalkAdapters['readText'];
+  confirmOverwrite?: WalkAdapters['confirmOverwrite'];
   tutorCore?: WalkAdapters['tutorCore'];
   tutorSettings?: WalkAdapters['tutorSettings'];
   /** files in the reference repository, written before the walk opens; it is empty by default */
@@ -179,8 +182,8 @@ function harness(options: Options = {}): Harness {
     loadRequest: (t, p) => loadRequest(t, { plan: p, store }),
     reportError: (m) => { errors.push(m); },
     core: () => { coreCalls += 1; return options.core?.() ?? Promise.resolve(undefined); },
-    readText: () => undefined,
-    confirmOverwrite: () => Promise.resolve(false),
+    readText: options.readText ?? (() => undefined),
+    confirmOverwrite: options.confirmOverwrite ?? (() => Promise.resolve(false)),
     git: options.git ?? (() => Promise.reject(new Error('no git here'))),
     ...(options.tutorCore === undefined ? {} : { tutorCore: options.tutorCore }),
     ...(options.tutorSettings === undefined ? {} : { tutorSettings: options.tutorSettings }),
@@ -1132,6 +1135,82 @@ suite('what a landing meets: a question in flight, a tree that is gone (T-22 re-
     const progress = loadProgress(h.target, loadPlan(h.target));
     const order = getTranscript(progress, D).map((m) => (m.kind === 'note' ? 'note' : m.role));
     assert.deepEqual(order, ['user', 'assistant', 'note'], `the answer was to a question about the code the press replaced: ${JSON.stringify(order)}`);
+    assert.deepEqual(sentTurns(progress, D), [], 'so a later question is sent none of it');
+  });
+
+  // The re-check of 2026-11-17. With its C4 the real engine never writes a step under a replaced id again; the walk
+  // still handles one it is handed (`restartedStep`), and these pin what it does then.
+  const once = (): PlanLike => replanned(fixturePlan());
+  const again = (first: PlanLike): PlanLike => ({
+    ...first,
+    steps: first.steps.map((s) => (s.id === D ? { ...s, decision: { ...s.decision, chosen: 'author' } } : s)),
+    divergences: [...(first['divergences'] as unknown[]), { stepId: D, answer: 'author', staleDependents: [], at: 't2', tree: TREE }],
+  });
+  const rewrote = (plan: PlanLike): DivergeOutcome => ({ ok: true, changed: true, plan, derivedRoot: null, staleDependents: [], replaced: ['fresh-1'], written: ['fresh-1'], cost: COST });
+
+  test('a step written again under its old id, with the learner on it: what was said about its old code goes, and the landing says to come back (C3)', async () => {
+    const first = once();
+    const h = harness({ plan: first, dial: 'automated', navigates: true, core: () => Promise.resolve(dialCore), progress: (p) => setCurrent(markDone(fixtureProgress(p), 'st-1-shape-src'), D) });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
+    h.session.choose(D, 'author');
+    const job = await reachedEngine(h);
+    // While it re-plans the learner moves on: arriving writes the step's old code and says so (the dial's work, R5).
+    h.session.goTo('fresh-1');
+    for (let i = 0; i < 200 && !/written for you/.test(h.view().writeNote ?? ''); i += 1) await turns(1);
+    assert.match(h.view().writeNote ?? '', /written for you/, 'discriminates: arriving at it wrote its old code, and said so');
+    await finish(h, job, rewrote(again(first)));
+    assert.equal(h.view().step.id, 'fresh-1', 'discriminates: the learner is still on it');
+    assert.equal(h.view().writeNote, undefined, 'the line about its old code is gone');
+    assert.match(h.view().choiceNote ?? '', /The model wrote this step.s code again too\..*come back to this step/, `and the landing says how its new code is written: ${JSON.stringify(h.view().choiceNote)}`);
+  });
+
+  test('a Keep given about a step\'s old code is not honoured for the code written again under its id (NF4; the re-check\'s S06)', async () => {
+    const first = once();
+    const asks: string[] = [];
+    const h = harness({
+      plan: first, dial: 'automated', navigates: true, core: () => Promise.resolve(dialCore),
+      progress: (p) => setCurrent(fixtureProgress(p), 'fresh-1'),
+      readText: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return undefined; } },
+      confirmOverwrite: (file) => { asks.push(file); return Promise.resolve(false); },
+    });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
+    fs.mkdirSync(path.join(h.target, 'src/api'), { recursive: true });
+    fs.writeFileSync(path.join(h.target, 'src/api/fresh.ts'), 'the learner\'s own fresh.ts\n');
+    h.session.goTo('fresh-1');
+    await h.session.settled();
+    assert.deepEqual(asks, ['src/api/fresh.ts'], 'discriminates: asked about the old code, and told Keep');
+    h.session.choose(D, 'author');
+    await finish(h, await reachedEngine(h), rewrote(again(first)));
+    h.session.goTo('fresh-1');
+    await h.session.settled();
+    assert.deepEqual(asks, ['src/api/fresh.ts', 'src/api/fresh.ts'], `asked again about the new code: ${JSON.stringify(h.view().writeNote ?? null)}`);
+    assert.doesNotMatch(h.view().writeNote ?? '', /you chose that earlier/);
+  });
+
+  test('a question at D in flight when a second re-plan lands: its answer goes before the "written again" line (NF7; the re-check\'s T02)', async () => {
+    let answer: ((reply: LlmReply) => void) | undefined;
+    const held = (): Promise<LlmReply> => new Promise((resolve) => { answer = resolve; });
+    const first = once();
+    const h = harness({
+      plan: first, dial: 'manual',
+      progress: (p) => setDial(setCurrent(markDone(fixtureProgress(p), 'st-1-shape-src'), D), D, 'manual'),
+      tutorCore: () => Promise.resolve({ ...realTutor, availability: () => Promise.resolve({ ok: true, detail: 'a stand-in' }), runLlm: held }),
+      tutorSettings: () => ({ provider: 'claude', model: 'm', timeoutMs: 60_000 }),
+    });
+    holdCode(h.tree, ['src/parse.ts', 'src/api/fresh.ts', 'src/fresh.ts']);
+    h.session.ask('what does this code do?');
+    for (let i = 0; i < 100 && answer === undefined; i += 1) await turns(1);
+    assert.ok(answer, 'discriminates: the question is with the model');
+    h.session.choose(D, 'author');
+    const job = await reachedEngine(h);
+    job.finish({ ok: true, changed: true, plan: again(first), derivedRoot: null, staleDependents: [], replaced: [], written: [], cost: COST });
+    for (let i = 0; i < 50 && (loadPlan(h.target)['divergences'] as unknown[]).length < 2; i += 1) await turns(1);
+    assert.equal((loadPlan(h.target)['divergences'] as unknown[]).length, 2, 'discriminates: the second re-plan landed while the question was out');
+    answer({ text: 'it does what the first re-derived code did', inputTokens: 1, outputTokens: 1, usd: 0, metered: false });
+    await h.session.settled();
+    const progress = loadProgress(h.target, loadPlan(h.target));
+    const transcript = getTranscript(progress, D);
+    assert.equal(transcript.at(-1)?.content, REWRITTEN_TRANSCRIPT_NOTE, `the answer was about the code the press replaced: ${JSON.stringify(transcript.map((t) => t.kind ?? t.role))}`);
     assert.deepEqual(sentTurns(progress, D), [], 'so a later question is sent none of it');
   });
 

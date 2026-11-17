@@ -58,7 +58,7 @@ import {
   MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT,
   MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE,
   NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE,
-  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, NOT_REPLANNED_NOTE, RECORDED_KEPT_NOTE, RECORDED_NOTE, MAX_STALE_NAMED, keptOnOldRoadNote, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_DERIVED_MESSAGE, TUTOR_EMPTY_MESSAGE,
+  SHAPE_NOTE_MESSAGE, BACK_TO_AUTHOR_LABEL, CHOOSE_LABEL, REPLANNED_ELSEWHERE_NOTE, REPLAN_OWN_ROAD_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, NOT_REPLANNED_NOTE, RECORDED_KEPT_NOTE, RECORDED_NOTE, MAX_STALE_NAMED, keptOnOldRoadNote, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_DERIVED_MESSAGE, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, CLEAR_CONFIRM_LABEL, PREPARING_MESSAGE,
@@ -408,7 +408,8 @@ suite('renderStepHtml — markup-level DOM assertions (AC2)', () => {
     assert.deepEqual(rows.filter((r) => r.cls === 'option option-taken').map((r) => r.id), ['stream'], 'his choice is where the author\'s was');
     assert.ok(list.includes(`<span class="badge badge-chosen">${CHOSEN_BADGE}</span>`), 'marked as his');
     assert.ok(list.includes('data-option-id="author">'), 'the author\'s option is still there');
-    assert.ok(list.includes(`data-option-id="author">${CHOOSE_LABEL}</button>`), 'and choosable again — latest wins');
+    // A choice no re-plan followed: the author's road drops it, and its control says so (the re-check of 2026-11-17, C2).
+    assert.ok(list.includes(`data-option-id="author">${BACK_TO_AUTHOR_LABEL}</button>`), 'and choosable again — latest wins');
     assert.ok(!list.includes(`data-option-id="stream">${CHOOSE_LABEL}</button>`), 'his own road is not a control');
     // T-22's code review, SF4: with no re-plan on record the walk was not re-planned, and something does stand on this step.
     assert.ok(renderStepHtml(state, FAKE_SKINS).includes(escapeForHtml(NOT_REPLANNED_NOTE)), 'and the line says the walk was not re-planned from it');
@@ -3327,6 +3328,27 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
     assert.ok(page.includes(escapeForHtml(RECORDED_KEPT_NOTE)), 'it says why nothing was re-planned, truly');
     assert.ok(!page.includes(escapeForHtml(RECORDED_NOTE)), 'not that every step that stood on the old road was walked');
     assert.ok(page.includes(escapeForHtml(keptOnOldRoadNote(['step 1 (src)'], 0))), 'and it names the step it kept');
+  });
+
+  // The re-check of 2026-11-17, C8: a record at this step for another road than the one marked as the learner's (a
+  // progress write that failed after the plan's, or a hand edit) drew "re-planned from your choice" and refused the road.
+  test('a re-plan on record here that followed another road than the learner\'s says so, and offers the learner\'s road (C8)', () => {
+    const base = stateAt('st-2-file-parse');
+    const step = { ...base.step, decision: { ...base.step.decision, chosen: 'inline-in-routes' } };
+    const plan = { ...base.plan, steps: base.plan.steps.map((s) => (s.id === step.id ? step : s)), divergences: [{ stepId: step.id, answer: 'author', staleDependents: [], at: 't', tree: 'k/t' }] };
+    const page = html({ ...base, plan, step });
+    assert.ok(page.includes(escapeForHtml(REPLANNED_ELSEWHERE_NOTE)), 'it says the re-plan followed another road');
+    assert.ok(!page.includes(escapeForHtml(REPLANNED_NOTE)), 'not that it followed this one');
+    assert.ok(page.includes(`data-option-id="inline-in-routes">${REPLAN_OWN_ROAD_LABEL}</button>`), 'and the learner\'s road can be re-planned from');
+  });
+
+  // The re-check of 2026-11-17, security: a step with no target named in a record drew nothing and threw.
+  test('a record naming a step that has no target still draws the page (a hand-edited plan)', () => {
+    const base = replannedHere(['st-1-shape-src']);
+    const bare = { ...base.plan.steps.find((s) => s.id === 'st-1-shape-src')!, id: 'st-9-bare', ordinal: 9 } as Partial<StepLike>;
+    delete bare.target;
+    const plan = { ...base.plan, steps: [...base.plan.steps, bare as StepLike], divergences: [{ stepId: ON, answer: 'stream', staleDependents: ['st-9-bare'], keptOnOldRoad: ['st-9-bare'], at: 't', tree: 'k/t' }] };
+    assert.ok(html({ ...base, plan }).includes('step 9'), 'the page draws, naming the step by its place');
   });
 
   // The stopped re-review's NF6: on D's own page, the landing's line and the page's note said one fact twice.

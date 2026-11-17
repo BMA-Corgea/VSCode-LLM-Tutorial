@@ -272,6 +272,10 @@ export const RECORDED_NOTE = 'Your choice at this step is recorded. Every later 
 export const RECORDED_KEPT_NOTE = 'Your choice at this step is recorded. Nothing was re-planned: every later step that stood on the old road is one you have walked, or one a step you have walked stands on.';
 /** T-22 (the re-review's R11): the control on a road a choice took that no re-plan followed. */
 export const REPLAN_OWN_ROAD_LABEL = 'Re-plan from this road';
+/** T-22 (the re-check's C2): the control on the author's road, beside such a choice: it drops the choice, for nothing. */
+export const BACK_TO_AUTHOR_LABEL = 'Back to the author\u2019s road';
+/** T-22 (the re-check's C8): a re-plan on record here followed another road than the one marked as the learner's. */
+export const REPLANNED_ELSEWHERE_NOTE = 'The walk was re-planned at this step from another road than the one marked as your choice. Re-plan from this road to follow yours.';
 /** T-22 (the re-review's R3, ruled 2026-11-11: one writer per file): on a step whose file a re-plan has taken over. */
 export function takenOverNote(writer: string): string {
   return `This file is written and checked at ${writer} now: the model rewrote it when you took a different road. This step does neither any more, and its roads can no longer be chosen.`;
@@ -887,7 +891,7 @@ function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replan
       const chosenBadge = isOn && table.diverged ? `<span class="badge badge-chosen">${CHOSEN_BADGE}</span>` : '';
       // On the road the step is on, the control re-plans from it (the re-review's R11); on any other, it takes that road.
       const choose = table.choosable[i] === true
-        ? `<button type="button" class="btn option-choose" id="choose-${i}" data-option-id="${escapeAttr(id)}">${isOn ? REPLAN_OWN_ROAD_LABEL : CHOOSE_LABEL}</button>`
+        ? `<button type="button" class="btn option-choose" id="choose-${i}" data-option-id="${escapeAttr(id)}">${isOn ? REPLAN_OWN_ROAD_LABEL : i === table.backTo ? BACK_TO_AUTHOR_LABEL : CHOOSE_LABEL}</button>`
         : '';
       return `<li class="${cls}" data-option-id="${escapeAttr(id)}">${authorBadge}${chosenBadge}<span class="option-label">${escapeHtml(label)}</span><p class="option-consequence">${escapeHtml(planText(opt?.consequence))}</p>${choose}</li>`;
     })
@@ -928,15 +932,18 @@ function roadNotes(step: StepLike, plan: PlanLike): { road: string; stale: strin
   // ("nothing later depended on it" is never concluded from a record that is merely absent: code review SF4).
   const road = rules.takenOverBy !== undefined
     ? takenOverNote(stepName(rules.takenOverBy))
-    : record !== undefined
-      ? (record.replanned ? REPLANNED_NOTE : record.keptOnOldRoad.length > 0 ? RECORDED_KEPT_NOTE : RECORDED_NOTE)
-      : table.diverged ? (rules.replansOwnRoad ? NOT_REPLANNED_NOTE : DIVERGED_NOTE) : '';
+    : record !== undefined && table.replansOn
+      ? REPLANNED_ELSEWHERE_NOTE
+      : record !== undefined
+        ? (record.replanned ? REPLANNED_NOTE : record.keptOnOldRoad.length > 0 ? RECORDED_KEPT_NOTE : RECORDED_NOTE)
+        : table.diverged ? (rules.replansOwnRoad ? NOT_REPLANNED_NOTE : DIVERGED_NOTE) : '';
   return { road, stale: staleNoteText(plan, step, record) };
 }
 
 /** How the page names a step: its place, and its file or chapter. */
 function stepName(s: StepLike): string {
-  return `step ${planText(String(s.ordinal))} (${planText(s.target.file)})`;
+  // Total over a hand-edited plan: a step with no target is named by its place alone (the re-check's security note).
+  return `step ${planText(String(s.ordinal))} (${planText(s.target?.file)})`;
 }
 
 /** T-22 (M1, R3, NF3): the sentences naming the steps on the old road, or '' when there are none. */
@@ -955,7 +962,7 @@ function staleNoteText(plan: PlanLike, step: StepLike, record: { staleDependents
   // A walked step whose file another step writes now is revisited there, so that step is named with it.
   const withWriter = (s: StepLike): string => {
     const writer = takenOverIn(writers, s);
-    return writer === undefined ? stepName(s) : `step ${planText(String(s.ordinal))} (${planText(s.target.file)}, written at step ${planText(String(writer.ordinal))} now)`;
+    return writer === undefined ? stepName(s) : `step ${planText(String(s.ordinal))} (${planText(s.target?.file)}, written at step ${planText(String(writer.ordinal))} now)`;
   };
   const walked = listed(record?.staleDependents ?? []);
   if (walked.length > 0) {

@@ -720,6 +720,39 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     });
   }
 
+  // The re-check of 2026-11-17, C10 (E19): every fixture recommended its first option, so "the road it recommends" was
+  // never told apart from "the first road".
+  test('a new file is shown a new file it stands on under the road that one recommends, when that is not its first', async () => {
+    const { root, gs, target } = setup();
+    const plan = repoPlan();
+    plan.steps = plan.steps.map((s) => (s.id === 's-render' ? { ...s, dependsOn: ['s-routes'] } : s));
+    const asked: Asked[] = [];
+    const run: TutorCore['runLlm'] = (prompt) => {
+      const line = prompt.split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
+      const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
+      asked.push({ task: String(input['task']), input });
+      if (input['task'] === 'code') return Promise.resolve({ text: JSON.stringify({ content: `export const from = ${JSON.stringify((input['node'] as { path: string }).path)};\n` }), inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
+      const replacing = (input['replacing'] as Array<{ kind: string; chapter: string; path: string; question: string; why: string }>).filter((r) => r.kind === 'file');
+      const options = [{ id: 'one', label: 'The first way', consequence: 'c1' }, { id: 'two', label: 'The second way', consequence: 'c2' }];
+      const steps = replacing.map((r) => ({ kind: r.kind, chapter: r.chapter, path: r.path, question: `${r.question} (new)`, options, recommended: 'two', why: r.why, dependsOn: r.path === 'src/view/render.ts' ? ['src/api/routes.ts'] : [] }));
+      return Promise.resolve({ text: JSON.stringify({ steps }), inputTokens: 1, outputTokens: 1, usd: 0, metered: true });
+    };
+    const out = await divergePlan(input(plan, root, 's-parse', 'alt-1', ['s-src']), depsFor(run, gs, target));
+    if (!out.ok) assert.fail(out.reason);
+    const render = asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/view/render.ts');
+    const routes = ((render?.input['dependencies'] as Array<{ path: string; chosen: { label: string } }> | undefined) ?? []).find((dep) => dep.path === 'src/api/routes.ts');
+    assert.equal(routes?.chosen.label, 'The second way', `routes.ts is shown on the road it recommends: ${JSON.stringify(routes)}`);
+  });
+
+  // The re-check of 2026-11-17, C10 (E11): a plan with nothing kept on the old road is byte-identical to before NF3.
+  test('a record with nothing kept on the old road carries no list for it', async () => {
+    const { plan, root, gs, target } = setup();
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const record = (out.plan['divergences'] as Array<Record<string, unknown>>).at(-1)!;
+    assert.ok(!('keptOnOldRoad' in record), `the record has no keptOnOldRoad key: ${JSON.stringify(Object.keys(record))}`);
+  });
+
   test('a chapter decision whose every dependent is walked lands a record naming them, and asks the model nothing', async () => {
     const { plan, root, gs, target } = setup();
     const m = model();

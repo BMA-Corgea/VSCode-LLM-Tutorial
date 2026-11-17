@@ -276,6 +276,8 @@ suite('one writer per file after a symbol press, through the walk and the real e
     const asked = m.asked.length;
     h.session.choose('s-routes', 'alt-1'); await drain(h);
     assert.match(h.view().choiceNote ?? '', /step 6 \(src\/api\/routes\.ts\)/, `a forged press is refused in words: ${JSON.stringify(h.view().choiceNote ?? null)}`);
+    // The re-check of 2026-11-17, C7: D keeps a decision of its own, so this step's roads are chosen nowhere now.
+    assert.doesNotMatch(h.view().choiceNote ?? '', /chosen at/, 'and the refusal does not send the learner to choose them elsewhere');
     assert.equal(m.asked.length, asked, 'nothing was asked');
     assert.equal(divergencesOf(h).length, 1, 'nothing landed');
   });
@@ -343,6 +345,23 @@ suite('a choice no re-plan followed can be re-planned from its own road (T-22 re
     h.session.choose('s-parse', 'alt-1'); await drain(h);
     assert.match(h.view().choiceNote ?? '', /already the road this step is on/);
     assert.equal(m.asked.length, asked);
+  });
+
+  // The re-check of 2026-11-17, C2: "Choose this instead" on the author's road re-planned the author's road, for 4
+  // questions, and replaced the author's code, though the walk had never left it.
+  test('from a choice no re-plan followed, the author\'s road drops the choice: nothing is asked, nothing is re-planned', async () => {
+    const m = scriptedModel();
+    const h = harness(t21Choice, m.run, 'manual');
+    await drain(h);
+    assert.ok(chooseButtons(h.html()).some((label) => /^Back to the author/.test(label)), `discriminates: the author's road says what its press does: ${JSON.stringify(chooseButtons(h.html()))}`);
+    const plan = fs.readFileSync(path.join(buildDir(h.target), 'plan.json'), 'utf8');
+    h.session.choose('s-parse', 'author'); await drain(h);
+    assert.equal(m.asked.length, 0, 'nothing was asked');
+    assert.equal(divergencesOf(h).length, 0, 'nothing was re-planned');
+    assert.equal(fs.readFileSync(path.join(buildDir(h.target), 'plan.json'), 'utf8'), plan, 'the author\'s steps stand as they were');
+    assert.equal(loadProgress(h.target, loadPlan(h.target)).steps['s-parse']?.chosen, undefined, 'and the choice is gone');
+    assert.match(h.view().choiceNote ?? '', /^Back on the author.s road/);
+    assert.doesNotMatch(h.notes(), /was not re-planned from it/, 'the step is on the author\'s road again');
   });
 
   test('a chapter choice nothing stands on is recorded, and stays without an offer to re-plan from it', async () => {

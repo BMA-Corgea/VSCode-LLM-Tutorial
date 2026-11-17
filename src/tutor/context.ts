@@ -825,6 +825,14 @@ function derivedStepNote(step: StepLike): string {
   return `There is no author for this step: its code was written by a model${named} after the learner chose a different road. Wherever this says "the author", read "the generated code".`;
 }
 
+/**
+ * T-22 (the re-check's C9): told to the tutor first on a step whose file a re-plan took over. The step is the author's,
+ * and so is everything else it is given, but the learner's file may hold the code a model wrote at another step.
+ */
+function takenOverStepNote(writer: StepLike): string {
+  return `This step's file is no longer written from here: after the learner chose a different road at step ${Outbound.text(String(writer.ordinal), 16)}, a model rewrote the file, and the learner's own copy may hold that code rather than the author's.`;
+}
+
 export async function tutorContext(
   step: StepLike,
   refRoot: string,
@@ -832,6 +840,8 @@ export async function tutorContext(
   git: GitRunner,
   /** the repository's own folder, which names the project: a re-derived step's `refRoot` is a tree's (T-22's code review, N2) */
   projectRoot?: string,
+  /** T-22 (the re-check's C9): the step that writes this step's file now, when a re-plan took it over */
+  takenOverBy?: StepLike,
 ): Promise<AskContext> {
   const learnerDiff = await learnerDiffFor(step, refRoot, target, git);
   // Every field, without exception, and that is the point: `question` and `why` are the two
@@ -846,7 +856,7 @@ export async function tutorContext(
     build: {
       question: Outbound.text(step.decision.question, MAX_PROMPT_TEXT),
       options: Outbound.options(step).options,
-      why: Outbound.text(step.derivedFrom === undefined ? step.decision.why : `${derivedStepNote(step)} ${whyOfStep(step)}`, MAX_PROMPT_TEXT),
+      why: Outbound.text(`${takenOverBy === undefined ? '' : `${takenOverStepNote(takenOverBy)} `}${step.derivedFrom === undefined ? step.decision.why : `${derivedStepNote(step)} ${whyOfStep(step)}`}`, MAX_PROMPT_TEXT),
       ...(learnerDiff === undefined ? {} : { learnerDiff }),
     },
   };

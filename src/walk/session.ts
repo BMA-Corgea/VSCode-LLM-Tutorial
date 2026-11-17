@@ -226,6 +226,7 @@ import {
   optionsTable,
   pressRules,
   takenOverBy,
+  clearChosen as clearChosenIn,
   walkedSteps,
   withChosen,
   type PlanLike,
@@ -280,8 +281,12 @@ export function replanNothingFollowsText(at: string | null): string {
 
 /** T-22 (the re-review's R3, ruled 2026-11-11: one writer per file): a press at a step whose file another step writes now. */
 export function choiceTakenOverText(writer: StepLike): string {
-  return `The roads for this file are chosen at ${stepLabel(writer)} now, where the model rewrote it. Nothing was recorded.`;
+  // Not "chosen at that step": it keeps a decision of its own, so this step's roads are chosen nowhere now (the re-check's C7).
+  return `This step\u2019s roads can no longer be chosen: the model rewrote its file at ${stepLabel(writer)}, and the file is written and checked there now. Nothing was recorded.`;
 }
+
+/** T-22 (the re-check's C2): the author's road pressed from a choice no re-plan followed. */
+export const BACK_ON_AUTHORS_ROAD = 'Back on the author\u2019s road. The walk never left it, so nothing was re-planned and nothing was asked.';
 
 /** T-22 (R3): *Check my work* at a step whose file another step writes now. Nothing is checked, and its record stands. */
 export function checkTakenOverText(writer: StepLike): string {
@@ -306,7 +311,7 @@ function replanCostText(cost: DeriveCost): string {
  * `fileAsItWas`: the learner's own file is the one from before, and arriving at the step again is how
  * the new code is written (a landing is not an arrival; code review N9).
  */
-export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost, at: string | null = null, fileAsItWas = false, kept = 0): string {
+export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost, at: string | null = null, fileAsItWas = false, kept = 0, rewrittenHere = false): string {
   // Every later step that stood on a chapter decision was kept: nothing re-derived, nothing asked (code review MF1, NF3).
   if (fresh === 0 && !ownCode) {
     // On D's own page the page's note (`RECORDED_NOTE`) says why nothing was re-planned; said here too, it is said twice.
@@ -323,7 +328,10 @@ export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost
   const what = fresh > 0
     ? `${ownCode ? `${its} and ` : ''}${fresh} later step${fresh === 1 ? '' : 's'} now follow${fresh === 1 && !ownCode ? 's' : ''} your choice.${stays}`
     : `${its} now follows your choice.${kept === 0 ? ' No later step needed re-planning.' : stays}`;
-  const file = fileAsItWas && at === null ? ' Your file is as you left it: come back to this step to have the new code written.' : '';
+  // On a step this press wrote again under its old id (the re-check's C3), what was said about its old code is gone too.
+  const file = fileAsItWas && at === null
+    ? ' Your file is as you left it: come back to this step to have the new code written.'
+    : rewrittenHere ? ' The model wrote this step\u2019s code again too. Your file is as you left it: come back to this step to have the new code written.' : '';
   return `${at === null ? 'Re-planned.' : `Re-planned from your choice at ${at}.`} ${what}${file} ${replanCostText(cost)}`;
 }
 
@@ -985,6 +993,12 @@ export class WalkSession {
     }
     const table = optionsTable(step, rules);
     const row = table.keys.indexOf(optionId);
+    if (row !== -1 && row === table.backTo) {
+      this.progress = clearChosenIn(this.progress, stepId);
+      this.choiceRefusal = { stepId, reason: BACK_ON_AUTHORS_ROAD, inARow: 1 };
+      this.commit(false);
+      return;
+    }
     if (row !== -1 && row === table.on && !table.replansOn) {
       this.refuseChoice(stepId, CHOICE_ALREADY_TAKEN);
       return;
@@ -1122,7 +1136,11 @@ export class WalkSession {
     // Only D's own notes describe code that is gone: an unrelated step the learner moved on to keeps its
     // "What to write" (code review SF9).
     const atD = this.progress.current === job.stepId;
-    if (atD) this.clearStepNotes();
+    // A step this press wrote again under its old id is about new code too: what the session said about its old code goes
+    // (the re-check's C3), and so does its outline.
+    const here = this.progress.current;
+    const atRewritten = here !== null && !atD && rewritten.includes(here);
+    if (atD || atRewritten) this.clearStepNotes();
     const decided = outcome.plan.steps.find((s) => s.id === job.stepId);
     const ownCode = decided !== undefined && decided.kind !== 'shape';
     // D keeps its id, so its conversation is about the author's code: a line in it says so, and the history
@@ -1136,7 +1154,8 @@ export class WalkSession {
     // wrote and this one kept (the stopped re-review's NF5).
     const followed = outcome.written.filter((id) => id !== job.stepId).length;
     const fileAsItWas = ownCode && stepDial(this.progress, job.stepId, request.dial) !== 'manual';
-    this.sayChoice(job, replanDoneText(followed, ownCode, outcome.cost, atD || decided === undefined ? null : stepLabel(decided), fileAsItWas, outcome.keptOnOldRoad?.length ?? 0));
+    const rewrittenHere = atRewritten && stepDial(this.progress, here, request.dial) !== 'manual';
+    this.sayChoice(job, replanDoneText(followed, ownCode, outcome.cost, atD || decided === undefined ? null : stepLabel(decided), fileAsItWas, outcome.keptOnOldRoad?.length ?? 0, rewrittenHere));
     this.commit(false);
   }
 
@@ -1772,7 +1791,7 @@ export class WalkSession {
     // leaving a stale complaint beside a working input.
     this.unreachable = undefined;
 
-    const ctx = await tutorContext(step, refRoot, this.target, this.adapters.git, this.projectRoot());
+    const ctx = await tutorContext(step, refRoot, this.target, this.adapters.git, this.projectRoot(), takenOverBy(this.plan, step));
     if (stopped()) return;
 
     // Security review finding 12, and it goes here because THIS is the moment the exposure is
