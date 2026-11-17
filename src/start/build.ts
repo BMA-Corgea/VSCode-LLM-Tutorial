@@ -19,7 +19,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
+import { gitAttributesRefusal, hazardousGitAttributes } from './gitattributes.js';
 import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, pidSpace, type BuildRequest } from './request.js';
+import { recordBuiltReference } from '../walk/provenance.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
 // repo-tour's real types — see src/core.ts's header for why the boundary is typed this loosely). ──
@@ -540,6 +542,88 @@ export function markerPath(target: string): string {
   return path.join(buildDir(target), MARKER_FILE);
 }
 
+// ── the build folder, proved (T-91) ─────────────────────────────────────────────────────────────
+//
+// A repository can ship a `.repo-tour/` of its own, and git recreates a link on clone, so `.repo-tour` or
+// `.repo-tour/build` can be a link by the time a build writes there, and a write, a removal or a read
+// through it lands wherever it points (T-22's security review, F1, which proved the walk's own writers the
+// same way on its branch; kb: "A lexical path check is not a filesystem check"). The learner's folder itself
+// may be a link: that one is theirs.
+
+/** A build into a folder it may not keep its files in. Retry will not help; its message is the refusal. */
+export class BuildFolderRefused extends Error {
+  readonly retryWontHelp = true;
+}
+
+function lstatOrNull(p: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(p);
+  } catch {
+    return null;
+  }
+}
+
+interface BuildFolderProblem { folder: string; why: 'link' | 'not-a-folder' | 'gone' }
+
+/**
+ * What is wrong with `<target>/.repo-tour/build` as a place for this build's files, or `null`: both
+ * folders real, or not there yet. Each is looked at by `lstat`, the outer one first, so the inner one is
+ * never looked up through a link. When both are there, `realpath` must also put them where they say, below
+ * the learner's own folder, which catches a swap since the `lstat`s.
+ */
+function buildFolderProblem(target: string): BuildFolderProblem | null {
+  const folders = [path.join(target, BUILD_DIR[0]), buildDir(target)] as const;
+  for (const folder of folders) {
+    const st = lstatOrNull(folder);
+    if (st === null) return null;
+    if (st.isSymbolicLink()) return { folder, why: 'link' };
+    if (!st.isDirectory()) return { folder, why: 'not-a-folder' };
+  }
+  try {
+    if (fs.realpathSync(folders[1]) === path.join(fs.realpathSync(target), ...BUILD_DIR)) return null;
+  } catch {
+    // Gone between the lstat and now: not a place to write either, and not a link (review F2).
+    return { folder: folders[1], why: 'gone' };
+  }
+  return { folder: folders[1], why: 'link' };
+}
+
+function folderRefusal(problem: BuildFolderProblem): string {
+  if (problem.why === 'link') return `${problem.folder} is a link to somewhere else, so this build writes nothing through it — pick an empty or new folder`;
+  if (problem.why === 'gone') return `${problem.folder} could not be found as this build was about to write there, so it wrote nothing — pick an empty or new folder`;
+  return `${problem.folder} is not a folder, so this build writes nothing there — pick an empty or new folder`;
+}
+
+/** The build folder when it is there and real, else `null`. Never makes anything: what reads and removals use. */
+function realBuildDir(target: string): string | null {
+  const dir = buildDir(target);
+  return buildFolderProblem(target) === null && lstatOrNull(dir) !== null ? dir : null;
+}
+
+/**
+ * The build folder, made if it is not there and proved real, or a `BuildFolderRefused` that says why. Every
+ * write in this file goes through here, just before it writes. The folders are made one level at a time, the
+ * outer one first, and each is proved before the next is made: a `mkdir` at a link's own name, dangling or
+ * not, makes nothing, so nothing is ever made through one. (The recursive `mkdir` of the whole path that
+ * `writeJsonAtomic` does walks straight through a link at `.repo-tour`.) What is left is a swap of a FOLDER
+ * in the microseconds between this and the write, which nothing in Node (no `openat`) can close; the
+ * `realpath` in `buildFolderProblem` catches one that comes before it. (A file's own name can be held:
+ * `readGuarded` opens the marker with `O_NOFOLLOW`.)
+ */
+export function provenBuildDir(target: string): string {
+  fs.mkdirSync(target, { recursive: true }); // the learner's own folder, a link included: theirs to choose
+  for (const folder of [path.join(target, BUILD_DIR[0]), buildDir(target)]) {
+    try {
+      fs.mkdirSync(folder);
+    } catch {
+      /* there already, or the check says why not */
+    }
+    const problem = buildFolderProblem(target);
+    if (problem !== null) throw new BuildFolderRefused(folderRefusal(problem));
+  }
+  return buildDir(target);
+}
+
 /**
  * The three filesystem calls every durable write in this file makes, as one swappable
  * record. Real by default; a test injects a version whose `renameSync` throws to prove what
@@ -587,16 +671,63 @@ function writeAtomic(filePath: string, data: string | Uint8Array, ops: FsWriteOp
   ops.renameSync(tmp, filePath);
 }
 
-/** Write-ahead: temp file + rename, so there is never a half-written marker. */
+/** Write-ahead: temp file + rename, so there is never a half-written marker. Only in a proved folder (T-91). */
 function writeMarker(target: string, marker: BuildMarker, ops: FsWriteOps = realFsWriteOps): void {
-  writeJsonAtomic(markerPath(target), marker, ops);
+  writeJsonAtomic(path.join(provenBuildDir(target), MARKER_FILE), marker, ops);
 }
 
+/**
+ * The marker in `target`'s own build folder, or `null`. Only a regular file in a real folder (T-91): one read
+ * through a link is another folder's, or anything a repository wrote, and every decision made on it (another
+ * live build, the build this one began over, whose heartbeat, what the reload offers) would rest on that.
+ */
 export function readMarker(target: string): BuildMarker | null {
+  const dir = realBuildDir(target);
+  if (dir === null) return null;
+  const file = path.join(dir, MARKER_FILE);
+  if (lstatOrNull(file)?.isFile() !== true) return null;
+  const text = readGuarded(file, MARKER_MAX_BYTES);
+  if (text === null) return null;
   try {
-    return JSON.parse(fs.readFileSync(markerPath(target), 'utf8')) as BuildMarker;
+    return JSON.parse(text) as BuildMarker;
   } catch {
     return null;
+  }
+}
+
+/** A real marker is well under a kilobyte; past this, it is not one of ours. */
+const MARKER_MAX_BYTES = 1024 * 1024;
+
+/**
+ * A file's text, opened without following a link at its own name and without waiting on a pipe
+ * (`O_NOFOLLOW`, `O_NONBLOCK`), read only when what was opened is a regular file (`fstat`) no larger than
+ * `maxBytes`; else `null` (T-91 review F3, as repo-tour's `readGuardedFile` does). The `lstat` before it
+ * says as much for a file that stays put; this holds for one swapped in after that `lstat`. Where the
+ * platform has no `O_NOFOLLOW` (Windows), the `lstat` is what there is.
+ */
+function readGuarded(file: string, maxBytes: number): string | null {
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+  let fd: number;
+  try {
+    fd = fs.openSync(file, flags);
+  } catch {
+    return null;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) return null;
+    const buf = Buffer.alloc(st.size);
+    let n = 0;
+    while (n < st.size) {
+      const got = fs.readSync(fd, buf, n, st.size - n, n);
+      if (got === 0) break;
+      n += got;
+    }
+    return buf.subarray(0, n).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -610,16 +741,37 @@ export function readFreshMarker(target: string, now: () => number = Date.now): B
   const marker = readMarker(target);
   if (!marker) return null;
   const ageMs = now() - new Date(marker.startedAt).getTime();
-  if (ageMs > STALE_AFTER_MS) return null; // old enough that we stay quiet about it
+  // Old enough that we stay quiet about it. So is one that starts far in the future, or never: either would
+  // read as fresh for ever, and every reload would ask again (T-91 review F5). A clock a little ahead is fine.
+  if (!(Math.abs(ageMs) <= STALE_AFTER_MS)) return null;
   return marker;
 }
 
-function deleteMarker(target: string, id?: string): void {
-  // Never another build's marker (T-71 re-review R2): a build deletes only its own, or none at all.
+/**
+ * What a marker is known by: its id, or its start for one from before ids. The reload's prompt matches
+ * on it too (`resumeIfMarked`).
+ */
+function markerKey(marker: Pick<BuildMarker, 'id' | 'startedAt'>): string | undefined {
+  return marker.id ?? marker.startedAt;
+}
+
+/**
+ * Removes `whose` marker and what that build left beside it. Another build's marker on disk is never
+ * touched, and nothing beside it either (T-71 re-review R2). It used to compare ids only when both had
+ * one, so a marker from before ids, or a caller with none, deleted whatever marker was on disk when it
+ * ran: that of a build another window had started meanwhile (T-72 merge check). With no marker on disk at
+ * all, it still tidies what an unfinished build of ours leaves: an atomic write's temp file, a request
+ * with no plan, and the folders, once empty.
+ */
+function deleteMarker(target: string, whose: Pick<BuildMarker, 'id' | 'startedAt'>): void {
+  // Only in a real build folder (T-91): through a `.repo-tour` or a `build` that is a link, every file below is
+  // another folder's, and the unlink and the tidy here would remove them wherever it points.
+  const dir = realBuildDir(target);
+  if (dir === null) return;
   const there = readMarker(target);
-  if (there && id !== undefined && there.id !== undefined && there.id !== id) return;
+  if (there && markerKey(there) !== markerKey(whose)) return;
   try {
-    if (there) fs.unlinkSync(markerPath(target));
+    if (there) fs.unlinkSync(path.join(dir, MARKER_FILE));
   } catch {
     /* already gone — fine */
   }
@@ -627,16 +779,13 @@ function deleteMarker(target: string, id?: string): void {
   // atomic write a crash cut short, and, unless there is a finished plan, the request it wrote
   // first. Otherwise the folder stayed "not empty" with nothing in it to resume.
   try {
-    const dir = buildDir(target);
-    if (fs.lstatSync(dir).isDirectory()) {
-      const names = fs.readdirSync(dir);
-      for (const name of names) {
-        if (ATOMIC_TMP.test(name)) fs.rmSync(path.join(dir, name), { force: true });
-      }
-      if (!names.includes('plan.json')) fs.rmSync(path.join(dir, 'request.json'), { force: true });
+    const names = fs.readdirSync(dir);
+    for (const name of names) {
+      if (ATOMIC_TMP.test(name)) fs.rmSync(path.join(dir, name), { force: true });
     }
+    if (!names.includes('plan.json')) fs.rmSync(path.join(dir, 'request.json'), { force: true });
   } catch {
-    /* no build folder, or one this cannot read: nothing of ours to tidy */
+    /* a build folder this cannot read: nothing of ours to tidy */
   }
   // And the folders the marker needed, when nothing else is in them (T-30). `validateTarget` refuses
   // a folder with anything in it, so an empty `.repo-tour/build/` left by a cancel or a refusal
@@ -661,10 +810,12 @@ function deleteMarker(target: string, id?: string): void {
  * `<outDir>/inventory.json` whether or not it writes, and by default that is
  * `<reference>/.repo-tour/inventory.json`, a file inside the repository being read: a symlink
  * committed there is followed out of the tree, or to `/dev/zero` (T-30 security review, findings 1
- * and 4). Nothing here uses what that read produces, so it is pointed at nothing.
+ * and 4). Nothing here uses what that read produces, so it is pointed at nothing. A fresh name each
+ * build (T-91), like an atomic write's temp file: a fixed one could be a link planted in the build
+ * folder before a Resume, and the read would follow it.
  */
 function noDigestCache(target: string): string {
-  return path.join(buildDir(target), 'no-digest-cache');
+  return path.join(buildDir(target), `no-digest-cache-${randomBytes(6).toString('hex')}`);
 }
 
 // ── the build itself ─────────────────────────────────────────────────────────────────────────
@@ -716,12 +867,18 @@ function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: B
   return true;
 }
 
-/** Whether anything is at `<target>/.repo-tour/build/plan.json`, a link included. */
+/**
+ * Whether anything is at `<target>/.repo-tour/build/plan.json`, a link included, in a real build folder. One
+ * seen through a linked `.repo-tour` or `build` is no tutorial of this folder's (T-91 review F1): the build
+ * then refuses the link in its own words, at its first write, not as "another build finished a tutorial".
+ */
 function planIn(target: string): boolean {
+  const dir = realBuildDir(target);
+  if (dir === null) return false;
   try {
-    return fs.lstatSync(path.join(buildDir(target), 'plan.json'), { throwIfNoEntry: false }) !== undefined;
+    return fs.lstatSync(path.join(dir, 'plan.json'), { throwIfNoEntry: false }) !== undefined;
   } catch {
-    return false; // no build folder to hold one (`.repo-tour` a file, say)
+    return false;
   }
 }
 
@@ -745,6 +902,10 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
   heartbeat.unref?.();
   try {
     return await runThePhases(request, ctx, marker);
+  } catch (err) {
+    // A folder this build may not keep its files in (T-91), found by a marker write: a sentence, not a throw.
+    if (err instanceof BuildFolderRefused) return { ok: false, reason: err.message };
+    throw err;
   } finally {
     clearInterval(heartbeat);
     BUILDING_NOW.delete(key);
@@ -754,7 +915,7 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
     if (left?.id === marker.id) {
       try { writeMarker(target, { ...marker, endedAt: new Date().toISOString() }, ctx.writeOps ?? realFsWriteOps); } catch { /* stale in 90 s */ }
     } else if (left === null) {
-      deleteMarker(target, marker.id);
+      deleteMarker(target, marker);
     }
     ctx.core.release?.(); // a refusal after the digest, a failure, a cancel: nothing may keep a worker alive
   }
@@ -764,8 +925,12 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   const target = request.target;
   const git = ctx.git ?? realGit;
   // Whether a finished plan was there as this build began, as for a Resume of a build that crashed
-  // just after writing it. Only a plan that appears DURING the fetch is another build's tutorial (R2).
+  // just after writing it. Only a plan that appears DURING the fetch or the walk is another build's
+  // tutorial (R2).
   const planBefore = planIn(target);
+  // And the marker this build began over: the one a crash left (a Resume), a failed build's (a retry), or
+  // none. The only one a refusal or a Cancel of the check below may remove.
+  const markerBefore = readMarker(target);
 
   let repoRoot: string;
   try {
@@ -797,19 +962,44 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return { ok: false, reason };
   }
 
-  // The folder is checked again just before this build's first write (T-71 re-review R2). A fetch can
-  // take minutes, and another window may have started a build in the same folder meanwhile, or
-  // finished one there.
+  const fromUrl = parseGithubUrl(request.repo) !== null;
+
+  // T-72: a .gitattributes repo-tour would read without end is refused here, before the digest and
+  // before this build's first write (src/start/gitattributes.ts). The walk stops at a Cancel. It takes
+  // as long as the repository does, so it comes BEFORE the check for another build below, which has to
+  // stay right beside the first write (T-72 merge check): with the walk between them, a marker or a plan
+  // another window wrote during it was overwritten.
+  ctx.onProgress?.('checking the repository…');
+  const hazard = await hazardousGitAttributes(repoRoot, ctx.isCancelled);
+  if (hazard === 'cancelled' || hazard) {
+    // The marker this build began over goes with it. Resuming can never make this file safe, and a marker
+    // left here asks again on every reload and leaves the target "not empty" for the next press (T-72 code
+    // review, finding 1). Only that one, read again now, and only while it is not running: its build can
+    // have woken meanwhile. A marker that came during the fetch or the walk is another window's build,
+    // running or stopped, and stays with everything beside it, so that window's reload still offers it
+    // (T-72 merge check and fix check).
+    const there = readMarker(target);
+    if (there && markerBefore && markerKey(there) === markerKey(markerBefore)
+      && !markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) deleteMarker(target, there);
+    if (hazard === 'cancelled') return cancel(target, 'while checking the repository');
+    return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard, fromUrl ? 'url' : 'folder') };
+  }
+
+  // The folder is checked again just before this build's first write (T-71 re-review R2), with nothing
+  // awaited in between. A fetch can take minutes, and so can the walk; another window may have started a
+  // build in the same folder meanwhile, or finished one there.
+  const meanwhile = fromUrl ? 'fetching and checking the repository' : 'checking the repository';
   const there = readMarker(target);
   // Positive evidence of another live build only. Every marker this version writes carries a
   // heartbeat (`runPhase`), so one without is from before T-71: the one a Resume is taking over, or
   // one the press already weighed (`unfinishedBuildIn`) before this build began.
   if (there && there.id !== marker.id && markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) {
-    return { ok: false, reason: `another build started in ${target} while this one was fetching the repository — wait for it to finish, or pick an empty or new folder` };
+    return { ok: false, reason: `another build started in ${target} while this one was ${meanwhile} — wait for it to finish, or pick an empty or new folder` };
   }
   if (!planBefore && planIn(target)) {
-    return { ok: false, reason: `another build finished a tutorial in ${target} while this one was fetching the repository — it is left as it is; pick an empty or new folder to build another` };
+    return { ok: false, reason: `another build finished a tutorial in ${target} while this one was ${meanwhile} — it is left as it is; pick an empty or new folder to build another` };
   }
+
   runPhase(target, marker, 'digest', ctx, true);
   if (ctx.isCancelled?.()) return cancel(target, 'before reading the repository');
 
@@ -830,7 +1020,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   const unsupported = detectUnsupportedLanguages(digestResult);
   if (unsupported) {
     const reason = languageRefusalMessage(repoRoot, unsupported);
-    deleteMarker(target, marker.id); // deterministic — resuming can never make an unsupported repo supported
+    deleteMarker(target, marker); // deterministic — resuming can never make an unsupported repo supported
     return { ok: false, reason };
   }
 
@@ -885,13 +1075,21 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     // `repoRoot`, not `request.repo`: for a GitHub URL those differ, and the one worth
     // recording is where the clone actually landed. Writing only the URL is what made the
     // dial silently refuse on every URL-built tutorial (T-5 security review, finding 2).
-    writeJsonAtomic(path.join(buildDir(target), 'request.json'), { ...request, referenceRoot: repoRoot }, writeOps);
-    writeJsonAtomic(path.join(buildDir(target), 'plan.json'), interpreted.plan, writeOps);
+    // Into the build folder proved just now (T-91), never through a link swapped in during the build.
+    const dir = provenBuildDir(target);
+    writeJsonAtomic(path.join(dir, 'request.json'), { ...request, referenceRoot: repoRoot }, writeOps);
+    // T-92: the record a walk believes `request.json` by, in the extension's own storage, bound to
+    // the bytes just written and to the root they name. A repository can ship a `request.json`; it
+    // cannot write this. Before the plan, so a folder whose walk can open always has its record. A
+    // failure here is the build's own (`fail`, marker kept, no plan written). It reads the request
+    // back at `realpath(target)/.repo-tour/build/`, the folder T-91 has just proved.
+    recordBuiltReference(ctx.globalStorageRoot, target, repoRoot);
+    writeJsonAtomic(path.join(dir, 'plan.json'), interpreted.plan, writeOps);
   } catch (err) {
     return fail(err);
   }
 
-  deleteMarker(target, marker.id); // success — nothing left to resume
+  deleteMarker(target, marker); // success — nothing left to resume
   return { ok: true, plan: interpreted.plan, cost: interpreted.cost };
 
   // The marker is deliberately LEFT on any of these failures (digest/buildPlan/interpretPlan/
@@ -912,6 +1110,13 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return { ok: false, reason: `${said || 'the build stopped without saying why'} — ${TRY_AGAIN}` };
   }
   function takenOver(): BuildOutcome {
+    // T-91: its folder became a link (or something other than a folder), so its marker reads as gone and
+    // nothing more is written through it.
+    const problem = buildFolderProblem(target);
+    if (problem !== null) {
+      const became = problem.why === 'link' ? 'became a link to somewhere else' : problem.why === 'gone' ? 'went away' : 'became something other than a folder';
+      return { ok: false, reason: `${problem.folder} ${became} while this build was running — it stopped and wrote nothing more; pick an empty or new folder` };
+    }
     // R2: the folder is another build's now, or its marker was removed. This build wrote nothing more.
     const why = readMarker(target)
       ? `another build took over ${target} while this one was running`
@@ -919,7 +1124,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return { ok: false, reason: `${why} — it stopped and wrote nothing more; wait for any build there to finish, or pick an empty or new folder` };
   }
   function cancel(t: string, when: string): BuildOutcome {
-    deleteMarker(t, marker.id); // an explicit user cancel — not a crash — so there is nothing to resume
+    deleteMarker(t, marker); // an explicit user cancel — not a crash — so there is nothing to resume
     return { ok: false, cancelled: true, reason: `build cancelled ${when}` };
   }
 }
@@ -992,14 +1197,16 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
   // The answer can come long after the question (review F1): a build may have started there since,
   // here or in another window. Then neither resume nor discard: that build owns the folder now.
   const current = readMarker(target);
-  if (!current || (current.id ?? current.startedAt) !== (marker.id ?? marker.startedAt) || running(current)) return undefined;
+  if (!current || markerKey(current) !== markerKey(marker) || running(current)) return undefined;
   if (answer === 'Discard') {
-    deleteMarker(target, marker.id);
+    deleteMarker(target, marker);
     return undefined;
   }
   if (answer !== 'Resume') return undefined; // dismissed — leave the marker for next time
 
   // Every finished interpretation is cached by content hash, so re-running from the start —
   // simpler and more honest than trying to resume mid-phase — is cheap, not wasteful.
-  return buildFromRequest(marker.request, ctx);
+  // Into the folder whose marker this is, whatever folder its request names: a marker is a file in the learner's
+  // folder, and one put there by anything else must not choose where this build writes (T-91 review F5).
+  return buildFromRequest({ ...marker.request, target }, ctx);
 }

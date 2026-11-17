@@ -71,6 +71,7 @@ import type { PlanLike, Progress, StepLike } from '../src/walk/model.js';
 import { WalkSession, type WalkAdapters } from '../src/walk/session.js';
 import { CHECK_HEADING, SHAPE_HEADING, SHAPE_NOTE_MESSAGE } from '../src/walk/step-view.js';
 import { loadPlan, loadProgress, loadRequest, saveProgress } from '../src/walk/store.js';
+import { recordBuiltHere } from './support/built-here.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
 
@@ -237,6 +238,10 @@ async function newTutorial(dial: Dial): Promise<{ target: string; refRoot: strin
   assert.ok(cost, 'a finished build reports its cost');
   assert.equal(cost.usd, 0, 'this suite must never spend a token — cachedOnly should have kept the cost at zero');
   assert.equal(cost.inputTokens + cost.outputTokens, 0, 'and should not have sent or received one either');
+  // T-92: the build recorded its root in `storageOnce`; the walk below runs in the extension's own
+  // storage, as a tutorial built from the start screen would be. Without the record there, the
+  // walk rightly reads no reference for it (a tutorial built in another editor).
+  await recordBuiltHere(target, refRoot);
 
   return { target, refRoot, plan: loadPlan(target) };
 }

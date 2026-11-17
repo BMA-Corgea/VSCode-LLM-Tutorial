@@ -116,7 +116,7 @@ export interface StepViewState {
    * renders on: manual mode is the one position where the extension writes nothing, so it is
    * the one position where the panel owes the learner a description of what to type.
    */
-  shape?: { signatures: string[]; imports: string[] };
+  shape?: { signatures: string[]; imports: string[]; refused?: string };
   /**
    * The last structural check, as `src/dial/check.ts` produced it — `undefined` means nobody
    * has pressed *Check my work* on this step yet, which the page must show differently from a
@@ -134,6 +134,8 @@ export interface StepViewState {
   writeNote?: string;
   /** T-21: why the last press of *Choose this instead* was refused — the session's, server-rendered beside the options list (`WalkView.choiceNote`). */
   choiceNote?: string;
+  /** T-92: why none of this tutorial's reference files are read — the session's standing line (`WalkView.referenceNote`). */
+  referenceNote?: string;
   /**
    * `plan.reproduce`'s never-taught files: how many there are, and whether they have already
    * been copied into the target. The offer is worth making exactly once — `done` is what turns

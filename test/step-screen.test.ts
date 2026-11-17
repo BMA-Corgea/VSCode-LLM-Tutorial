@@ -19,6 +19,7 @@ import type { ExtensionApi } from '../src/extension.js';
 import type { PlanLike, Progress } from '../src/walk/model.js';
 import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, REPLAN_NOTHING_FOLLOWS, type Replanner } from '../src/walk/session.js';
 import { BACK_TO_AUTHOR_LABEL, CHOOSE_LABEL, CHOSEN_BADGE, NOT_REPLANNED_NOTE, REPLAN_OWN_ROAD_LABEL } from '../src/walk/step-view.js';
+import { recordBuiltHere } from './support/built-here.js';
 import { Screen, sleep, stale, type Frame } from './support/screen.js';
 import { repoTourShapedPlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
@@ -115,6 +116,8 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'step-screen-'));
     writeFixtureTarget(dir, plan);
     fs.writeFileSync(path.join(dir, '.repo-tour', 'build', 'request.json'), JSON.stringify({ idea: '', recreate: true, repo: dir, target: dir, dial: 'manual', referenceRoot: dir }));
+    // T-92: the walk believes a request only on the build's own record; this is what a build here would have written.
+    await recordBuiltHere(dir, dir);
     api._walk.useReplanner(NOTHING_FOLLOWS);
     const planFile = path.join(dir, '.repo-tour', 'build', 'plan.json');
     const progressFile = path.join(dir, '.repo-tour', 'build', 'progress.json');

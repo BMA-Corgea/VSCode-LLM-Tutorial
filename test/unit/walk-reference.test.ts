@@ -150,7 +150,9 @@ suite('loadRequest and a plan\'s tree: only a tree in the extension\'s own store
 
   test('no file in the walk reads the reference except through the one function', () => {
     const dirs = ['src/walk', 'src/tutor', 'src/detour', 'src/dial'];
-    const allowed = new Set(['src/walk/reference.ts', 'src/walk/store.ts']);
+    // `store.ts` loads the request and `provenance.ts` (T-92) decides whether its root is believed at all, against the
+    // build's own record, before any reader sees it: both name the root, and neither reads a file from it.
+    const allowed = new Set(['src/walk/reference.ts', 'src/walk/store.ts', 'src/walk/provenance.ts']);
     const code = (file: string): string => fs.readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
     for (const dir of dirs) {
       for (const name of fs.readdirSync(path.join(process.cwd(), dir))) {

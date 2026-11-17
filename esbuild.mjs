@@ -21,6 +21,7 @@
  *   - test/build-off-thread.test.ts -> dist/test/build-off-thread.test.js (external: vscode, repo-tour, mocha) — vscode-test
  *   - test/codicons.test.ts   -> dist/test/codicons.test.js    (external: vscode, repo-tour, mocha) — vscode-test (T-40)
  *   - test/plan-ends.test.ts  -> dist/test/plan-ends.test.js   (external: vscode, repo-tour, mocha) — vscode-test (T-51)
+ *   - test/provenance.test.ts -> dist/test/provenance.test.js  (external: vscode, repo-tour, mocha) — vscode-test (T-92)
  *   - test/start-screen.test.ts -> dist/test/screen/start-screen.test.js (external: vscode, repo-tour, mocha) — vscode-test's
  *     "screen" host, the only one launched with a DevTools port (T-15; see .vscode-test.mjs)
  *   - test/derive-screen.test.ts -> dist/test/screen/derive-screen.test.js (external: vscode, repo-tour, mocha) — the same "screen" host (T-17)
@@ -140,6 +141,12 @@ const builds = [
     ...shared,
     entryPoints: ['test/plan-ends.test.ts'],
     outfile: 'dist/test/plan-ends.test.js',
+    external: ['vscode', 'repo-tour', 'mocha'],
+  },
+  {
+    ...shared,
+    entryPoints: ['test/provenance.test.ts'],
+    outfile: 'dist/test/provenance.test.js',
     external: ['vscode', 'repo-tour', 'mocha'],
   },
   {

@@ -15,6 +15,7 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_REPO_TOUR_PATH, loadCore, resolveCoreRoot, type CoreLoadResult } from './core.js';
 import { runDoctor, formatReport } from './doctor.js';
+import { neutraliseLinks } from './notify-text.js';
 import { offThreadCore } from './start/off-thread.js';
 import { StartPanel, type StartPanelDeps } from './start/panel.js';
 import { BUILD_WORKER_RELATIVE } from './start/worker-protocol.js';
@@ -35,6 +36,7 @@ import { WalkStatusBar } from './walk/status.js';
 import { divergePlan } from './derive/diverge.js';
 import { DERIVED_TREES_DIR } from './derive/storage.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveDivergedPlan, saveProgress } from './walk/store.js';
+import { believeRequest } from './walk/provenance.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
 import { tutorCoreFor, type TutorCore } from './tutor/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
@@ -131,7 +133,9 @@ function buildContextFor(
     model,
     cachedOnly: false,
     git: realGit,
-    onProgress: (msg) => progress.report({ message: msg }),
+    // repo-tour's own lines name the reference repository's files ("interpreting <file>…"), and VS
+    // Code draws links in an extension's progress message as it does in any of its notifications.
+    onProgress: (msg) => progress.report({ message: neutraliseLinks(msg) }),
     isCancelled: () => token.isCancellationRequested,
   };
 }
@@ -168,12 +172,17 @@ function reportOutcome(outcome: BuildOutcome | undefined, fromStartScreen: boole
   // person CLOSES it — so awaiting it inside `withProgress` kept "reading the repository…" and a
   // live Cancel on screen after the build had ended, and held back everything after the build
   // (clearing the bookmark; on success, opening the walk) until someone dismissed a toast.
+  //
+  // And every one of them through `neutraliseLinks` (T-72 security review, finding 1). A reason can
+  // quote a name the reference repository chose, and VS Code draws `[label](command:…)` in a
+  // notification as a link that runs the command when it is clicked. The line under Reference repo
+  // above needs nothing, because the page sets it as `textContent`.
   if (outcome.ok) {
-    void vscode.window.showInformationMessage(`Build Tutorials: ${completionMessage(outcome.plan!, outcome.cost!)}`);
+    void vscode.window.showInformationMessage(neutraliseLinks(`Build Tutorials: ${completionMessage(outcome.plan!, outcome.cost!)}`));
   } else if (!outcome.cancelled) {
-    void vscode.window.showErrorMessage(`Build Tutorials: ${outcome.reason ?? 'the build failed'}`);
+    void vscode.window.showErrorMessage(neutraliseLinks(`Build Tutorials: ${outcome.reason ?? 'the build failed'}`));
   } else {
-    void vscode.window.showInformationMessage(`Build Tutorials: ${outcome.reason ?? 'build cancelled'}`);
+    void vscode.window.showInformationMessage(neutraliseLinks(`Build Tutorials: ${outcome.reason ?? 'build cancelled'}`));
   }
 }
 
@@ -409,8 +418,11 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     fileExists: (absPath) => isOpenableFile(target, absPath),
     loadPlan,
     loadProgress,
-    // A plan's re-derived code has to be proved to be in this store: the folder is the extension's to know.
-    loadRequest: (t, plan) => loadRequest(t, { plan, store: path.join(context.globalStorageUri.fsPath, DERIVED_TREES_DIR) }),
+    // T-92: `request.json` is believed only on the build's own record in this extension's storage,
+    // asked before the store resolves anything. A folder whose `.repo-tour/` came with it is walked,
+    // and reads no reference at all. T-22: behind that, a plan's re-derived code has to be proved to be
+    // in this store (the folder is the extension's to know); `believeRequest` keeps the tree it names.
+    loadRequest: (t, plan) => believeRequest(t, context.globalStorageUri.fsPath, (target) => loadRequest(target, { plan, store: path.join(context.globalStorageUri.fsPath, DERIVED_TREES_DIR) })),
     saveProgress,
 
     // ── T-5: what the dial needs from the outside world ──────────────────────────────────
@@ -515,7 +527,8 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
 function reportWalkFailure(message: string, panelNotice?: string): void {
   getOutputChannel().appendLine(`walk: ${message}`);
   if (panelNotice !== undefined) walkPanel?.setNotice(panelNotice);
-  void vscode.window.showErrorMessage(`Build Tutorials: ${message}`);
+  // A walk's failure quotes the plan's own paths, which are the reference repository's file names.
+  void vscode.window.showErrorMessage(neutraliseLinks(`Build Tutorials: ${message}`));
 }
 
 /** The spec's rule, verbatim: the walk opens for any workspace folder that contains

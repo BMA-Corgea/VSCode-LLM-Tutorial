@@ -26,6 +26,7 @@ import type { TutorCore } from '../src/tutor/core.js';
 import type { PlanLike, StepLike } from '../src/walk/model.js';
 import { CHOICE_ALREADY_REPLANNING, REPLAN_CANCELLED_BILLED, REPLAN_NOTHING_FOLLOWS } from '../src/walk/session.js';
 import { AUTHOR_BADGE, DIVERGED_NOTE, REPLANNED_NOTE, WRITTEN_BY_THE_MODEL_NOTE } from '../src/walk/step-view.js';
+import { recordBuiltHere } from './support/built-here.js';
 import { Screen, sleep } from './support/screen.js';
 
 const TITLE = 'Build Tutorials: Step';
@@ -253,6 +254,8 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     fs.mkdirSync(build, { recursive: true });
     fs.writeFileSync(path.join(build, 'plan.json'), `${JSON.stringify(planOf(repo, randomBytes(6).toString('hex')), null, 3)}\n`);
     fs.writeFileSync(path.join(build, 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial: 'manual', referenceRoot: repo }));
+    // T-92: the walk believes a request only on the build's own record; this is what a build here would have written.
+    await recordBuiltHere(target, repo);
     try {
       await api._walk.openAt(target);
       await vscode.commands.executeCommand('buildTutorials.step.focus');

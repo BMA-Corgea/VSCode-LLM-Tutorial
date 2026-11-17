@@ -103,6 +103,9 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   const gone = new Set<string>();
   const unhandled: string[] = [];
   const onUnhandled = (reason: unknown): void => { unhandled.push(reason instanceof Error ? reason.message : String(reason)); };
+  /** Puts back what a test slowed (T-30's check), from the teardown too: a test cut off by mocha's timeout
+   *  has not reached its own `finally` when the next test starts. */
+  let undoSlowCheck: (() => void) | undefined;
 
   suiteSetup(async () => {
     context = await getContext();
@@ -124,6 +127,8 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   });
 
   teardown(async () => {
+    undoSlowCheck?.();
+    undoSlowCheck = undefined;
     // A test that failed before ending its build would leave a live progress and a running flag for
     // the next one (code review finding 6): end them all.
     for (const release of held.splice(0)) release({ ok: false, cancelled: true, reason: 'ended by the test teardown' });
@@ -180,6 +185,13 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       await sleep(100);
     }
     return assert.fail(`no Cancel button on the progress notification (saw ${JSON.stringify(await screen.notifications())})`);
+  }
+
+  /** Waits until the build has said `line` on its progress notification. */
+  async function untilSaid(said: ReadonlyArray<{ line: string }>, line: string, ms: number): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!said.some((s) => s.line === line) && Date.now() < deadline) await sleep(20);
+    assert.ok(said.some((s) => s.line === line), `the build never said "${line}": it said ${JSON.stringify(said.map((s) => s.line))}`);
   }
 
   async function until(read: () => Promise<Snap>, ok: (s: Snap) => boolean, what: string, ms = 10_000): Promise<Snap> {
@@ -241,11 +253,22 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     }
     const target = tmpDir('screen-t30-target-');
     const outcomes: BuildOutcome[] = [];
+    // What the build says on its progress notification, and when (the same calls that draw it).
+    const said: Array<{ line: string; at: number }> = [];
+    // T-72: before the read, the build checks the repository's folders (src/start/gitattributes.ts), and
+    // a Cancel that lands there stops the check, not the read (the merge check's screen run, 2026-11-11:
+    // "build cancelled while checking the repository"). The check is made slow here, so that a Cancel
+    // pressed before the read has begun lands in it every time. It runs on this thread, so a slower
+    // `fs.promises.readdir` slows it; the read runs on its own thread, with its own `fs`, at its own speed.
+    const promises = fs.promises as unknown as { readdir: (...args: unknown[]) => Promise<unknown> };
+    const realReaddir = promises.readdir;
+    promises.readdir = async (...args: unknown[]): Promise<unknown> => { await sleep(15); return realReaddir.apply(fs.promises, args); };
+    undoSlowCheck = () => { promises.readdir = realReaddir; };
     try {
       const request: BuildRequest = { idea: '', recreate: true, repo, target, dial: 'manual' };
       const { page, read } = await open((r) => {
         void runBuild(context, core, r, async (rr, ctx) => {
-          const outcome = await buildFromRequest(rr, ctx);
+          const outcome = await buildFromRequest(rr, { ...ctx, onProgress: (line) => { said.push({ line, at: Date.now() }); ctx.onProgress?.(line); } });
           outcomes.push(outcome);
           return outcome;
         });
@@ -255,16 +278,22 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       await press(page);
       const building = await until(read, (s) => s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
 
-      // The real button, the moment it can be pressed: the read has only just begun.
+      // The real button, as soon as the read has begun.
+      await untilSaid(said, 'reading the repository…', 60_000);
       const pressedAt = await pressCancel();
       const cancelled = await until(read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back', 60_000);
       const tookMs = Date.now() - pressedAt;
+      undoSlowCheck?.();
       console.log(`T-30 AC3 measured: Cancel to the button back ${tookMs} ms`);
 
       assert.ok(tookMs <= STALL_BOUND_MS, `the Cancel took ${tookMs} ms to land, past the bound of ${STALL_BOUND_MS} ms`);
       assert.notDeepEqual(cancelled, building, 'the press has to change what is on screen');
       assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
       assert.equal(outcomes[0]?.reason, 'build cancelled while reading the repository');
+      // The fixture's own condition: the check outlasted a press, so a Cancel pressed early lands in it.
+      const checking = said.find((s) => s.line === 'checking the repository…')?.at ?? Number.NaN;
+      const reading = said.find((s) => s.line === 'reading the repository…')?.at ?? Number.NaN;
+      assert.ok(reading - checking >= 2_000, `the check took ${reading - checking} ms: too short to stand for a large repository's`);
       const listed = await centre();
       assert.ok(listed.some((n) => n.includes('build cancelled while reading the repository')), 'the notification says it was cancelled, and when');
       assert.deepEqual(listed.filter((n) => n.includes('Cancel')), [], 'the progress notification and its Cancel button should be gone');
@@ -282,6 +311,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       assert.equal(outcomes.length, 2);
       assert.equal(outcomes[1]?.cancelled, undefined);
     } finally {
+      undoSlowCheck?.();
       fs.rmSync(repo, { recursive: true, force: true });
       fs.rmSync(target, { recursive: true, force: true });
     }
@@ -437,6 +467,81 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     frame = again;
     assert.equal((await screen.reader<Snap>(TITLE, SNAPSHOT, again, gone)()).button, 'Build the plan', 'a reopened screen must not be stuck building');
     assert.deepEqual(unhandled, []);
+  });
+
+  test('T-72: a reference whose .gitattributes is a link to /dev/zero is refused at once, on screen, and its digest never runs', async () => {
+    const repo = tmpDir('screen-t72-repo-');
+    fs.mkdirSync(path.join(repo, '.git'));
+    fs.writeFileSync(path.join(repo, 'app.ts'), 'export const a = 1;\n');
+    fs.symlinkSync('/dev/zero', path.join(repo, '.gitattributes'));
+    const request: BuildRequest = { idea: '', recreate: true, repo, target: tmpDir('screen-t72-target-'), dial: 'manual' };
+    const { page, read } = await open((r) => {
+      // SAFETY: if the pre-flight ever missed it, this digest fails the test instead of reading the link
+      // (read for real, it allocates until the extension host dies).
+      void runBuild(context, core, r, (rr, ctx) =>
+        buildFromRequest(rr, { ...ctx, core: { ...ctx.core, digest: () => Promise.reject(new Error('T-72: the digest ran')) } }));
+    });
+    await fill(page, request);
+    await until(read, filled, 'valid form');
+    await press(page);
+    const refused = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the build is refused');
+    assert.match(refused.problems[1] ?? '', /^\.gitattributes is a link, which repo-tour would follow: remove it/,
+      'the reason under Reference repo does not say what is wrong and what to do');
+  });
+
+  test('T-72: a name the reference repository chose never becomes a link in the refusal notification', async () => {
+    // T-72 security review, finding 1, re-driven here. The folder of a nested repository is named as a
+    // VS Code link to a command. Before the fix, the refusal quoted that name, the notification drew it
+    // as a link, and one click on it ran the command with the arguments the repository chose.
+    const ran: unknown[][] = [];
+    const probe = vscode.commands.registerCommand('t72.screen.probe', (...args: unknown[]) => { ran.push(args); });
+    try {
+      const repo = tmpDir('screen-t72-name-');
+      fs.mkdirSync(path.join(repo, '.git'));
+      fs.writeFileSync(path.join(repo, 'app.ts'), 'export const a = 1;\n');
+      const name = '[Remove the link for me](command:t72.screen.probe?%5B%22chosen-by-the-repository%22%5D)';
+      const nested = path.join(repo, name);
+      fs.mkdirSync(nested);
+      fs.writeFileSync(path.join(nested, '.git'), 'gitdir: ../.git/modules/x\n');
+      fs.symlinkSync('/dev/zero', path.join(nested, '.gitattributes'));
+      const request: BuildRequest = { idea: '', recreate: true, repo, target: tmpDir('screen-t72-name-target-'), dial: 'manual' };
+      const { page, read } = await open((r) => {
+        // SAFETY: as above, a digest that fails the test instead of reading the link.
+        void runBuild(context, core, r, (rr, ctx) =>
+          buildFromRequest(rr, { ...ctx, core: { ...ctx.core, digest: () => Promise.reject(new Error('T-72: the digest ran')) } }));
+      });
+      await fill(page, request);
+      await until(read, filled, 'valid form');
+      await press(page);
+      const refused = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the build is refused');
+      assert.equal(refused.problems[1],
+        `${name}/.gitattributes is a link, which repo-tour would follow: remove it from the reference repository, or build from a copy without it`,
+        'the line under Reference repo names the file as it is: the page sets it as text, so it needs nothing');
+
+      await vscode.commands.executeCommand('notifications.showList');
+      await sleep(300);
+      const bench = await screen.workbench();
+      const listed = await screen.listedNotifications();
+      const anchors = await screen.evaluate<Array<{ text: string | null; href: string | null }>>(bench,
+        `Array.from(document.querySelectorAll('.notifications-center .notification-list-item a')).map((a) => ({ text: a.textContent, href: a.getAttribute('href') }))`);
+      // What the learner would do: click the words that ask to be clicked, if they are a link.
+      await screen.evaluate<number>(bench, `(() => {
+        const links = Array.from(document.querySelectorAll('.notifications-center .notification-list-item a'))
+          .filter((a) => (a.getAttribute('href') || '').startsWith('command:t72.screen.probe'));
+        for (const a of links) a.click();
+        return links.length;
+      })()`);
+      await sleep(500);
+      await vscode.commands.executeCommand('notifications.hideList');
+      const commandLinks = anchors.filter((a) => (a.href ?? '').startsWith('command:'));
+      console.log(`T-72 refusal notification: ${commandLinks.length} command link(s) drawn, ${JSON.stringify(commandLinks)}; the probe ran ${ran.length} time(s), ${JSON.stringify(ran)}`);
+      assert.ok(listed.some((n) => n.includes('Remove the link for me') && n.includes('.gitattributes is a link')),
+        `the refusal notification is not in the notification centre: ${JSON.stringify(listed)}`);
+      assert.deepEqual(commandLinks, [], 'the refusal notification drew a command link that the repository chose');
+      assert.deepEqual(ran, [], 'one click on the refusal ran a command the repository named, with its arguments');
+    } finally {
+      probe.dispose();
+    }
   });
 
   test('AC5: closing the start tab mid-build never swallows the ending, and a reopened start screen shows it building', async () => {

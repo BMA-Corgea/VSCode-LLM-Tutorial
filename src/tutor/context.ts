@@ -184,6 +184,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { gitTimedOut, type GitRunner } from '../start/build.js';
 import { roadItsCodeFollows, whyOfStep, type OptionLike, type StepLike, type WhySource } from '../walk/model.js';
+import { taughtFileWithheld } from '../dial/writer.js';
 import { resolveInsideTarget } from '../walk/paths.js';
 import type { AskContext } from './core.js';
 
@@ -197,6 +198,24 @@ import type { AskContext } from './core.js';
  */
 export const NO_FILE_YET =
   'The learner has not created this file yet, so there is nothing of theirs to compare against the author’s version.';
+
+/**
+ * What `learnerDiff` says when the step's file is one the reproduce copy would withhold (T-92):
+ * a `.env`, a key, an agent's configuration, by its name or by the name it is a link to.
+ *
+ * NEITHER side is sent, and that is the point of a separate sentence rather than a silence: the
+ * learner's own copy of `.env` is in the same diff as the author's, and is the likelier of the
+ * two to hold a live secret. The model is told why there is no diff, so it does not answer as
+ * though the learner had written nothing.
+ */
+export const WITHHELD_FROM_TUTOR =
+  'The learner’s file for this step is not shown here: its name, or the name of the file it links to, says it holds credentials or configures a tool, so neither their copy nor the author’s is ever sent. Ask them about it in their own words if you need to.';
+
+/** What the LEARNER is told when their question went without the step's file (T-92). */
+export function withheldFromTutorNote(file: string): string {
+  const shown = file.length <= 120 ? file : `${file.slice(0, 119)}…`;
+  return `Your question was sent without ${shown}: its name, or the name of the file it links to, says it holds credentials or configures a tool, so neither your copy nor the reference's is ever sent to the tutor.`;
+}
 
 /** What `learnerDiff` says when the two files match exactly — see the header's six states. */
 export const NO_DIFFERENCE =
@@ -751,6 +770,12 @@ async function learnerDiffFor(
   const reference = containedPath(refRoot, file);
   const learner = containedPath(target, file);
   if (reference === null || learner === null) return undefined;
+  // T-92: a file the reproduce copy would withhold is sent by neither side, and that is asked of
+  // BOTH trees: the name as the plan spells it, then the name each side really has, because the
+  // learner's own `config.ts` may be the link to their `.env`. Before either file is opened.
+  // A chapter step's `target.file` is a FOLDER, which `NOT_ONE_FILE` already answers truly below: a
+  // folder named `src/auth` is not a credentials file (T-92's code review, S1).
+  if (step.kind !== 'shape' && (taughtFileWithheld(refRoot, file) !== null || taughtFileWithheld(target, file) !== null)) return WITHHELD_FROM_TUTOR;
 
   // Rules 1 and 4, and the order matters: the learner's side is asked FIRST so that "you have
   // not written this yet" — manual mode's ordinary state, and the most useful thing the tutor

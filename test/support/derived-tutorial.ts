@@ -25,6 +25,7 @@ import { buildDir, writeJsonAtomic } from '../../src/start/build.js';
 import { AskLedger } from '../../src/tutor/ask.js';
 import { tutorCoreFor, type TutorCore } from '../../src/tutor/core.js';
 import { FIXTURE_IDEA, fixtureOutlineText } from '../unit/derive-fixtures.js';
+import { recordBuiltHere } from './built-here.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
 export const STEP_VIEW_FOCUS = 'buildTutorials.step.focus';
@@ -100,6 +101,9 @@ export async function derivedTutorial(): Promise<DerivedTutorial> {
     idea: FIXTURE_IDEA, recreate: false, repo: '', target, dial: 'automated', referenceRoot: out.referenceRoot,
   });
   writeJsonAtomic(path.join(buildDir(target), 'plan.json'), out.plan);
+  // T-92: what a build records beside its request, or the walk rightly reads no reference for it.
+  // When T-20 wires Mode A to Start, its writer must record the derived tree the same way.
+  await recordBuiltHere(target, out.referenceRoot);
   const ordered = [...out.plan.steps].sort((a, b) => a.ordinal - b.ordinal);
   return {
     target,
