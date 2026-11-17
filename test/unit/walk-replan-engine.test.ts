@@ -134,7 +134,7 @@ interface Harness {
   notes(): string;
 }
 
-function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'], dial: 'manual' | 'scaffolded' | 'automated', learners: Record<string, string> = {}): Harness {
+function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'], dial: 'manual' | 'scaffolded' | 'automated', learners: Record<string, string> = {}, provider = 'claude'): Harness {
   const target = tempDir('walk-engine-target-');
   const repo = tempDir('walk-engine-repo-');
   const gs = tempDir('walk-engine-gs-');
@@ -156,7 +156,7 @@ function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'
   const replanner: Replanner = {
     diverge: (input, hooks) => divergePlan(input, {
       ledger: hooks.ledger, isCancelled: hooks.isCancelled, onProgress: hooks.onProgress,
-      settings: { core, provider: 'claude', model: 'm', timeoutMs: 5_000, run }, globalStorageRoot: gs, dialCore, target,
+      settings: { core, provider, model: 'm', timeoutMs: 5_000, run }, globalStorageRoot: gs, dialCore, target,
     }),
     savePlan: (t, p, before) => { saveDivergedPlan(t, p, undefined, before); },
   };
@@ -357,6 +357,19 @@ suite('model-written code: the learner is told before it reaches them (T-61 a)',
     assert.match(h.notes(), SAID, 'a step a re-plan wrote');
     h.session.goTo('s-routes'); await drain(h);
     assert.doesNotMatch(h.notes(), SAID, 'the author\'s file step D took over');
+  });
+});
+
+// T-61 (d), ruled 2026-11-17: through the walk, a press on a provider with a shell is refused in words, asking nothing.
+suite('a press on a provider whose command line can run tools (T-61 d)', () => {
+  test('is refused in words before anything is asked, and nothing changes', async () => {
+    const m = scriptedModel();
+    const h = harness(at('s-parse'), m.run, 'manual', {}, 'codex');
+    await drain(h);
+    h.session.choose('s-parse', 'alt-1'); await drain(h);
+    assert.match(h.view().choiceNote ?? '', /^Nothing was changed.*"codex".*can run tools/, `said: ${JSON.stringify(h.view().choiceNote ?? null)}`);
+    assert.equal(m.asked.length, 0, 'nothing was asked');
+    assert.equal(divergencesOf(h).length, 0, 'nothing was re-planned');
   });
 });
 

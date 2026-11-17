@@ -803,6 +803,20 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.ok(!JSON.stringify(m.asked).includes('a-secret-value'), 'the credentials file\'s contents are in no question');
   });
 
+  // T-61 (d), ruled 2026-11-17: a re-plan shows the model a stranger's repository, so it runs only on a provider with no tools.
+  test('a re-plan on a provider whose command line can run tools is refused before anything is asked; ollama and claude press as before (T-61 d)', async () => {
+    const { plan, root, gs, target } = setup();
+    const m = model();
+    const d = depsFor(m.run, gs, target);
+    const out = await divergePlan(input(plan, root, 's-parse'), { ...d, settings: { ...d.settings, provider: 'codex' } });
+    assert.ok(!out.ok, 'refused');
+    assert.match(out.reason, /"codex".*can run tools.*claude or ollama/);
+    assert.equal(m.asked.length, 0, 'before anything is asked');
+    const local = depsFor(model().run, tempDir('diverge-gs-'), target);
+    const ok = await divergePlan(input(repoPlan(), root, 's-parse'), { ...local, settings: { ...local.settings, provider: 'ollama' } });
+    assert.ok(ok.ok, `ollama presses as before: ${ok.ok ? '' : ok.reason}`);
+  });
+
   // T-61 (b): a re-plan whose code reaches for a process is refused in a sentence, with nothing written, even where the
   // author's own code uses one; the learner keeps the author's road at that step.
   test('a re-plan whose code starts a program is refused in words, nothing is written, even when the author\'s code does it too (T-61 b)', async () => {

@@ -196,6 +196,18 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.equal((main.input['node'] as Record<string, unknown>)['isEntry'], true);
   });
 
+  // T-61 (d), ruled 2026-11-17: repo-tour runs codex in a read-only sandbox, which is still a shell that can read any file
+  // the learner can; claude runs with no tools, ollama is a local HTTP call.
+  test('a derivation on a provider whose command line can run tools is refused before anything is asked (T-61 d)', async () => {
+    let calls = 0;
+    const counted: TutorCore['runLlm'] = (...args) => { calls += 1; return fakeModel().run(...args); };
+    const d = deps(counted, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-'));
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, { ...d, settings: { ...d.settings, provider: 'codex' } });
+    assert.ok(!out.ok, 'refused');
+    assert.match(out.reason, /"codex".*can run tools.*claude or ollama/);
+    assert.equal(calls, 0, 'before anything is asked');
+  });
+
   test('the learner\'s target folder is untouched by a derivation (AC9)', async () => {
     const target = tempDir('derive-engine-target-');
     fs.writeFileSync(path.join(target, 'mine.txt'), 'mine');

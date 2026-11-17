@@ -607,7 +607,23 @@ async function replanCore(
 }
 
 /** Why a derivation may not start, or `null`. Checked before anything can be spent. */
+/**
+ * T-61 (d), ruled 2026-11-17: the providers whose command line runs with no tools. repo-tour runs `claude` with `--tools ''`
+ * in an empty folder, and `ollama` is a local HTTP call; `codex` runs in a read-only sandbox, which is still a shell that
+ * can read any file the learner can, while it is shown a stranger's repository. Mode A's derivation and a re-plan run only
+ * on these. (The tutor, the detour and the Start build under such a provider are T-160's.)
+ */
+export const PROVIDERS_WITHOUT_TOOLS: ReadonlySet<string> = new Set(['claude', 'ollama']);
+
+/** Why `what` will not run on `provider`, or `null` when the provider runs with no tools. */
+export function providerRefusal(provider: unknown, what: string): string | null {
+  if (typeof provider === 'string' && PROVIDERS_WITHOUT_TOOLS.has(provider)) return null;
+  return `the model provider is ${JSON.stringify(String(provider).slice(0, 40))}, whose command line can run tools on this machine (codex's read-only sandbox is a shell that can read your files), and ${what} runs only on a provider with none: claude or ollama. Nothing was asked`;
+}
+
 function startRefusal(deps: DeriveDeps): string | null {
+  const tools = providerRefusal(deps.settings.provider, 'a derivation');
+  if (tools !== null) return tools;
   // An empty model does not mean "the default" further down: `resolveTutorChoice` turns it into
   // the provider's STRONGEST model, so a caller that passed the raw setting would quietly buy
   // the expensive one. The caller resolves it, as `src/extension.ts`'s `resolveLlmSettings` does.
