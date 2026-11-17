@@ -740,4 +740,25 @@ suite('release: every name this holds is the one that ships', () => {
       assert.ok(entry.includes(needed), `the ${MANIFEST.version} entry should say ${needed}`);
     }
   });
+
+  test('README.md\'s Install links the Releases page, names this version\'s .vsix, and states the same requirements', () => {
+    // A version bump that leaves the README's commands naming the old file goes red here: the
+    // Install section is what a stranger copies, and a stale name is a command that fails.
+    const readme = read('README.md');
+    const start = readme.indexOf('\n## Install\n');
+    assert.ok(start >= 0, 'README.md has an "## Install" section');
+    const end = readme.indexOf('\n---', start + 1);
+    const section = readme.slice(start, end < 0 ? undefined : end);
+    const text = section.replace(/\s+/g, ' ');
+    const name = vsixFileName(MANIFEST.version);
+    const minimum = minimumVscode(MANIFEST.engines.vscode) ?? '(unreadable engines.vscode)';
+    for (const needed of [
+      RELEASES_URL, 'latest release', `codium --install-extension ${name}`, `code --install-extension ${name}`,
+      `VS Code ${minimum} or later, or VSCodium`, 'git', '`claude` CLI', 'logged in', PROVEN_ON_LINUX, REPOSITORY_ONLY,
+    ]) {
+      assert.ok(text.includes(needed), `the Install section should say ${needed}`);
+    }
+    const named = [...section.matchAll(/build-tutorials-\d+\.\d+\.\d+[^\s`]*?\.vsix/g)].map((m) => m[0]);
+    assert.ok(named.length >= 2 && named.every((n) => n === name), `every .vsix the Install section names is ${name}: ${named.join(', ')}`);
+  });
 });
