@@ -219,11 +219,24 @@ async function verifyOne(editor) {
   // before writing a single line - the CLI still exits 0, so the failure looks exactly like
   // "the extension never activated". It is the same flag @vscode/test-electron passes to launch
   // the very same binary for `npm test`.
+  //
+  // T-131: with no DISPLAY the launch runs under xvfb-run, whose display goes the moment its command returns, and the
+  // editor's `code` command returns about a second after starting the editor: the editor lost its display while it was
+  // still starting, and wrote no exthost.log (CI's failure, reproduced here on 1.145.2 and VSCodium). `--wait` keeps the
+  // command up, and with it xvfb-run and its display, until the editor is stopped below. With a DISPLAY of its own the
+  // launch is as it was.
   const [runBin, runArgs] = editorCommand(editor.bin, [
+    ...(process.env.DISPLAY ? [] : ['--wait']),
     ...isolation, '--no-sandbox', '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes',
     '--disable-gpu', '--disable-updates', '--new-window', workspace,
   ]);
-  const child = spawn(runBin, runArgs, { stdio: 'ignore', detached: true });
+  // T-131: the launch command's own stdout and stderr, kept (the last 64 KiB of each) for the failures below: xvfb-run,
+  // and the editor's `code` command, which starts the editor itself detached (and, with no DISPLAY, waits for it: the
+  // `--wait` above). A launch that fails at once
+  // (a missing library, a display that will not start, a refused flag) says why there, before any log is written. The
+  // editor's own output does not come this way (the command starts it with its output ignored); its logs say the rest.
+  const child = spawn(runBin, runArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const editorOutput = captureOutput(child);
 
   const activationLine = `_doActivateExtension ${extensionId}`;
   const deadline = Date.now() + 120_000;
@@ -238,13 +251,18 @@ async function verifyOne(editor) {
     }
   }
   await stopEditor(child, profile);
+  editorOutput.close();
 
   if (!logPath) {
     bad('no exthost.log was produced - the editor did not get far enough to say anything');
     failures.push('exthost-log');
+    printEditorLogTails(userDataDir);
+    printEditorOutput(editorOutput);
   } else if (!logText.includes(activationLine)) {
     bad(`exthost.log never logged "${activationLine}"`);
     failures.push('activation');
+    printEditorLogTails(userDataDir);
+    printEditorOutput(editorOutput);
   } else {
     ok(`exthost.log: ${activationLine}`);
 
@@ -307,6 +325,85 @@ async function stopEditor(child, profile) {
   const stubborn = processesUsingProfile(profile);
   if (stubborn.length > 0) warn(`${stubborn.length} editor process(es) would not stop: ${stubborn.join(', ')}`);
   return stubborn.length === 0;
+}
+
+/**
+ * T-131: the editor's stdout and stderr, each kept to its last `keep` characters as it arrives, so a talkative editor
+ * cannot grow this process without bound. `close()` lets go of both pipes once the editor is stopped: a helper process
+ * that inherited one must not keep this script alive. Reading never throws.
+ */
+function captureOutput(child, keep = 64 * 1024) {
+  const kept = { stdout: '', stderr: '' };
+  for (const name of ['stdout', 'stderr']) {
+    const stream = child[name];
+    if (!stream) continue;
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk) => {
+      const all = kept[name] + chunk;
+      kept[name] = all.length > keep ? all.slice(-keep) : all;
+    });
+    stream.on('error', () => { /* a pipe that broke has said all it will */ });
+  }
+  return {
+    kept,
+    close: () => {
+      for (const name of ['stdout', 'stderr']) { try { child[name]?.destroy(); } catch { /* already closed */ } }
+      try { child.unref(); } catch { /* already gone */ }
+    },
+  };
+}
+
+/** T-131: what the launch command wrote to its stdout and stderr, after the editor's logs, on the same failures. It only prints. */
+function printEditorOutput(editorOutput, { lines = 40, maxLine = 400 } = {}) {
+  for (const name of ['stdout', 'stderr']) {
+    const tail = editorOutput.kept[name].split('\n').filter((l) => l.trim() !== '').slice(-lines);
+    if (tail.length === 0) {
+      warn(`the launch command (xvfb-run, the editor's code command) wrote nothing to its ${name}`);
+      continue;
+    }
+    warn(`what the launch command (xvfb-run, the editor's code command) wrote to its ${name} (the last ${tail.length} line${tail.length === 1 ? '' : 's'})`);
+    for (const l of tail) console.log(`         ${l.length > maxLine ? `${l.slice(0, maxLine)}…` : l}`);
+  }
+}
+
+/**
+ * T-131: when the editor never said what this check waits for, what it DID say. The tail of every log the editor
+ * wrote for this run (main.log, renderer*.log, sharedprocess.log, the extension host's own, whatever its logs folder
+ * holds), each under its own name, so a failure on a machine nobody can log into (GitHub's runner) says why. It only
+ * prints: what passes and what fails is decided above it, and nothing here can change that.
+ */
+function printEditorLogTails(userDataDir, { lines = 40, maxFiles = 30, maxLine = 400 } = {}) {
+  const logsRoot = path.join(userDataDir, 'logs');
+  if (!fs.existsSync(logsRoot)) {
+    warn(`the editor wrote no logs folder: ${logsRoot}`);
+    return;
+  }
+  const files = [];
+  const walk = (dir, depth) => {
+    if (depth > 6) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, depth + 1);
+      else if (entry.isFile() && entry.name.endsWith('.log')) files.push(full);
+    }
+  };
+  walk(logsRoot, 0);
+  if (files.length === 0) {
+    warn(`the editor's logs folder holds no log: ${logsRoot}`);
+    return;
+  }
+  files.sort();
+  warn(`what the editor logged (${files.length} file${files.length === 1 ? '' : 's'} under ${logsRoot}; the last ${lines} lines of each)`);
+  for (const file of files.slice(0, maxFiles)) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch (err) { text = `(could not be read: ${err instanceof Error ? err.message : String(err)})`; }
+    const tail = text.split('\n').filter((l) => l.trim() !== '').slice(-lines);
+    console.log(`      -- ${path.relative(logsRoot, file)} (${tail.length === 0 ? 'empty' : `last ${tail.length} line${tail.length === 1 ? '' : 's'}`})`);
+    for (const l of tail) console.log(`         ${l.length > maxLine ? `${l.slice(0, maxLine)}…` : l}`);
+  }
+  if (files.length > maxFiles) warn(`and ${files.length - maxFiles} more log file(s) not shown`);
 }
 
 function findExthostLog(userDataDir) {

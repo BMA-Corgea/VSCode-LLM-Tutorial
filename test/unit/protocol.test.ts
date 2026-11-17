@@ -85,6 +85,19 @@ suite('handleStartMessage — form:submit (AC1 protocol test)', () => {
   });
 });
 
+suite('handleStartMessage — the press builds what it validated (T-71 re-review R4)', () => {
+  test('a repository and a folder typed with spaces round them are built trimmed, the folder in one spelling', async () => {
+    const effects = fakeEffects();
+    const repo = tmpEmptyDir();
+    const target = path.join(tmpEmptyDir(), 'tutorial');
+    const typed: BuildRequest = { idea: '', recreate: true, repo: ` ${repo} `, target: ` ${target}/ `, dial: 'manual' };
+    const result = await handleStartMessage(freshState(), { type: 'form:submit', payload: { request: typed } }, effects);
+    assert.deepEqual(result.post, { type: 'form:accepted' });
+    assert.deepEqual(effects.submitted, [{ ...typed, repo, target }], 'the build was given another spelling of what the form validated');
+    assert.deepEqual(result.state.request, typed, 'the form keeps what was typed');
+  });
+});
+
 suite('handleStartMessage — a press always says something new (T-15, 2026-11-05)', () => {
   const BAD: BuildRequest = { ...emptyRequest(), recreate: true, repo: '' };
 

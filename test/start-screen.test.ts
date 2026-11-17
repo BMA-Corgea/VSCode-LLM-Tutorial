@@ -10,9 +10,10 @@
  *
  * What is real: the page and its script, the host's message handling, `runBuild`,
  * `reportOutcome`, the progress notification and its Cancel button. What is not, except in the
- * one T-30 test that says so: the build's BODY, which a test holds open, fails or lets be cancelled
- * — the real one either finishes in milliseconds or spends a model call, and tests never spend
- * tokens. (T-30's real body ends at the language refusal, before any model.)
+ * T-30 and T-70 tests that say so: the build's BODY, which a test holds open, fails or lets be
+ * cancelled — the real one either finishes in milliseconds or spends a model call, and tests never
+ * spend tokens. (T-30's real body ends at the language refusal, before any model; T-70's asks a
+ * model of the test's own.)
  */
 
 import * as assert from 'node:assert/strict';
@@ -25,7 +26,7 @@ import { runBuild, type ExtensionApi } from '../src/extension.js';
 import { buildFromRequest, markerPath, type BuildContext, type BuildOutcome } from '../src/start/build.js';
 import { StartPanel, type StartPanelDeps } from '../src/start/panel.js';
 import type { BuildRequest } from '../src/start/request.js';
-import { SUBMIT_NOTES } from '../src/start/view.js';
+import { FAILED_AGAIN, SUBMIT_NOTES } from '../src/start/view.js';
 import { Screen, nextFrame, sleep, type Frame } from './support/screen.js';
 import { STALL_BOUND_MS } from './support/stall-bound.js';
 
@@ -283,6 +284,97 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     } finally {
       fs.rmSync(repo, { recursive: true, force: true });
       fs.rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  test('T-70: the real Cancel while the build asks about each decision ends the call in flight, starts no other, and says so', async () => {
+    // The owner's check, end to end (T-70 review F2, from the reviewer's own drive). Real: the press,
+    // runBuild, the core src/extension.ts builds (offThreadCore over coreFor, the shipped polls), the
+    // worker's read and plan, repo-tour's own interpretPlan, and the progress notification's Cancel. The
+    // test's own: the provider repo-tour's llm module hands out, which holds every call until its signal
+    // fires, and where answers are kept. And no model CLI can be found while it runs.
+    const saved = { claude: process.env.REPO_TOUR_CLAUDE_BIN, codex: process.env.REPO_TOUR_CODEX_BIN };
+    const nowhere = tmpDir('screen-t70-no-cli-');
+    process.env.REPO_TOUR_CLAUDE_BIN = path.join(nowhere, 'no-such-claude');
+    process.env.REPO_TOUR_CODEX_BIN = path.join(nowhere, 'no-such-codex');
+    // Four TS files, so four model calls are due. Salted, so no answer cached anywhere can stand in for one.
+    const repo = tmpDir('screen-t70-repo-');
+    const salt = `${Date.now()}${Math.random()}`.replace('.', '');
+    fs.mkdirSync(path.join(repo, 'src'));
+    for (const name of ['alpha', 'beta', 'gamma', 'delta']) {
+      fs.writeFileSync(path.join(repo, 'src', `${name}.ts`), `export function ${name}(a: number): number {\n  return a + ${JSON.stringify(salt)}.length;\n}\n`);
+    }
+    const target = tmpDir('screen-t70-target-');
+    const cache = tmpDir('screen-t70-cache-');
+    const calls: Array<{ at: number; file: string; endedAt?: number; end: () => void }> = [];
+    let ending = false;
+    const provider = {
+      run: (prompt: string, opts: { signal?: AbortSignal }): Promise<unknown> => new Promise((_resolve, reject) => {
+        if (ending) { reject(new Error('the test has ended')); return; }
+        const call: (typeof calls)[number] = { at: Date.now(), file: /File: (\S+)/.exec(prompt)?.[1] ?? '?', end: () => reject(new Error('the test has ended')) };
+        calls.push(call);
+        const cap = setTimeout(() => reject(new Error('never ended: its signal did not fire')), 20_000);
+        opts.signal?.addEventListener('abort', () => { call.endedAt = Date.now(); clearTimeout(cap); reject(new Error('aborted by its signal')); }, { once: true });
+      }),
+    };
+    const asked: string[] = [];
+    const llm = { ...(core.loaded['llm'] as object), providerById: (id: string) => { asked.push(id); return provider; } };
+    const interpret = { ...(core.loaded['interpret'] as object), defaultCacheDir: () => cache };
+    const withTestModel: CoreLoadResult = { ...core, loaded: { ...core.loaded, llm, interpret } };
+    const outcomes: BuildOutcome[] = [];
+    let run: Promise<void> | undefined;
+    try {
+      const { page, read } = await open((r) => {
+        run = runBuild(context, withTestModel, r, async (rr, ctx) => {
+          const outcome = await buildFromRequest(rr, ctx);
+          outcomes.push(outcome);
+          return outcome;
+        });
+      });
+      await fill(page, { idea: '', recreate: true, repo, target, dial: 'manual' });
+      await until(read, filled, 'the valid form shows no problems');
+      const pressedBuildAt = Date.now();
+      await press(page);
+      await until(read, (s) => s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
+
+      // The read and the plan of four small files take a moment, and then the first call is in flight.
+      const deadline = Date.now() + 30_000;
+      while (calls.length === 0 && outcomes.length === 0 && Date.now() < deadline) await sleep(25);
+      assert.ok(calls.length > 0, `the build never reached its first model call: ${JSON.stringify(outcomes.map((o) => ({ ok: o.ok, reason: o.reason, failures: o.cost?.['failures'] })))}`);
+      await sleep(300); // a real call would be seconds into its answer
+      const pressedAt = await pressCancel();
+      const endBy = Date.now() + 5_000;
+      while (calls[0]!.endedAt === undefined && Date.now() < endBy) await sleep(25);
+      assert.notEqual(calls[0]!.endedAt, undefined, 'the call in flight at Cancel was never ended');
+      const msCancelToCallEnded = calls[0]!.endedAt! - pressedAt;
+      const back = await until(read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back', 20_000);
+      const msCancelToButtonBack = Date.now() - pressedAt;
+      await run;
+      const listed = await centre();
+      console.log(`T-70 measured: ${JSON.stringify({
+        load: os.loadavg().map((n) => n.toFixed(2)).join(' '), msPressToFirstCall: calls[0]!.at - pressedBuildAt,
+        msCancelToCallEnded, msCancelToButtonBack, calls: calls.map((c) => c.file), providersAsked: asked,
+      })}`);
+
+      assert.ok(msCancelToCallEnded <= STALL_BOUND_MS, `the call in flight outlived Cancel by ${msCancelToCallEnded} ms, past the bound of ${STALL_BOUND_MS} ms`);
+      assert.equal(calls.length, 1, `${calls.length} calls reached the model; only the one in flight at Cancel may`);
+      assert.equal(back.note, SUBMIT_NOTES.cancelled);
+      assert.equal(outcomes[0]?.reason, 'build cancelled while asking about each decision');
+      assert.ok(listed.some((n) => n.includes('build cancelled while asking about each decision')), `the notification says where it stopped: ${JSON.stringify(listed)}`);
+      assert.deepEqual(listed.filter((n) => n.includes('Cancel')), [], 'the progress notification and its Cancel button should be gone');
+      assert.equal(fs.existsSync(markerPath(target)), false, 'a cancel leaves nothing to resume');
+      assert.deepEqual(fs.readdirSync(target), [], 'a cancelled build has to leave the folder it was given empty, or the next press is refused');
+      assert.deepEqual(fs.readdirSync(cache), [], 'a cancelled build wrote an answer');
+    } finally {
+      // A failed test must not leave its build asking a held model into the next test: end every call, now and to come.
+      ending = true;
+      for (const call of calls) call.end();
+      const settleBy = Date.now() + 10_000;
+      while (run !== undefined && outcomes.length === 0 && Date.now() < settleBy) await sleep(50);
+      if (saved.claude === undefined) delete process.env.REPO_TOUR_CLAUDE_BIN;
+      else process.env.REPO_TOUR_CLAUDE_BIN = saved.claude;
+      if (saved.codex === undefined) delete process.env.REPO_TOUR_CODEX_BIN;
+      else process.env.REPO_TOUR_CODEX_BIN = saved.codex;
     }
   });
 
@@ -580,5 +672,57 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     }
     assert.ok(!left.some((n) => n.includes('Cancel')), `a progress notification with Cancel outlived the build: ${JSON.stringify(left)}`);
     assert.ok(left.some((n) => n.includes('refused for the test')), `and the outcome itself was never shown: ${JSON.stringify(left)}`);
+  });
+
+  test('T-71: after a build that fails partway, the very next press on the same form builds again, and the reason said it would', async () => {
+    // The first build is the REAL one with a digest that throws, so its real write-ahead marker is
+    // left in the target, as after a network blip or a model error. The press after it used to be
+    // refused: "<target> is not empty — pick an empty or new folder". The retry is held, so the
+    // screen shows "Building…" for as long as this test needs to read it (T-80's lesson).
+    const retry = heldBuild();
+    const request = validRequest();
+    let builds = 0;
+    const { page, read } = await open((r) => {
+      builds += 1;
+      if (builds > 1) { void runBuild(context, core, r, retry.build); return; }
+      void runBuild(context, core, r, (rr, ctx) =>
+        buildFromRequest(rr, { ...ctx, core: { ...ctx.core, digest: () => Promise.reject(new Error('the network blinked')) } }));
+    });
+    await fill(page, request);
+    await until(read, filled, 'valid form');
+    await press(page);
+    const failed = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the first build fails');
+    assert.ok(fs.existsSync(markerPath(request.target)), 'the failed build should leave its marker, for a resume');
+    assert.match(failed.problems[1] ?? '', /the network blinked — nothing is lost: press Build the plan to try again\./,
+      'the reason under Reference repo does not say what to do next');
+
+    await press(page); // the same form, unedited
+    const again = await until(read, (s) => s.note === SUBMIT_NOTES.building || s.problems[2] !== '', 'the next press is answered');
+    assert.equal(again.problems[2], '', `the same form was refused after the failure: ${again.problems[2]}`);
+    assert.equal(again.note, SUBMIT_NOTES.building);
+    assert.equal(builds, 2);
+  });
+
+  test('T-71: a build that fails twice in a row changes the words on screen the second time', async () => {
+    // Driven for T-80: a second failure with the same reason, as a language refusal gives, left the
+    // screen after the press exactly as it was before it. Consecutive frames must differ.
+    const first = heldBuild();
+    const second = heldBuild();
+    let builds = 0;
+    const { page, read } = await open((r) => { builds += 1; void runBuild(context, core, r, (builds === 1 ? first : second).build); });
+    await fill(page, validRequest());
+    await until(read, filled, 'valid form');
+    await press(page);
+    await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+    first.end({ ok: false, reason: 'the same reason both times' });
+    const once = await until(read, (s) => s.note === SUBMIT_NOTES.failed, 'the first failure');
+
+    await press(page);
+    await until(read, (s) => s.note === SUBMIT_NOTES.building, 'the second build');
+    second.end({ ok: false, reason: 'the same reason both times' });
+    const twice = await until(read, (s) => s.button === 'Build the plan', 'the second failure gives the button back');
+    assert.notDeepEqual({ ...twice, focus: '' }, { ...once, focus: '' }, 'the second failure left the screen exactly as the first did');
+    assert.equal(twice.note, FAILED_AGAIN.replace('{n}', '2'));
+    assert.equal(builds, 2);
   });
 });
