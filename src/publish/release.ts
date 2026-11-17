@@ -141,6 +141,8 @@ export const RELEASE_REPO = 'BMA-Corgea/VSCode-LLM-Tutorial';
 export const RELEASES_URL = `https://github.com/${RELEASE_REPO}/releases`;
 /** `.github/workflows/ci.yml`'s `name:`, its `on.push.branches`, and the event that is a release. */
 export const RELEASE_WORKFLOW = 'CI';
+/** The workflow by its FILE, which is unique, where its display name need not be (review N9). */
+const RELEASE_WORKFLOW_FILE = 'ci.yml';
 export const RELEASE_BRANCH = 'main';
 export const RELEASE_EVENT = 'push';
 /** The `name:` ci.yml's "Upload .vsix" step gives the artifact. */
@@ -203,7 +205,7 @@ const COMPARE_JQ = '{status, ahead_by, behind_by, base_commit: {sha: .base_commi
 export const ghRead = {
   compare: (sha: string): string[] => ['api', `repos/${RELEASE_REPO}/compare/${sha}...${RELEASE_BRANCH}`, '--jq', COMPARE_JQ],
   runList: (sha: string): string[] => [
-    'run', 'list', '--repo', RELEASE_REPO, '--workflow', RELEASE_WORKFLOW, '--commit', sha, '--limit', '100', '--json', RUN_FIELDS,
+    'run', 'list', '--repo', RELEASE_REPO, '--workflow', RELEASE_WORKFLOW_FILE, '--commit', sha, '--limit', '100', '--json', RUN_FIELDS,
   ],
   runView: (runId: number): string[] => ['run', 'view', String(runId), '--repo', RELEASE_REPO, '--json', 'jobs'],
   artifacts: (runId: number): string[] => ['api', `repos/${RELEASE_REPO}/actions/runs/${runId}/artifacts?per_page=100`],
@@ -240,6 +242,17 @@ export function isReadOnlyGh(args: readonly string[]): boolean {
     return ofThisRepository && onlyAFilter;
   }
   return false;
+}
+
+/**
+ * What the shell may run WITHOUT a check: `git` (rev-parse and show, in this checkout) and `unzip`
+ * (listing, unpacking and reading what was downloaded). Anything else, `gh` above all, is refused
+ * there, so the only door to GitHub stays `gh()`, behind `isReadOnlyGh` (review N1).
+ */
+export const DIRECT_COMMANDS: readonly string[] = ['git', 'unzip'];
+
+export function isDirectCommand(command: string): boolean {
+  return DIRECT_COMMANDS.includes(command);
 }
 
 // ── small readers, so a JSON shape that changed is a refusal rather than a crash ─────────
@@ -523,6 +536,9 @@ export function chooseArtifact(list: CommandResult, run: CiRun): Checked<CiArtif
   const body = parseJson(list.stdout);
   const rows = isRecord(body) ? body.artifacts : undefined;
   if (!Array.isArray(rows)) return unreadable('it printed no list of artifacts');
+  // Review N3: one page. A list shorter than its own total is a list with something past the page.
+  const total = isRecord(body) ? body.total_count : undefined;
+  if (total !== rows.length) return unreadable(`it lists ${rows.length} artifact${rows.length === 1 ? '' : 's'} where its total_count says ${show(total)}`);
 
   const named: Array<Record<string, unknown> & { id: number }> = [];
   const otherNames: string[] = [];
@@ -613,7 +629,7 @@ export function checkArtifactEntries(listing: CommandResult, version: string): C
   const entries = listing.stdout.split('\n').filter((line) => line.length > 0);
   if (entries.length !== 1 || entries[0] !== expected) {
     return refuse('archive-contents',
-      `The artifact's zip should hold exactly ${expected} and nothing beside it, and it holds ${entries.length === 0 ? 'nothing' : entries.join(', ')}.`,
+      `The artifact's zip should hold exactly ${expected} and nothing beside it, and it holds ${entries.length === 0 ? 'nothing' : entries.map((entry) => JSON.stringify(entry)).join(', ')}.`,
       `Release a commit whose run packaged version ${version}: CI uploads only the one .vsix that \`npm run package\` names for package.json's version.`);
   }
   return accept({ vsixName: expected });

@@ -105,6 +105,8 @@ function result(r) {
 }
 
 function run(command, args) {
+  // Only git and unzip run here (review N1): gh goes through gh() below, and its read-only check.
+  if (!R.isDirectCommand(command)) die(`refusing to run ${command} directly: only ${R.DIRECT_COMMANDS.join(' and ')} run without a check, and gh goes through gh()`);
   return result(spawnSync(command, args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
 }
 

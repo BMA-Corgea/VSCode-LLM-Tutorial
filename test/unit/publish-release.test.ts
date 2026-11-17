@@ -33,7 +33,7 @@ import {
   RELEASE_REPO, RELEASE_WORKFLOW, REPOSITORY_ONLY, REQUIRED_STEPS, VSIX_ARTIFACT_NAME,
   checkArtifactDigest, checkArtifactEntries, checkDraftAsset, checkDraftRelease, checkDraftsVisible, checkExtraction,
   checkOnMain, checkReleaseList, checkResolvedSha, checkRunSteps, checkTagTarget, checkVsixManifest, chooseArtifact, chooseRun,
-  composeReleaseNotes, ghRead, isReadOnlyGh, minimumVscode, parseShaArgument, peelTagObject, readCommitManifest,
+  composeReleaseNotes, ghRead, isDirectCommand, isReadOnlyGh, minimumVscode, parseShaArgument, peelTagObject, readCommitManifest,
   readExistingRelease, readRunnerVscode, readTagRef, refusalText, releaseCommands, releaseTag, releaseTitle, sha256Hex, vsixFileName,
   type Checked, type CiArtifact, type CiRun, type CommandResult, type ExistingRelease, type Refusal,
 } from '../../src/publish/release.js';
@@ -410,6 +410,14 @@ suite('release: the artifact that run uploaded', () => {
     }
   });
 
+  test('a list whose total_count is not the number of artifacts it holds is "could not tell" (review N3)', () => {
+    // One page of 100: a missing name past it would read as no-artifact, and a second build-tutorials-vsix
+    // on the next page would escape artifact-ambiguous.
+    const short = ran(JSON.stringify({ total_count: 101, artifacts: [artifactRow()] }));
+    refused(chooseArtifact(short, RUN), 'artifacts-unreadable', '101', String(RUN_ID));
+    refused(chooseArtifact(ran(JSON.stringify({ artifacts: [artifactRow()] })), RUN), 'artifacts-unreadable', String(RUN_ID));
+  });
+
   test('an artifact list that could not be read is "could not tell", never "no artifact"', () => {
     refused(chooseArtifact(failed('HTTP 403'), RUN), 'artifacts-unreadable', 'HTTP 403');
     refused(chooseArtifact(ran('[]'), RUN), 'artifacts-unreadable', String(RUN_ID));
@@ -452,6 +460,9 @@ suite('release: the bytes are the bytes CI uploaded', () => {
       ['dist/build-tutorials-0.0.1.vsix\n', 'dist/build-tutorials-0.0.1.vsix'],
       ['build-tutorials-0.0.1.vsix\nREADME.md\n', 'README.md'],
       ['other-extension-0.0.1.vsix\n', 'other-extension-0.0.1.vsix'],
+      // Review N6: an entry is its name as printed. A trimmed compare (mutant M30) would let both through.
+      [' build-tutorials-0.0.1.vsix\n', '" build-tutorials-0.0.1.vsix"'],
+      ['build-tutorials-0.0.1.vsix \n', '"build-tutorials-0.0.1.vsix "'],
     ];
     for (const [listing, named] of cases) {
       refused(checkArtifactEntries(ran(listing), VERSION), 'archive-contents', named, VSIX);
@@ -854,12 +865,23 @@ suite('release: every gh command the shell runs is a read', () => {
   });
 
   test('the commands it asks gh for are the ones the ticket names', () => {
-    assert.deepEqual(ghRead.runList(SHA).slice(0, 8), ['run', 'list', '--repo', RELEASE_REPO, '--workflow', RELEASE_WORKFLOW, '--commit', SHA]);
+    // Review N9: the workflow is named by its FILE, which is unique; a second workflow could share the name "CI".
+    const workflowFiles = fs.readdirSync(path.join(ROOT, '.github', 'workflows'))
+      .filter((f) => new RegExp(`^name:\\s*${RELEASE_WORKFLOW}\\s*$`, 'm').test(read(path.join('.github', 'workflows', f))));
+    assert.deepEqual(workflowFiles, ['ci.yml'], 'one workflow file is named CI');
+    assert.deepEqual(ghRead.runList(SHA).slice(0, 8), ['run', 'list', '--repo', RELEASE_REPO, '--workflow', workflowFiles[0], '--commit', SHA]);
     assert.deepEqual(ghRead.runView(RUN_ID), ['run', 'view', String(RUN_ID), '--repo', RELEASE_REPO, '--json', 'jobs']);
     assert.equal(ghRead.artifactZip(13910310691)[1], `repos/${RELEASE_REPO}/actions/artifacts/13910310691/zip`);
     assert.deepEqual(ghRead.releaseDownload('0.1.0', '/d'), ['release', 'download', 'v0.1.0', '--repo', RELEASE_REPO, '--pattern', '*.vsix', '--dir', '/d']);
     for (const field of ['databaseId', 'headSha', 'event', 'headBranch', 'status', 'conclusion', 'url']) {
       assert.ok((ghRead.runList(SHA).at(-1) ?? '').split(',').includes(field), field);
+    }
+  });
+
+  test('the shell runs only git and unzip directly: gh never bypasses the read-only check (review N1)', () => {
+    for (const command of ['git', 'unzip']) assert.equal(isDirectCommand(command), true, command);
+    for (const command of ['gh', '/usr/bin/gh', 'sh', 'bash', 'node', 'npm', 'curl', '']) {
+      assert.equal(isDirectCommand(command), false, `${command} must not be run without a check`);
     }
   });
 
@@ -889,6 +911,11 @@ suite('release: every name this holds is the one that ships', () => {
     assert.equal(/^name:\s*(.+?)\s*$/m.exec(CI)?.[1], RELEASE_WORKFLOW);
     assert.match(CI, new RegExp(`^\\s*${RELEASE_EVENT}:\\s*\\n\\s*branches:\\s*\\[\\s*${RELEASE_BRANCH}\\s*\\]`, 'm'));
     assert.equal(VSIX_ARTIFACT_NAME, CI_ARTIFACT);
+  });
+
+  test('no step of ci.yml may continue on error: "every step green" must mean every check passed (review N11)', () => {
+    assert.ok(CI.includes('Install the .vsix'), 'the control: this is the workflow');
+    assert.ok(!/continue-on-error/.test(CI), 'a continue-on-error step can fail while the run, and the jobs API, still read as green');
   });
 
   test('every step the release relies on is a step ci.yml runs, exactly once', () => {
