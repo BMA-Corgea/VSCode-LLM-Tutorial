@@ -31,10 +31,10 @@ import path from 'node:path';
 import {
   EXTENSION_NAME, EXTENSION_PUBLISHER, PROVEN_ON_LINUX, RELEASES_URL, RELEASE_BRANCH, RELEASE_EVENT,
   RELEASE_REPO, RELEASE_WORKFLOW, REPOSITORY_ONLY, REQUIRED_STEPS, VSIX_ARTIFACT_NAME,
-  checkArtifactDigest, checkArtifactEntries, checkDraftAsset, checkDraftRelease, checkExtraction,
-  checkOnMain, checkResolvedSha, checkRunSteps, checkVsixManifest, chooseArtifact, chooseRun,
-  composeReleaseNotes, ghRead, isReadOnlyGh, minimumVscode, parseShaArgument, readCommitManifest,
-  readExistingRelease, refusalText, releaseCommands, releaseTag, releaseTitle, sha256Hex, vsixFileName,
+  checkArtifactDigest, checkArtifactEntries, checkDraftAsset, checkDraftRelease, checkDraftsVisible, checkExtraction,
+  checkOnMain, checkReleaseList, checkResolvedSha, checkRunSteps, checkTagTarget, checkVsixManifest, chooseArtifact, chooseRun,
+  composeReleaseNotes, ghRead, isReadOnlyGh, minimumVscode, parseShaArgument, peelTagObject, readCommitManifest,
+  readExistingRelease, readTagRef, refusalText, releaseCommands, releaseTag, releaseTitle, sha256Hex, vsixFileName,
   type Checked, type CiArtifact, type CiRun, type CommandResult, type ExistingRelease, type Refusal,
 } from '../../src/publish/release.js';
 import { expectedArtifactName } from '../../src/publish/plan.js';
@@ -562,6 +562,14 @@ suite('release: the command is printed, never run, and makes a DRAFT', () => {
     refused(plan({ ...draft, isDraft: false }), 'release-published', `v${V}`);
   });
 
+  test('a draft carrying any other asset is refused, naming it: the upload would add beside it, not replace it', () => {
+    // Review N4. "These replace its .vsix" was untrue whenever the draft's asset had another name.
+    const asset = (name: string): { name: string; size: number } => ({ name, size: 1 });
+    assert.equal(accepted(plan({ ...draft, assets: [asset(vsixFileName(V))] })).mode, 'update', 'the control: its own .vsix is replaced');
+    refused(plan({ ...draft, assets: [asset('build-tutorials-0.0.9.vsix')] }), 'draft-asset', 'build-tutorials-0.0.9.vsix');
+    refused(plan({ ...draft, assets: [asset(vsixFileName(V)), asset(`${vsixFileName(V)}.zip`)] }), 'draft-asset', `${vsixFileName(V)}.zip`);
+  });
+
   test('every command it can print is a draft release command, at a full sha, and the shell may not run one', () => {
     for (const existing of [null, draft]) {
       for (const { argv } of accepted(plan(existing)).commands) {
@@ -629,8 +637,18 @@ suite('release: what is already on GitHub', () => {
 
   test('--verify-draft: no release, or one that targets something else, is refused', () => {
     refused(checkDraftRelease(null, V, SHA), 'no-draft', TAG);
-    const onMain: ExistingRelease = { tagName: TAG, isDraft: true, targetCommitish: 'main', assets: [] };
+    const onMain: ExistingRelease = { tagName: TAG, isDraft: true, targetCommitish: 'main', assets: [{ name: vsixFileName(V), size: 1 }] };
     refused(checkDraftRelease(onMain, V, SHA), 'draft-target', 'main', SHA);
+  });
+
+  test('--verify-draft: the draft must carry exactly one asset, the .vsix, so a stray one cannot pass beside a MATCH', () => {
+    // Review N4: the download takes only `*.vsix`, so a `.vsix.zip` or a `.VSIX` on the draft was never looked at.
+    const withAssets = (...names: string[]): ExistingRelease => ({
+      tagName: TAG, isDraft: true, targetCommitish: SHA, assets: names.map((name) => ({ name, size: 1 })),
+    });
+    refused(checkDraftRelease(withAssets(), V, SHA), 'draft-asset', vsixFileName(V), 'none');
+    refused(checkDraftRelease(withAssets(vsixFileName(V), `${vsixFileName(V)}.zip`), V, SHA), 'draft-asset', `${vsixFileName(V)}.zip`);
+    refused(checkDraftRelease(withAssets(vsixFileName(V).toUpperCase()), V, SHA), 'draft-asset', vsixFileName(V).toUpperCase());
   });
 
   test('--verify-draft: the draft\'s .vsix hashing to the CI artifact\'s is a MATCH', () => {
@@ -653,6 +671,91 @@ suite('release: what is already on GitHub', () => {
   });
 });
 
+// ── no tag and no second draft in the way (review S1, S2) ────────────────────────────────
+
+suite('release: no tag elsewhere, no second release, and drafts this login can see', () => {
+  const V = MANIFEST.version;
+  const TAG = `v${V}`;
+  const TAG_OBJECT = 'c089584ac8dedc3aa7c2c404839bc098050298a2';
+  const NOT_FOUND = 'gh: Not Found (HTTP 404)\n';
+  const refRow = (type: string, sha: string, ref = `refs/tags/${TAG}`): CommandResult =>
+    ran(JSON.stringify({ ref, object: { sha, type, url: `https://api.github.com/x/${sha}` } }));
+  const tagObject = (type: string, sha: string, own = TAG_OBJECT): CommandResult =>
+    ran(JSON.stringify({ sha: own, tag: TAG, object: { sha, type } }));
+  const draftOf = (isDraft = true): ExistingRelease => ({ tagName: TAG, isDraft, targetCommitish: SHA, assets: [] });
+  const releases = (...rows: Array<Record<string, unknown>>): CommandResult => ran(JSON.stringify(rows));
+
+  test('S1: exactly gh\'s "Not Found (HTTP 404)" means there is no tag', () => {
+    assert.deepEqual(accepted(readTagRef(failed(NOT_FOUND), V)), { kind: 'none' });
+  });
+
+  test('S1: any other failure, or an answer that is not this tag\'s ref, is "could not tell", never "no tag"', () => {
+    refused(readTagRef(failed('gh: Bad credentials (HTTP 401)'), V), 'tag-state-unknown', TAG, 'HTTP 401');
+    refused(readTagRef(failed(NOT_FOUND, 2), V), 'tag-state-unknown', TAG);
+    refused(readTagRef(failed('', null), V), 'tag-state-unknown', TAG);
+    refused(readTagRef(ran('not json'), V), 'tag-state-unknown', TAG);
+    refused(readTagRef(refRow('commit', SHA, 'refs/tags/v9.9.9'), V), 'tag-state-unknown', 'refs/tags/v9.9.9');
+    refused(readTagRef(refRow('tree', SHA), V), 'tag-state-unknown', 'tree');
+    refused(readTagRef(refRow('commit', 'not-a-sha'), V), 'tag-state-unknown', TAG);
+  });
+
+  test('S1: a lightweight tag names its commit; an annotated one names a tag object, read once more', () => {
+    assert.deepEqual(accepted(readTagRef(refRow('commit', SHA), V)), { kind: 'commit', sha: SHA });
+    assert.deepEqual(accepted(readTagRef(refRow('tag', TAG_OBJECT), V)), { kind: 'tag', sha: TAG_OBJECT });
+    assert.equal(accepted(peelTagObject(tagObject('commit', RED_SHA), V, TAG_OBJECT)), RED_SHA);
+  });
+
+  test('S1: a tag object that cannot be read, is another object, or names a tag again is "could not tell"', () => {
+    refused(peelTagObject(failed('gh: Server Error (HTTP 502)'), V, TAG_OBJECT), 'tag-state-unknown', TAG_OBJECT, 'HTTP 502');
+    refused(peelTagObject(tagObject('commit', SHA, RED_SHA), V, TAG_OBJECT), 'tag-state-unknown', TAG_OBJECT);
+    refused(peelTagObject(tagObject('tag', RED_SHA), V, TAG_OBJECT), 'tag-state-unknown', TAG_OBJECT, 'tag');
+    refused(peelTagObject(ran('{}'), V, TAG_OBJECT), 'tag-state-unknown', TAG_OBJECT);
+  });
+
+  test('S1: a tag at another commit is refused, because GitHub ignores --target when the tag exists', () => {
+    const r = refused(checkTagTarget(RED_SHA, V, SHA), 'tag-elsewhere', TAG, RED_SHA, SHA, '--target');
+    assert.ok(/owner/.test(r.remedy), r.remedy);
+  });
+
+  test('S1: no tag, or a tag already at the commit being released, is accepted', () => {
+    assert.equal(accepted(checkTagTarget(null, V, SHA)), 'none');
+    assert.equal(accepted(checkTagTarget(SHA, V, SHA)), 'at-commit');
+  });
+
+  test('S2: a login that can push sees drafts; one that cannot is refused, never read as "no draft"', () => {
+    assert.equal(accepted(checkDraftsVisible(ran('true\n'))), null);
+    const r = refused(checkDraftsVisible(ran('false\n')), 'drafts-invisible', RELEASE_REPO);
+    assert.ok(/gh auth status/.test(r.remedy), r.remedy);
+    refused(checkDraftsVisible(ran('null\n')), 'release-state-unknown', 'null');
+    refused(checkDraftsVisible(failed('gh: Bad credentials (HTTP 401)')), 'release-state-unknown', 'HTTP 401');
+  });
+
+  test('S2: two releases carrying the tag are refused, naming both: gh view, upload, edit and download act on one', () => {
+    const two = releases({ id: 111111, tag_name: TAG, draft: true }, { id: 222222, tag_name: TAG, draft: true });
+    refused(checkReleaseList(two, V, draftOf()), 'release-ambiguous', TAG, '111111', '222222');
+  });
+
+  test('S2: a full page of releases is "could not tell": a release with the tag could be on the next page', () => {
+    const page = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, tag_name: `v0.0.${i}-old`, draft: false }));
+    refused(checkReleaseList(releases(...page), V, null), 'release-state-unknown', '100');
+  });
+
+  test('S2: the list and gh release view must agree, or which release is meant cannot be told', () => {
+    assert.deepEqual(accepted(checkReleaseList(releases(), V, null)), { withTag: 0 });
+    assert.deepEqual(accepted(checkReleaseList(releases({ id: 1, tag_name: 'v0.0.1', draft: false }), V, null)), { withTag: 0 });
+    assert.deepEqual(accepted(checkReleaseList(releases({ id: 7, tag_name: TAG, draft: true }), V, draftOf())), { withTag: 1 });
+    refused(checkReleaseList(releases({ id: 7, tag_name: TAG, draft: true }), V, null), 'release-state-unknown', TAG);
+    refused(checkReleaseList(releases(), V, draftOf()), 'release-state-unknown', TAG);
+    refused(checkReleaseList(releases({ id: 7, tag_name: TAG, draft: false }), V, draftOf()), 'release-state-unknown', TAG);
+  });
+
+  test('S2: a release list that could not be read is "could not tell"', () => {
+    refused(checkReleaseList(failed('gh: Not Found (HTTP 404)'), V, null), 'release-state-unknown', 'HTTP 404');
+    refused(checkReleaseList(ran('{}'), V, null), 'release-state-unknown', TAG);
+    refused(checkReleaseList(releases({ id: 'x', tag_name: TAG }), V, null), 'release-state-unknown', TAG);
+  });
+});
+
 // ── the shell only reads ─────────────────────────────────────────────────────────────────
 
 suite('release: every gh command the shell runs is a read', () => {
@@ -660,9 +763,20 @@ suite('release: every gh command the shell runs is a read', () => {
     const reads = [
       ghRead.compare(SHA), ghRead.runList(SHA), ghRead.runView(RUN_ID), ghRead.artifacts(RUN_ID),
       ghRead.artifactZip(13910310691), ghRead.releaseView('0.1.0'), ghRead.releaseDownload('0.1.0', '/a dir/draft-asset'),
+      ghRead.pushPermission(), ghRead.releases(), ghRead.tagRef('0.1.0'), ghRead.tagObject('c089584ac8dedc3aa7c2c404839bc098050298a2'),
     ];
     for (const args of reads) assert.equal(isReadOnlyGh(args), true, `gh ${args.join(' ')}`);
-    for (const args of reads) assert.ok(args.includes('--repo') || (args[1] ?? '').startsWith(`repos/${RELEASE_REPO}/`), `gh ${args.join(' ')} names the repository`);
+    for (const args of reads) {
+      const target = args[1] ?? '';
+      assert.ok(args.includes('--repo') || target === `repos/${RELEASE_REPO}` || target.startsWith(`repos/${RELEASE_REPO}/`), `gh ${args.join(' ')} names the repository`);
+    }
+  });
+
+  test('the tag, release-list and permission reads are the ones the review names', () => {
+    assert.deepEqual(ghRead.tagRef('0.1.0'), ['api', `repos/${RELEASE_REPO}/git/ref/tags/v0.1.0`]);
+    assert.deepEqual(ghRead.tagObject('abc'), ['api', `repos/${RELEASE_REPO}/git/tags/abc`]);
+    assert.deepEqual(ghRead.releases(), ['api', `repos/${RELEASE_REPO}/releases?per_page=100`]);
+    assert.deepEqual(ghRead.pushPermission(), ['api', `repos/${RELEASE_REPO}`, '--jq', '.permissions.push']);
   });
 
   test('the commands it asks gh for are the ones the ticket names', () => {
@@ -684,6 +798,7 @@ suite('release: every gh command the shell runs is a read', () => {
       ['api', `repos/${RELEASE_REPO}/releases`, '-f', 'tag_name=v0.1.0'], ['api', `repos/${RELEASE_REPO}/releases`, '-F', 'draft=true'],
       ['api', `repos/${RELEASE_REPO}/releases`, '--field', 'x=y'], ['api', `repos/${RELEASE_REPO}/releases`, '--raw-field', 'x=y'],
       ['api', `repos/${RELEASE_REPO}/releases`, '--input', 'body.json'], ['api', 'graphql'], ['api', 'repos/someone/else/releases'],
+      ['api', `repos/${RELEASE_REPO}-other/releases`], ['api', `repos/${RELEASE_REPO}`, '-X', 'DELETE'], ['api', `repos/${RELEASE_REPO}`, '-f', 'private=true'],
       [], ['auth', 'token'],
     ];
     assert.equal(isReadOnlyGh(ghRead.runView(RUN_ID)), true, 'the control: a check that refuses everything is not a check');

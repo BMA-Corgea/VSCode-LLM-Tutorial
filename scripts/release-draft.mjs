@@ -24,9 +24,14 @@
 //   [5] the .vsix     exactly build-tutorials-<version>.vsix inside, unpacked into a NEW empty
 //                     directory; its extension/package.json read with `unzip -p`, never loaded
 //   [6] the notes     notes.md, written beside them
-//   [7] the release   `gh release view v<version>`: none yet prints `gh release create --draft`;
-//                     a draft prints `gh release upload --clobber` and `gh release edit --draft`;
-//                     a published release is refused
+//   [7] the release   first what is already there: this login can push (GitHub shows drafts to no
+//                     one else), at most one release carries the tag (`gh api .../releases`), and the
+//                     tag, if it exists, is at this commit (`gh api .../git/ref/tags/v<version>`,
+//                     peeled once if annotated), because GitHub ignores --target when it does. Then
+//                     `gh release view v<version>`: none yet prints `gh release create --draft`; a
+//                     draft holding only its own .vsix, or nothing, prints `gh release upload
+//                     --clobber` and `gh release edit --draft`; a published release, or a draft
+//                     with any other asset, is refused
 //
 // --verify-draft runs [1]-[5], then [7] and [8]: `gh release download v<version> --pattern
 // '*.vsix'` into a NEW empty directory, and the draft's .vsix must hash to the CI artifact's.
@@ -206,9 +211,23 @@ if (!verifyDraft) {
 
 const tag = R.releaseTag(version);
 step(7, `release ${tag} on GitHub`);
+// Drafts are shown only to a login that can push, so first make sure "none" would mean none (review S2).
+must(R.checkDraftsVisible(gh(R.ghRead.pushPermission())));
+ok('this gh login can push, so GitHub shows it drafts too');
 const existing = must(R.readExistingRelease(gh(R.ghRead.releaseView(version)), version));
-if (existing === null) ok('there is none yet');
-else ok(`it exists: ${existing.isDraft ? 'a draft' : 'PUBLISHED'}, targeting ${existing.targetCommitish}, ${existing.assets.length} asset${existing.assets.length === 1 ? '' : 's'}${existing.assets.length > 0 ? ` (${existing.assets.map((a) => a.name).join(', ')})` : ''}`);
+// gh release view names one release per tag; the list says whether there is a second (review S2).
+must(R.checkReleaseList(gh(R.ghRead.releases()), version, existing));
+if (existing === null) ok('there is none yet, and no other release carries the tag');
+else ok(`it exists, the only release with that tag: ${existing.isDraft ? 'a draft' : 'PUBLISHED'}, targeting ${existing.targetCommitish}, ${existing.assets.length} asset${existing.assets.length === 1 ? '' : 's'}${existing.assets.length > 0 ? ` (${existing.assets.map((a) => a.name).join(', ')})` : ''}`);
+// A tag that already exists decides where the release lands: GitHub ignores --target then (review S1).
+const ref = must(R.readTagRef(gh(R.ghRead.tagRef(version)), version));
+const tagCommit = ref.kind === 'none' ? null
+  : ref.kind === 'commit' ? ref.sha
+    : must(R.peelTagObject(gh(R.ghRead.tagObject(ref.sha)), version, ref.sha));
+const tagState = must(R.checkTagTarget(tagCommit, version, sha));
+ok(tagState === 'none'
+  ? `there is no tag ${tag} yet: a draft makes none, and publishing it creates one at this commit`
+  : `the tag ${tag} already exists, at this commit`);
 
 if (!verifyDraft) {
   const plan = must(R.releaseCommands({ version, sha, notesPath, vsixPath, existing }));

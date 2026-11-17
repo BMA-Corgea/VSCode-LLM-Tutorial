@@ -102,6 +102,10 @@ export type ReleaseRefusalCode =
   | 'vsix-manifest-mismatch'
   | 'release-state-unknown'
   | 'release-published'
+  | 'drafts-invisible'
+  | 'release-ambiguous'
+  | 'tag-state-unknown'
+  | 'tag-elsewhere'
   | 'unsafe-argument'
   | 'no-draft'
   | 'draft-target'
@@ -177,6 +181,8 @@ export function vsixFileName(version: string): string {
 // ── the reads the shell runs ─────────────────────────────────────────────────────────────
 
 const RUN_FIELDS = 'databaseId,headSha,event,headBranch,status,conclusion,url';
+/** One page of the release list. A FULL page is "could not tell": the next one may carry the tag. */
+const RELEASES_PAGE = 100;
 const RELEASE_FIELDS = 'tagName,isDraft,targetCommitish,assets';
 /** The compare, cut down by gh to the four fields read here: its file list grows with the diff. */
 const COMPARE_JQ = '{status, ahead_by, behind_by, base_commit: {sha: .base_commit.sha}}';
@@ -198,6 +204,14 @@ export const ghRead = {
   releaseDownload: (version: string, dir: string): string[] => [
     'release', 'download', releaseTag(version), '--repo', RELEASE_REPO, '--pattern', '*.vsix', '--dir', dir,
   ],
+  /** Drafts are shown only to a login that can push, so a "no draft" from any other login means nothing. */
+  pushPermission: (): string[] => ['api', `repos/${RELEASE_REPO}`, '--jq', '.permissions.push'],
+  /** Every release, drafts included for such a login: `gh release view` names just one per tag. */
+  releases: (): string[] => ['api', `repos/${RELEASE_REPO}/releases?per_page=${RELEASES_PAGE}`],
+  /** The tag itself. GitHub ignores `--target` when it exists, so where it points decides the release. */
+  tagRef: (version: string): string[] => ['api', `repos/${RELEASE_REPO}/git/ref/tags/${releaseTag(version)}`],
+  /** An annotated tag's own object, which names the commit. */
+  tagObject: (tagObjectSha: string): string[] => ['api', `repos/${RELEASE_REPO}/git/tags/${tagObjectSha}`],
 };
 
 /**
@@ -211,7 +225,7 @@ export function isReadOnlyGh(args: readonly string[]): boolean {
   if (command === 'run') return sub === 'list' || sub === 'view';
   if (command === 'release') return sub === 'view' || sub === 'download';
   if (command === 'api') {
-    const ofThisRepository = typeof sub === 'string' && sub.startsWith(`repos/${RELEASE_REPO}/`);
+    const ofThisRepository = sub === `repos/${RELEASE_REPO}` || (typeof sub === 'string' && sub.startsWith(`repos/${RELEASE_REPO}/`));
     const onlyAFilter = rest.length === 0 || (rest.length === 2 && rest[0] === '--jq');
     return ofThisRepository && onlyAFilter;
   }
@@ -719,6 +733,121 @@ export function readExistingRelease(view: CommandResult, version: string): Check
   return accept({ tagName: body.tagName, isDraft: body.isDraft, targetCommitish: body.targetCommitish, assets });
 }
 
+/**
+ * `gh api repos/<repo> --jq .permissions.push`. GitHub lists draft releases only to a login that can
+ * push, so from any other login "release not found" would be true of the drafts it was shown and
+ * say nothing about the ones it was not. `false` is therefore a refusal, never "none" (review S2).
+ */
+export function checkDraftsVisible(read: CommandResult): Checked<null> {
+  const unknown = (why: string): Refusal => refuse('release-state-unknown',
+    `Whether this gh login can see draft releases could not be told: ${why}.`,
+    'Check `gh auth status` and run this again.');
+  if (read.status !== 0) return unknown(`gh said ${said(read.stderr)}`);
+  const answer = read.stdout.trim();
+  if (answer === 'true') return accept(null);
+  if (answer === 'false') {
+    return refuse('drafts-invisible',
+      `This gh login cannot push to ${RELEASE_REPO}, and GitHub shows draft releases only to logins that can, so "no draft" from it would not mean there is none.`,
+      'Log gh in as an account that can push to the repository (`gh auth status` says which one this is), then run this again.');
+  }
+  return unknown(`GitHub answered ${show(answer)} where it says true or false`);
+}
+
+/**
+ * `gh api repos/<repo>/releases?per_page=100`: at most ONE release may carry the tag. A draft makes
+ * no tag, so GitHub lets several drafts share one tag name, and `gh release view`, `upload`, `edit`
+ * and `download` each act on just one of them: which draft was verified would be a guess (review S2).
+ * The list must also agree with what `gh release view` found, or which release is meant cannot be
+ * told either. A full page could hide the tag on the next one, so it is "could not tell".
+ */
+export function checkReleaseList(list: CommandResult, version: string, existing: ExistingRelease | null): Checked<{ withTag: number }> {
+  const tag = releaseTag(version);
+  const unknown = (why: string): Refusal => refuse('release-state-unknown',
+    `Which releases carry the tag ${tag} could not be told: ${why}.`,
+    'Check `gh auth status` and the Releases page, then run this again.');
+  if (list.status !== 0) return unknown(`gh said ${said(list.stderr)}`);
+  const rows = parseJson(list.stdout);
+  if (!Array.isArray(rows)) return unknown('it printed no JSON list');
+  if (rows.length >= RELEASES_PAGE) {
+    return unknown(`the list filled a whole page of ${RELEASES_PAGE} releases, so one with that tag could be on the next page`);
+  }
+  const withTag: Array<{ id: number; draft: boolean }> = [];
+  for (const row of rows) {
+    if (!isRecord(row) || typeof row.id !== 'number' || typeof row.tag_name !== 'string' || typeof row.draft !== 'boolean') {
+      return unknown(`one of its rows is not a release: ${show(row)}`);
+    }
+    if (row.tag_name === tag) withTag.push({ id: row.id, draft: row.draft });
+  }
+  if (withTag.length > 1) {
+    return refuse('release-ambiguous',
+      `${withTag.length} releases carry the tag ${tag} (${withTag.map((r) => `release ${r.id}${r.draft ? ', a draft' : ''}`).join('; ')}), and gh release view, upload, edit and download each act on just one of them, so which one was checked would be a guess.`,
+      'Delete all but one of them on GitHub (the owner\'s act), then run this again.');
+  }
+  const listed = withTag[0];
+  const viewed = existing === null ? 'found none' : `found ${existing.isDraft ? 'a draft' : 'a published release'}`;
+  const inList = listed === undefined ? 'has none' : `has ${listed.draft ? 'a draft' : 'a published release'}`;
+  if ((listed === undefined) !== (existing === null) || (listed !== undefined && existing !== null && listed.draft !== existing.isDraft)) {
+    return unknown(`gh release view ${viewed}, but the list of releases ${inList}`);
+  }
+  return accept({ withTag: withTag.length });
+}
+
+// ── the tag (review S1) ──────────────────────────────────────────────────────────────────
+
+/** What `git/ref/tags/v<version>` names: no tag, a commit (lightweight), or a tag object (annotated). */
+export type TagRef = { kind: 'none' } | { kind: 'commit'; sha: string } | { kind: 'tag'; sha: string };
+
+const SHA_SHAPE = /^[0-9a-f]{40}$/;
+const tagUnknown = (tag: string, why: string): Refusal => refuse('tag-state-unknown',
+  `Whether the tag ${tag} already exists on GitHub, and where, could not be told: ${why}.`,
+  'Check `gh auth status` and run this again: GitHub ignores --target when the tag exists, so a tag nobody looked at would decide where the release lands.');
+
+/**
+ * `gh api repos/<repo>/git/ref/tags/v<version>`. Exit 1 with exactly gh's `gh: Not Found (HTTP 404)`
+ * is the only "there is no tag"; any other failure, or an answer that is not this tag's ref, could
+ * not tell. A tag pushed by hand or by an earlier attempt is the case this exists for: GitHub ignores
+ * `target_commitish` when the tag exists, so the release would be published at the TAG's commit.
+ */
+export function readTagRef(read: CommandResult, version: string): Checked<TagRef> {
+  const tag = releaseTag(version);
+  if (read.status === 1 && read.stderr.trim() === 'gh: Not Found (HTTP 404)') return accept({ kind: 'none' });
+  if (read.status !== 0) return tagUnknown(tag, `gh said ${said(read.stderr)}`);
+  const body = parseJson(read.stdout);
+  const object = isRecord(body) && isRecord(body.object) ? body.object : null;
+  if (!isRecord(body) || body.ref !== `refs/tags/${tag}` || object === null) {
+    return tagUnknown(tag, `GitHub's answer is not the ref refs/tags/${tag} (its ref is ${show(isRecord(body) ? body.ref : undefined)})`);
+  }
+  if (typeof object.sha !== 'string' || !SHA_SHAPE.test(object.sha)) return tagUnknown(tag, `the ref names no object sha (${show(object.sha)})`);
+  if (object.type === 'commit') return accept({ kind: 'commit', sha: object.sha });
+  if (object.type === 'tag') return accept({ kind: 'tag', sha: object.sha });
+  return tagUnknown(tag, `the ref points at a ${show(object.type)}, not a commit or a tag object`);
+}
+
+/** `gh api repos/<repo>/git/tags/<sha>`: an annotated tag's object, read once more for its commit. */
+export function peelTagObject(read: CommandResult, version: string, tagObjectSha: string): Checked<string> {
+  const tag = releaseTag(version);
+  if (read.status !== 0) return tagUnknown(tag, `its tag object ${tagObjectSha} could not be read: gh said ${said(read.stderr)}`);
+  const body = parseJson(read.stdout);
+  const object = isRecord(body) && isRecord(body.object) ? body.object : null;
+  if (!isRecord(body) || body.sha !== tagObjectSha || object === null || typeof object.sha !== 'string' || !SHA_SHAPE.test(object.sha)) {
+    return tagUnknown(tag, `GitHub's answer for its tag object ${tagObjectSha} is not that object`);
+  }
+  if (object.type !== 'commit') {
+    return tagUnknown(tag, `its tag object ${tagObjectSha} names a ${show(object.type)}, not a commit, and this reads one level only`);
+  }
+  return accept(object.sha);
+}
+
+/** A tag that already exists must be at the commit being released; no tag at all is fine. */
+export function checkTagTarget(tagCommit: string | null, version: string, sha: string): Checked<'none' | 'at-commit'> {
+  const tag = releaseTag(version);
+  if (tagCommit === null) return accept('none');
+  if (tagCommit === sha) return accept('at-commit');
+  return refuse('tag-elsewhere',
+    `The tag ${tag} already exists on GitHub at ${tagCommit}, not ${sha}. GitHub ignores --target when the tag exists, so publishing this release would attach it, and its source archives, to ${tagCommit}.`,
+    'Move or delete that tag on GitHub (the owner\'s act), or release under a new version, then run this again.');
+}
+
 // ── the command, printed and never run ───────────────────────────────────────────────────
 
 /** A command for the owner to read and run: the argv, and the same thing quoted for a shell. */
@@ -767,6 +896,14 @@ export function releaseCommands(input: ReleaseCommandsInput): Checked<{ mode: 'c
     return refuse('release-published', `Release ${tag} already exists and is published, not a draft.`,
       `This script only prepares drafts, so it prints nothing for ${tag}: bump the version in package.json for a new release, or change ${tag} by hand on GitHub if that is really what is meant.`);
   }
+  // Review N4: `upload --clobber` replaces only an asset of the SAME name, so any other asset on the
+  // draft would still be there beside the CI .vsix afterwards, and "these replace its .vsix" would be false.
+  const others = (existing?.assets ?? []).map((asset) => asset.name).filter((name) => name !== vsixFileName(version));
+  if (others.length > 0) {
+    return refuse('draft-asset',
+      `Draft ${tag} carries ${others.join(', ')}, and uploading the CI .vsix would add it beside ${others.length === 1 ? 'that asset' : 'those assets'} rather than replace ${others.length === 1 ? 'it' : 'them'}.`,
+      `Remove ${others.length === 1 ? 'that asset' : 'those assets'} from the draft on GitHub (the owner's act), then run this again.`);
+  }
   const argvs: string[][] = existing === null
     ? [['gh', 'release', 'create', tag, '--repo', RELEASE_REPO, '--draft', '--target', sha, '--title', title, '--notes-file', notesPath, vsixPath]]
     : [
@@ -789,6 +926,15 @@ export function checkDraftRelease(existing: ExistingRelease | null, version: str
     return refuse('draft-target',
       `Release ${tag} targets "${existing.targetCommitish}", not commit ${sha}, so publishing it would tag something other than the commit CI verified.`,
       'Point it at that commit with the `gh release edit` command this script prints without --verify-draft, then verify again.');
+  }
+  // Review N4: the download below takes only `*.vsix`, so the draft's asset list is checked as a whole:
+  // a `.vsix.zip` or a `.VSIX` beside the right file would otherwise ship unexamined beside a MATCH.
+  const expected = vsixFileName(version);
+  const names = existing.assets.map((asset) => asset.name);
+  if (names.length !== 1 || names[0] !== expected) {
+    return refuse('draft-asset',
+      `Release ${tag} should carry exactly one asset, ${expected}, and it carries ${names.length === 0 ? 'none' : names.join(', ')}.`,
+      `Make ${expected} its only asset (removing one on GitHub is the owner's act; uploading it is the command this script prints without --verify-draft), then verify again.`);
   }
   return accept(existing);
 }
