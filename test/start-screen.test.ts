@@ -103,6 +103,9 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   const gone = new Set<string>();
   const unhandled: string[] = [];
   const onUnhandled = (reason: unknown): void => { unhandled.push(reason instanceof Error ? reason.message : String(reason)); };
+  /** Puts back what a test slowed (T-30's check), from the teardown too: a test cut off by mocha's timeout
+   *  has not reached its own `finally` when the next test starts. */
+  let undoSlowCheck: (() => void) | undefined;
 
   suiteSetup(async () => {
     context = await getContext();
@@ -124,6 +127,8 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
   });
 
   teardown(async () => {
+    undoSlowCheck?.();
+    undoSlowCheck = undefined;
     // A test that failed before ending its build would leave a live progress and a running flag for
     // the next one (code review finding 6): end them all.
     for (const release of held.splice(0)) release({ ok: false, cancelled: true, reason: 'ended by the test teardown' });
@@ -258,6 +263,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     const promises = fs.promises as unknown as { readdir: (...args: unknown[]) => Promise<unknown> };
     const realReaddir = promises.readdir;
     promises.readdir = async (...args: unknown[]): Promise<unknown> => { await sleep(15); return realReaddir.apply(fs.promises, args); };
+    undoSlowCheck = () => { promises.readdir = realReaddir; };
     try {
       const request: BuildRequest = { idea: '', recreate: true, repo, target, dial: 'manual' };
       const { page, read } = await open((r) => {
@@ -277,7 +283,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       const pressedAt = await pressCancel();
       const cancelled = await until(read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back', 60_000);
       const tookMs = Date.now() - pressedAt;
-      promises.readdir = realReaddir;
+      undoSlowCheck?.();
       console.log(`T-30 AC3 measured: Cancel to the button back ${tookMs} ms`);
 
       assert.ok(tookMs <= STALL_BOUND_MS, `the Cancel took ${tookMs} ms to land, past the bound of ${STALL_BOUND_MS} ms`);
@@ -305,7 +311,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       assert.equal(outcomes.length, 2);
       assert.equal(outcomes[1]?.cancelled, undefined);
     } finally {
-      promises.readdir = realReaddir;
+      undoSlowCheck?.();
       fs.rmSync(repo, { recursive: true, force: true });
       fs.rmSync(target, { recursive: true, force: true });
     }

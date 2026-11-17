@@ -615,10 +615,12 @@ function markerKey(marker: Pick<BuildMarker, 'id' | 'startedAt'>): string | unde
 }
 
 /**
- * Removes `whose` marker, and what that build left beside it, and only while the marker on disk is still
- * that one. Never another build's (T-71 re-review R2). It used to compare ids only when both had one, so
- * a marker from before ids, or a caller with none, deleted whatever marker was on disk when it ran: that
- * of a build another window had started meanwhile (T-72 merge check).
+ * Removes `whose` marker and what that build left beside it. Another build's marker on disk is never
+ * touched, and nothing beside it either (T-71 re-review R2). It used to compare ids only when both had
+ * one, so a marker from before ids, or a caller with none, deleted whatever marker was on disk when it
+ * ran: that of a build another window had started meanwhile (T-72 merge check). With no marker on disk at
+ * all, it still tidies what an unfinished build of ours leaves: an atomic write's temp file, a request
+ * with no plan, and the folders, once empty.
  */
 function deleteMarker(target: string, whose: Pick<BuildMarker, 'id' | 'startedAt'>): void {
   const there = readMarker(target);
@@ -772,6 +774,9 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   // just after writing it. Only a plan that appears DURING the fetch or the walk is another build's
   // tutorial (R2).
   const planBefore = planIn(target);
+  // And the marker this build began over: the one a crash left (a Resume), a failed build's (a retry), or
+  // none. The only one a refusal or a Cancel of the check below may remove.
+  const markerBefore = readMarker(target);
 
   let repoRoot: string;
   try {
@@ -813,13 +818,15 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   ctx.onProgress?.('checking the repository…');
   const hazard = await hazardousGitAttributes(repoRoot, ctx.isCancelled);
   if (hazard === 'cancelled' || hazard) {
-    // The marker this build was about to take the folder from goes with it: the one a crash left (a
-    // Resume), a failed build's (a retry). Resuming can never make this file safe, and a marker left here
-    // asks again on every reload and leaves the target "not empty" for the next press (T-72 code review,
-    // finding 1). Read now, after the walk, and only one that is not running: a build another window
-    // started during the walk is that window's, and is left alone with everything beside it.
+    // The marker this build began over goes with it. Resuming can never make this file safe, and a marker
+    // left here asks again on every reload and leaves the target "not empty" for the next press (T-72 code
+    // review, finding 1). Only that one, read again now, and only while it is not running: its build can
+    // have woken meanwhile. A marker that came during the fetch or the walk is another window's build,
+    // running or stopped, and stays with everything beside it, so that window's reload still offers it
+    // (T-72 merge check and fix check).
     const there = readMarker(target);
-    if (there && !markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) deleteMarker(target, there);
+    if (there && markerBefore && markerKey(there) === markerKey(markerBefore)
+      && !markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) deleteMarker(target, there);
     if (hazard === 'cancelled') return cancel(target, 'while checking the repository');
     return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard, fromUrl ? 'url' : 'folder') };
   }

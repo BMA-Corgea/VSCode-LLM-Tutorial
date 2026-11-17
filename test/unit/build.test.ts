@@ -804,6 +804,72 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     }
   });
 
+  test('T-72 fix check: a build another window starts and stops during the check keeps its marker on a refusal or a Cancel, so its reload still offers it', async () => {
+    const stopped = {
+      failed: (): Partial<BuildMarker> => ({ ...liveElsewhere(), id: 'failed-elsewhere', endedAt: new Date().toISOString() }),
+      crashed: (): Partial<BuildMarker> => ({ id: 'crashed-elsewhere', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() }),
+    };
+    for (const [kind, fields] of Object.entries(stopped)) {
+      for (const ending of ['refused', 'cancelled'] as const) {
+        const label = `a build that ${kind} during the check, this one ${ending}`;
+        const target = tmpDir('build-tutorials-target-');
+        const request = requestFor(ending === 'refused' ? hostileReference() : makeTsFixture(), target);
+        let calls = 0;
+        const duringTheCheck = (): boolean => {
+          if (++calls === 1) {
+            markerOf(target, request, fields());
+            fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify(request));
+          }
+          return ending === 'cancelled' && calls > 1;
+        };
+        const outcome = await buildFromRequest(request, baseContext({ core: noDigest(), isCancelled: duringTheCheck }));
+        assert.equal(readMarker(target)?.id, `${kind}-elsewhere`, `${label}: this build removed a marker it did not begin over`);
+        assert.ok(fs.existsSync(path.join(buildDir(target), 'request.json')), `${label}: and that build's request`);
+        assert.equal(outcome.ok, false, `${label}: ${outcome.reason}`);
+      }
+    }
+  });
+
+  test('T-72 fix check: so does one that starts and stops while this one fetches a URL', async () => {
+    for (const ending of ['refused', 'cancelled'] as const) {
+      const target = tmpDir('build-tutorials-target-');
+      const storage = tmpDir('storage-');
+      const clone = path.join(storage, 'refs', 'someone-fixture');
+      fs.cpSync(ending === 'refused' ? hostileReference() : makeTsFixture(), clone, { recursive: true, verbatimSymlinks: true });
+      fs.mkdirSync(path.join(clone, '.git'), { recursive: true });
+      const request = { ...requestFor(makeTsFixture(), target), repo: 'https://github.com/someone/fixture' };
+      const fetchWhileAnotherStops: GitRunner = (args) => {
+        if (args.includes('fetch')) markerOf(target, request, { ...liveElsewhere(), id: 'failed-elsewhere', endedAt: new Date().toISOString() });
+        return Promise.resolve('');
+      };
+      let calls = 0;
+      const outcome = await buildFromRequest(request, {
+        ...baseContext({ core: noDigest(), isCancelled: () => ending === 'cancelled' && ++calls > 1 }), globalStorageRoot: storage, git: fetchWhileAnotherStops,
+      });
+      assert.equal(readMarker(target)?.id, 'failed-elsewhere', `${ending}: this build removed a marker that came during its fetch`);
+      assert.equal(outcome.ok, false, `${ending}: ${outcome.reason}`);
+    }
+  });
+
+  test('T-72 fix check: the marker it began over stays when its build wakes during the check (another machine)', async () => {
+    for (const ending of ['refused', 'cancelled'] as const) {
+      const target = tmpDir('build-tutorials-target-');
+      const request = requestFor(ending === 'refused' ? hostileReference() : makeTsFixture(), target);
+      // One build throughout, on another machine: silent for 10 minutes, then beating again.
+      const laptop = { id: 'on-a-laptop', pid: 4242, host: 'another-machine', startedAt: new Date(Date.now() - 900_000).toISOString() };
+      markerOf(target, request, { ...laptop, heartbeatAt: new Date(Date.now() - 600_000).toISOString() });
+      assert.equal(unfinishedBuildIn(target), 'build-again', 'the fixture has to be a folder the press builds in again');
+      let calls = 0;
+      const wakesDuringTheCheck = (): boolean => {
+        if (++calls === 1) markerOf(target, request, { ...laptop, heartbeatAt: new Date().toISOString() });
+        return ending === 'cancelled' && calls > 1;
+      };
+      const outcome = await buildFromRequest(request, baseContext({ core: noDigest(), isCancelled: wakesDuringTheCheck }));
+      assert.equal(readMarker(target)?.id, 'on-a-laptop', `${ending}: the marker of a build that woke during the check was removed`);
+      assert.equal(outcome.ok, false, `${ending}: ${outcome.reason}`);
+    }
+  });
+
   test('T-72 merge check: a Cancel of a build whose folder a window from before ids took over leaves that marker alone', async () => {
     const target = tmpDir('build-tutorials-target-');
     const request = requestFor(makeTsFixture(), target);
