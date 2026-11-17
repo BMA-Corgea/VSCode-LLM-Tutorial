@@ -65,7 +65,7 @@ import fs from 'node:fs';
 import type { StepLike } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
 import { languageOf, type CheckReport, type DialCore, type FileExtract, type FileRecord } from './core.js';
-import { taughtReadRefusal } from './writer.js';
+import { learnerReadRefusal, taughtReadRefusal } from './writer.js';
 
 /** A report plus the one line the panel puts above it — see `summarize`. */
 export interface CheckOutcome {
@@ -82,23 +82,32 @@ export interface CheckOutcome {
 const MAX_NAMES_LISTED = 6;
 
 /**
- * Why *Check my work* will not read this step's reference file, a sentence for the page, or
- * `null` when it may (T-92).
+ * Why *Check my work* will not read this step's file, a sentence for the page, or `null` when it
+ * may (T-92): the reference's copy (containment, both halves, and the withheld-name rule) and the
+ * learner's own (the same, in their folder: their `config.ts` may be a link to their `.env`).
  *
  * `runCheck` answers `null` for every way a comparison comes to nothing, and the session draws
  * `null` as "has not been created". That is true of manual mode's ordinary state and false of a
  * file that IS there but was refused, so the session asks this first and says the true thing.
- * The refusal itself is enforced in `referenceExtract`, which reads nothing it refuses here.
+ * The refusal itself is enforced in `referenceExtract` and `runCheck`, which read nothing refused
+ * here. Such a step is never checked, so the sentence says to move on (T-92's code review, N3).
  */
-export function checkRefusal(refRoot: string, step: StepLike): string | null {
+export function checkRefusal(refRoot: string, target: string, step: StepLike): string | null {
+  // A chapter step's `target.file` is a FOLDER (`src/auth`, `src/secrets`): the name rule is about
+  // files, and a check reads no folder anyway (T-92's code review, S1).
+  if (step.kind === 'shape') return null;
   const file: unknown = step.target.file;
   if (typeof file !== 'string') return null;
+  const shown = file.length <= 120 ? file : `${file.slice(0, 119)}…`;
   // Whatever the language: `.env` has no grammar, so it is never parsed, and without this the
   // page would say it "has not been created" when the learner's copy is right there.
-  const refused = taughtReadRefusal(refRoot, file);
-  if (refused === null) return null;
-  const shown = file.length <= 120 ? file : `${file.slice(0, 119)}…`;
-  return `Nothing was checked: ${shown} ${refused}, so the reference's copy of it is not read.`;
+  const theirs = taughtReadRefusal(refRoot, file);
+  if (theirs !== null) {
+    return `Nothing was checked: ${shown} ${theirs}, so the reference's copy of it is not read. This step cannot be checked: write the file yourself, then move on with Next.`;
+  }
+  const mine = learnerReadRefusal(target, file);
+  if (mine !== null) return `Nothing was checked: your ${shown} ${mine}, so it is not read. This step cannot be checked while it is.`;
+  return null;
 }
 
 /**
@@ -181,6 +190,9 @@ export async function runCheck(
 
   const learnerPath = resolveInsideTarget(target, relPath);
   if (learnerPath === null) return null;
+  // T-92 (security review, N2): the learner's copy is held to what the tutor holds it to, a link out
+  // of their folder or to their `.env` is not parsed and drawn. `checkRefusal` says it in words.
+  if (learnerReadRefusal(target, relPath) !== null) return null;
 
   let learnerSource: string;
   try {

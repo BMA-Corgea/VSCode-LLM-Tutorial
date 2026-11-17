@@ -4210,7 +4210,7 @@ suite('a tutorial this editor did not build reads no reference, and says why (T-
     const fake = fakeAdapters({
       plan,
       target,
-      request: believeRequest(loadRequest(target), target, storage) ?? undefined,
+      request: believeRequest(target, storage, loadRequest) ?? undefined,
       // Parked on the file step with no override of its own, so the request's global dial applies.
       progress: setCurrent(markDone(emptyProgress(plan), 'st-1-shape-src'), STEP),
       ...extra,
@@ -4223,12 +4223,10 @@ suite('a tutorial this editor did not build reads no reference, and says why (T-
   }
 
   test('automated writes nothing from a root nobody built here, and the page says why', async () => {
-    const { target, home, storage, plan } = shipped();
+    const { target, storage, plan } = shipped();
     const { session, fake } = openOn(target, storage, plan);
     await session.settled();
     assert.equal(fs.existsSync(path.join(target, FILE)), false, `${FILE} was copied in from a folder the repository chose`);
-    const read = pick(fake, 'readText').map((call) => call.absPath).filter((p) => p.startsWith(home));
-    assert.deepEqual(read, [], 'the walk read from the folder the repository chose');
     assert.equal(lastView(fake)?.referenceNote, NOT_BUILT_HERE, 'the page does not say why nothing is written');
     assert.equal(lastView(fake)?.dial, 'manual', 'the dial claims a position that writes, with nothing to write from');
     session.dispose();
@@ -4291,6 +4289,24 @@ suite('a tutorial this editor did not build reads no reference, and says why (T-
     assert.ok(!(sent[0]?.prompt ?? '').includes(MARKER), 'a withheld file reached the prompt');
     assert.ok((sent[0]?.prompt ?? '').includes(WITHHELD_FROM_TUTOR), 'the tutor was not told why it has no diff');
     assert.match(lastView(fake)?.tutor?.note ?? '', /^Your question was sent without \.env/);
+    session.dispose();
+  });
+
+  test('a reproduce entry that leaves the reference through a link is not read to compare it (security review N3)', async () => {
+    const { target, home, storage } = shipped();
+    const outside = path.join(box, `outside-${n}`);
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'x.js'), `module.exports = '${MARKER}';\n`);
+    fs.symlinkSync(outside, path.join(home, 'vendor'), 'dir');
+    fs.mkdirSync(path.join(target, 'vendor'), { recursive: true });
+    fs.writeFileSync(path.join(target, 'vendor', 'x.js'), 'module.exports = 1;\n');
+    recordBuiltReference(storage, target, home);
+    const plan = { ...planTargeting(FILE), reproduce: ['vendor/x.js'] };
+    const { session, fake } = openOn(target, storage, plan);
+    await session.settled();
+    const read = pick(fake, 'readText').map((call) => call.absPath).filter((p) => p.startsWith(path.join(home, 'vendor')));
+    assert.deepEqual(read, [], 'an entry linked out of the reference was read to compare it');
+    assert.equal(fs.readFileSync(path.join(target, 'vendor', 'x.js'), 'utf8'), 'module.exports = 1;\n', 'and nothing of the learner\'s was replaced');
     session.dispose();
   });
 

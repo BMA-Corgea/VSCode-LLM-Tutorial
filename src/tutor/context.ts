@@ -209,12 +209,12 @@ export const NO_FILE_YET =
  * though the learner had written nothing.
  */
 export const WITHHELD_FROM_TUTOR =
-  'The learner’s file for this step is not shown here: its name says it holds credentials or configures a tool, so neither their copy nor the author’s is ever sent. Ask them about it in their own words if you need to.';
+  'The learner’s file for this step is not shown here: its name, or the name of the file it links to, says it holds credentials or configures a tool, so neither their copy nor the author’s is ever sent. Ask them about it in their own words if you need to.';
 
 /** What the LEARNER is told when their question went without the step's file (T-92). */
 export function withheldFromTutorNote(file: string): string {
   const shown = file.length <= 120 ? file : `${file.slice(0, 119)}…`;
-  return `Your question was sent without ${shown}: its name says it holds credentials or configures a tool, so neither your copy nor the reference's is ever sent to the tutor.`;
+  return `Your question was sent without ${shown}: its name, or the name of the file it links to, says it holds credentials or configures a tool, so neither your copy nor the reference's is ever sent to the tutor.`;
 }
 
 /** What `learnerDiff` says when the two files match exactly — see the header's six states. */
@@ -765,7 +765,9 @@ async function learnerDiffFor(
   // T-92: a file the reproduce copy would withhold is sent by neither side, and that is asked of
   // BOTH trees: the name as the plan spells it, then the name each side really has, because the
   // learner's own `config.ts` may be the link to their `.env`. Before either file is opened.
-  if (taughtFileWithheld(refRoot, file) !== null || taughtFileWithheld(target, file) !== null) return WITHHELD_FROM_TUTOR;
+  // A chapter step's `target.file` is a FOLDER, which `NOT_ONE_FILE` already answers truly below: a
+  // folder named `src/auth` is not a credentials file (T-92's code review, S1).
+  if (step.kind !== 'shape' && (taughtFileWithheld(refRoot, file) !== null || taughtFileWithheld(target, file) !== null)) return WITHHELD_FROM_TUTOR;
 
   // Rules 1 and 4, and the order matters: the learner's side is asked FIRST so that "you have
   // not written this yet" — manual mode's ordinary state, and the most useful thing the tutor

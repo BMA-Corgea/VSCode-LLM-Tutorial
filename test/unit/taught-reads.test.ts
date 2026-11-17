@@ -24,7 +24,7 @@ import { checkRefusal, runCheck } from '../../src/dial/check.js';
 import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
 import { fileShape, isRefusal, planWrite, type WritePlan } from '../../src/dial/writer.js';
 import { realGit } from '../../src/start/build.js';
-import { WITHHELD_FROM_TUTOR, tutorContext } from '../../src/tutor/context.js';
+import { NOT_ONE_FILE, WITHHELD_FROM_TUTOR, tutorContext } from '../../src/tutor/context.js';
 import type { PlanLike, StepLike } from '../../src/walk/model.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
@@ -193,9 +193,10 @@ suite('T-92 (a): the check does not parse a withheld or escaping reference file'
       const step = fileStep(file);
       const outcome = await runCheck(core, ref, target, step);
       assert.equal(outcome, null, `the check compared against the reference file: ${JSON.stringify(outcome?.report ?? null)}`);
-      const said = checkRefusal(ref, step);
+      const said = checkRefusal(ref, target, step);
       assert.ok(said !== null, 'refused in silence: the session would say "has not been created" about a file that is there');
       assert.match(said, sentence);
+      assert.match(said, /This step cannot be checked: write the file yourself, then move on with Next\.$/);
     });
   }
 
@@ -206,7 +207,36 @@ suite('T-92 (a): the check does not parse a withheld or escaping reference file'
     const step = fileStep('src/ok.ts');
     const outcome = await runCheck(core, ref, target, step);
     assert.equal(outcome?.report.ok, true, 'the ordinary check stopped working');
-    assert.equal(checkRefusal(ref, step), null);
+    assert.equal(checkRefusal(ref, target, step), null);
+  });
+
+  for (const [label, link, sentence] of [
+    ['a link to their own .env', (target: string): void => {
+      write(target, '.env', `TOKEN=${LEARNER_MARKER}\n`);
+      fs.symlinkSync('../.env', path.join(target, 'src', 'ok.ts'));
+    }, /^Nothing was checked: your src\/ok\.ts is a link to a file that is shaped like a credentials file, so it is not read\./],
+    ['a link out of their folder', (target: string): void => {
+      const outside = tmpDir('t92-learner-outside-');
+      write(outside, 'ok.ts', OK_TS);
+      fs.symlinkSync(path.join(outside, 'ok.ts'), path.join(target, 'src', 'ok.ts'));
+    }, /^Nothing was checked: your src\/ok\.ts leaves the folder you are building in through a symlink, so it is not read\./],
+  ] as Array<[string, (target: string) => void, RegExp]>) {
+    test(`the learner's own copy that is ${label} is not parsed either (security review N2)`, async () => {
+      const ref = reference();
+      const target = tmpDir('t92-target-');
+      fs.mkdirSync(path.join(target, 'src'), { recursive: true });
+      link(target);
+      const step = fileStep('src/ok.ts');
+      assert.equal(await runCheck(core, ref, target, step), null, 'the learner\'s linked copy was parsed and compared');
+      assert.match(checkRefusal(ref, target, step) ?? '', sentence);
+    });
+  }
+
+  test('a chapter folder named like a secret is not a credentials file: no refusal (code review S1)', () => {
+    const ref = reference();
+    fs.mkdirSync(path.join(ref, 'src', 'secrets'), { recursive: true });
+    const chapter = { ...fileStep('src/secrets'), kind: 'shape' as const };
+    assert.equal(checkRefusal(ref, tmpDir('t92-target-'), chapter), null);
   });
 });
 
@@ -224,6 +254,14 @@ suite('T-92 (a): the tutor is sent neither copy of a withheld file', () => {
       assert.equal(ctx.build?.learnerDiff, WITHHELD_FROM_TUTOR);
     });
   }
+
+  test('a chapter folder named like a secret gets the true sentence, a whole part of the repository (code review S1)', async () => {
+    const ref = reference();
+    const target = tmpDir('t92-target-');
+    for (const root of [ref, target]) fs.mkdirSync(path.join(root, 'src', 'auth'), { recursive: true });
+    const ctx = await tutorContext({ ...fileStep('src/auth'), kind: 'shape' }, ref, target, realGit);
+    assert.equal(ctx.build?.learnerDiff, NOT_ONE_FILE);
+  });
 
   test('the learner\'s own copy that is a link to their .env is not sent either', async () => {
     const ref = reference();

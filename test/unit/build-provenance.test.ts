@@ -16,7 +16,7 @@ import path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import { buildDir, buildFromRequest, coreFor, type BuildContext, type BuildCore } from '../../src/start/build.js';
 import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
-import { NOT_BUILT_HERE, believeRequest, isWithheld } from '../../src/walk/provenance.js';
+import { NOT_BUILT_HERE, NOT_THE_BUILDS_REQUEST, believeRequest, isWithheld } from '../../src/walk/provenance.js';
 import { loadRequest } from '../../src/walk/store.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
@@ -66,7 +66,7 @@ suite('T-92: the build writes the record its walk believes the reference root by
     const storage = tmpDir('t92-build-storage-');
     const outcome = await buildFromRequest(requestFor(repo, target), context(storage));
     assert.equal(outcome.ok, true, outcome.reason);
-    const answer = believeRequest(loadRequest(target), target, storage);
+    const answer = believeRequest(target, storage, loadRequest);
     assert.ok(answer !== null, 'the build wrote no readable request.json');
     assert.ok(!isWithheld(answer), `a tutorial built here was not believed: ${isWithheld(answer) ? answer.withheld : ''}`);
     assert.equal(answer.referenceRoot, fs.realpathSync(repo));
@@ -77,12 +77,26 @@ suite('T-92: the build writes the record its walk believes the reference root by
     const target = tmpDir('t92-build-target-');
     const outcome = await buildFromRequest(requestFor(repo, target), context(tmpDir('t92-build-storage-')));
     assert.equal(outcome.ok, true, outcome.reason);
-    const elsewhere = believeRequest(loadRequest(target), target, tmpDir('t92-other-editor-'));
+    const elsewhere = believeRequest(target, tmpDir('t92-other-editor-'), loadRequest);
     assert.ok(elsewhere !== null && isWithheld(elsewhere));
     assert.equal(elsewhere.withheld, NOT_BUILT_HERE);
   });
 
-  test('a build that cannot write its record fails, says why, and writes no request and no plan', async () => {
+  test('the record is bound to the request the build wrote: a request edited afterwards is not believed', async () => {
+    const repo = tsFixture();
+    const target = tmpDir('t92-build-target-');
+    const storage = tmpDir('t92-build-storage-');
+    const outcome = await buildFromRequest(requestFor(repo, target), context(storage));
+    assert.equal(outcome.ok, true, outcome.reason);
+    const file = path.join(buildDir(target), 'request.json');
+    const written = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    fs.writeFileSync(file, JSON.stringify({ ...written, dial: 'automated' }, null, 2));
+    const answer = believeRequest(target, storage, loadRequest);
+    assert.ok(answer !== null && isWithheld(answer), 'a request edited after the build was believed');
+    assert.equal(answer.withheld, NOT_THE_BUILDS_REQUEST);
+  });
+
+  test('a build that cannot write its record fails, says why, and writes no plan: the folder holds no walk', async () => {
     const repo = tsFixture();
     const target = tmpDir('t92-build-target-');
     const storage = tmpDir('t92-build-storage-');
@@ -91,7 +105,8 @@ suite('T-92: the build writes the record its walk believes the reference root by
     const outcome = await buildFromRequest(requestFor(repo, target), context(storage));
     assert.equal(outcome.ok, false, 'a build with no record behind it reported success');
     assert.match(outcome.reason ?? '', /could not be recorded in the extension's storage/);
-    assert.equal(fs.existsSync(path.join(buildDir(target), 'request.json')), false, 'a request.json nothing stands behind was written');
+    // The request is written first, so the record can be bound to its bytes; the plan, the one thing
+    // a walk opens on, is not, so this folder never opens a walk the record does not stand behind.
     assert.equal(fs.existsSync(path.join(buildDir(target), 'plan.json')), false, 'a plan was written with no record behind it');
     assert.deepEqual(fs.readdirSync(outside), [], 'the record was written through the link');
   });

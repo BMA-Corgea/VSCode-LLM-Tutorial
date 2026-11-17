@@ -874,14 +874,15 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     // Resume finishes the job) or a COMPLETE plan — never a half-written file with nothing
     // left to signal that it is broken (T-3 rework, review finding 2).
     const writeOps = ctx.writeOps ?? realFsWriteOps;
-    // T-92: the record a walk believes `request.json`'s root by, in the extension's own storage,
-    // FIRST, so this folder never holds a request this build does not stand behind. A repository
-    // can ship a `request.json`; it cannot write this. A failure here is the build's own (`fail`).
-    recordBuiltReference(ctx.globalStorageRoot, target, repoRoot);
     // `repoRoot`, not `request.repo`: for a GitHub URL those differ, and the one worth
     // recording is where the clone actually landed. Writing only the URL is what made the
     // dial silently refuse on every URL-built tutorial (T-5 security review, finding 2).
     writeJsonAtomic(path.join(buildDir(target), 'request.json'), { ...request, referenceRoot: repoRoot }, writeOps);
+    // T-92: the record a walk believes `request.json` by, in the extension's own storage, bound to
+    // the bytes just written and to the root they name. A repository can ship a `request.json`; it
+    // cannot write this. Before the plan, so a folder whose walk can open always has its record. A
+    // failure here is the build's own (`fail`, marker kept, no plan written).
+    recordBuiltReference(ctx.globalStorageRoot, target, repoRoot);
     writeJsonAtomic(path.join(buildDir(target), 'plan.json'), interpreted.plan, writeOps);
   } catch (err) {
     return fail(err);

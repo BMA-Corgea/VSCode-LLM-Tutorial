@@ -407,9 +407,10 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     fileExists: (absPath) => isOpenableFile(target, absPath),
     loadPlan,
     loadProgress,
-    // T-92: `request.json`'s root is believed only on the build's own record in this extension's
-    // storage. A folder whose `.repo-tour/` came with it is walked, and reads no reference at all.
-    loadRequest: (t) => believeRequest(loadRequest(t), t, context.globalStorageUri.fsPath),
+    // T-92: `request.json` is believed only on the build's own record in this extension's storage,
+    // asked before the store resolves anything. A folder whose `.repo-tour/` came with it is walked,
+    // and reads no reference at all.
+    loadRequest: (t) => believeRequest(t, context.globalStorageUri.fsPath, loadRequest),
     saveProgress,
 
     // ── T-5: what the dial needs from the outside world ──────────────────────────────────

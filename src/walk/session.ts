@@ -190,6 +190,7 @@ import {
   planWrite,
   deliverableEntries,
   reproduceFiles,
+  taughtReadRefusal,
   writeTextAtomic,
   type FileShape,
 } from '../dial/writer.js';
@@ -2044,7 +2045,7 @@ export class WalkSession {
     // T-92: a reference file the check will not read (withheld by name, or leaving the reference
     // through a link) is said as such. `runStructuralCheck` answers `null` for it, which reads below
     // as "has not been created", false of a file the learner can see.
-    const refused = checkRefusal(refRoot, step);
+    const refused = checkRefusal(refRoot, this.target, step);
     if (refused !== null) {
       this.noteFor(stepId, refused);
       return;
@@ -2297,6 +2298,9 @@ export class WalkSession {
     if (to === null || !this.adapters.fileExists(to)) return false;
     const from = resolveInsideTarget(refRoot, entry);
     if (from === null) return false;
+    // T-92 (security review, N3): an entry that leaves the reference through a link, or is a link to a
+    // withheld file, is never written, so it replaces nothing; and its source is not read to say so.
+    if (taughtReadRefusal(refRoot, entry) !== null) return false;
     const mine = this.adapters.readText(to);
     return !(mine !== undefined && mine === this.adapters.readText(from) && !mine.includes('\uFFFD'));
   }

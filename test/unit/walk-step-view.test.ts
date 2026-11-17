@@ -3229,6 +3229,13 @@ suite('T-92: the page says why no reference file is read', () => {
     assert.ok(empty.includes(escapeForHtml(SHAPE_EMPTY_MESSAGE)), 'the genuinely empty shape lost its sentence');
   });
 
+  test('an outline refusal naming a hostile file name is drawn escaped (security review N6)', () => {
+    const refused = 'No outline: src/<img src=x onerror=alert(1)>&"q".ts is shaped like a credentials file, so it is not read.';
+    const html = renderStepHtml(stateAt('st-2-file-parse', { shape: { signatures: [], imports: [], refused } }), FAKE_SKINS);
+    assert.ok(html.includes('src/&lt;img src=x onerror=alert(1)&gt;&amp;'), 'the refusal\'s file name is not escaped');
+    assert.ok(!html.includes('<img src=x'), 'a refusal drew markup');
+  });
+
   test('each of the two moves the repaint key, or it is stored and never shown', () => {
     const key = (overrides: Partial<StepViewState>): string => stepRenderKey(stateAt('st-2-file-parse', overrides), FAKE_SKINS);
     assert.notEqual(key({}), key({ referenceNote: WHY }), 'state.referenceNote appearing');

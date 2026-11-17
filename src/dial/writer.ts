@@ -73,6 +73,14 @@
  * AC6 with `diff -r` against a repository like repo-tour will see output, and must not read it
  * as a regression.
  *
+ * **And a THIRD exception since T-92: a taught `file` step whose name the same rule withholds.**
+ * The dial never writes it, the outline does not show it, the check does not compare it and the
+ * tutor is sent neither copy, each saying so (`taughtFileWithheld`). Such a step is never marked
+ * done, because a passed check and an automated write are the two ways a step is done, and the
+ * check's sentence tells the learner to write the file themselves and move on. The rule's
+ * whole-word `token`, `auth` and `key` mean a lexer's `token.ts` or an app's `auth.ts` is one;
+ * measured, that is 14 of 5,118 real source files and none of the 42 taught steps on this disk.
+ *
  * `test/dial.test.ts`'s AC6 pair still passes unmodified, and the reason is worth knowing
  * rather than relying on: its fixture's never-taught files (`data/seed.bin`, `data/seed.json`,
  * `src/generated.ts`) happen to carry no withheld name. That is a property of the fixture, not
@@ -425,9 +433,22 @@ export function taughtFileWithheld(root: string, file: string): string | null {
  * the same three questions in its own words.
  */
 export function taughtReadRefusal(root: string, file: string): string | null {
+  return readRefusal(root, file, 'the reference repository');
+}
+
+/**
+ * The same gate for the LEARNER's copy of a taught file, in the learner's words: the check parses
+ * it and draws what it found (T-92's security review, N2), and the tutor already asks it of both
+ * trees. A learner's `config.ts` that is a link to their `.env`, or out of their folder, is not read.
+ */
+export function learnerReadRefusal(target: string, file: string): string | null {
+  return readRefusal(target, file, 'the folder you are building in');
+}
+
+function readRefusal(root: string, file: string, where: string): string | null {
   const abs = resolveInsideTarget(root, file);
-  if (abs === null) return 'points outside the reference repository';
-  if (!insideRealRoot(root, abs)) return 'leaves the reference repository through a symlink';
+  if (abs === null) return `points outside ${where}`;
+  if (!insideRealRoot(root, abs)) return `leaves ${where} through a symlink`;
   return taughtFileWithheld(root, file);
 }
 
@@ -452,13 +473,6 @@ function readReference(refRoot: string, file: string): ReferenceRead {
   if (!insideRealRoot(refRoot, abs)) {
     return { refused: `${label(file)} leaves the reference repository through a symlink, so there is nothing to copy from` };
   }
-  // T-92: WHAT the file is, the question containment never asks, here as in `reproduceFiles` and
-  // in the same place: after the two containment checks (an escape is reported as an escape) and
-  // before the file is opened, so a file in the category is refused without ever being read.
-  const withheld = taughtFileWithheld(refRoot, file);
-  if (withheld !== null) {
-    return { refused: `${label(file)} ${withheld}, so it is not read from the reference repository — write it yourself if you want it` };
-  }
   let bytes: Buffer;
   try {
     bytes = fs.readFileSync(abs);
@@ -470,6 +484,27 @@ function readReference(refRoot: string, file: string): ReferenceRead {
     return { refused: `${label(file)} is not UTF-8 text — a file like that is reproduced from the plan's reproduce list, never taught as a step` };
   }
   return { text };
+}
+
+/**
+ * `readReference` for a TAUGHT step's file (T-92): the same containment and the same read, and
+ * between them the name rule (`taughtFileWithheld`), asked of a contained path before it is opened.
+ * An escape is still reported as an escape, in `readReference`'s own words.
+ *
+ * A wrapper rather than a change to `readReference` on purpose: that function is also how code
+ * outside the walk reads one of the extension's OWN files by a relative name (T-22's re-plan engine
+ * carries earlier re-derived files from one derived tree into the next), and a file a model wrote
+ * there under a name like `src/auth.ts` is not a credentials file the build would withhold.
+ */
+function readTaughtReference(refRoot: string, file: string): ReferenceRead {
+  const abs = resolveInsideTarget(refRoot, file);
+  if (abs !== null && insideRealRoot(refRoot, abs)) {
+    const withheld = taughtFileWithheld(refRoot, file);
+    if (withheld !== null) {
+      return { refused: `${label(file)} ${withheld}, so it is not read from the reference repository — write it yourself if you want it` };
+    }
+  }
+  return readReference(refRoot, file);
 }
 
 // ── planning a write ────────────────────────────────────────────────────────────────────────
@@ -545,7 +580,7 @@ export function planWrite(
     return { refused: `${label(String(file))} points outside the folder you are building in — nothing was written` };
   }
 
-  const read = readReference(refRoot, file);
+  const read = readTaughtReference(refRoot, file);
   if ('refused' in read) return read;
 
   // Every `return` below that carries bytes goes through here and none may go around it: this
@@ -700,10 +735,17 @@ function boundShape(lines: string[]): string[] {
  */
 export function fileShape(refRoot: string, step: StepLike): FileShape {
   const file = step.target.file;
-  const read = readReference(refRoot, file);
   // T-92: the reason rides on the shape. An empty shape alone is drawn as "this file declares no
-  // imports and no load-bearing signatures", which is false of a file nobody read.
-  if ('refused' in read) return { signatures: [], imports: [], refused: read.refused };
+  // imports and no load-bearing signatures", which is false of a file nobody read. The sentences are
+  // the outline's own: the copy's ("nothing to copy from", "write it yourself") are not about it.
+  const gate = taughtReadRefusal(refRoot, file);
+  if (gate !== null) return { signatures: [], imports: [], refused: `No outline: ${label(file)} ${gate}, so it is not read.` };
+  const read = readReference(refRoot, file);
+  if ('refused' in read) {
+    const abs = resolveInsideTarget(refRoot, file);
+    const there = abs !== null && fs.existsSync(abs);
+    return { signatures: [], imports: [], refused: there ? `No outline: ${read.refused}.` : `No outline: ${label(file)} is not in the reference repository.` };
+  }
 
   const lines = read.text.split(/\r?\n/);
   const ranges = loadBearingOf(step);

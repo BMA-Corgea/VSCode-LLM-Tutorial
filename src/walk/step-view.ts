@@ -1069,15 +1069,6 @@ function shapeHtml(shape: NonNullable<StepViewState['shape']>): string {
 // ── the write note, and the reproduce offer (AC6) ──────────────────────────────────────────
 
 /**
- * What the dial just did to the learner's own file — refused to overwrite, kept theirs, wrote
- * over it — where the eye already is, in the run of the page rather than in a toast that has
- * since vanished (conventions.md: a surface that can have something to say, says it).
- *
- * Rendered only when there is really a sentence: unlike `#step-note` this node is not written
- * by the client script, so an always-present empty one would serve nobody and would put an
- * empty paragraph's margin under the dial on every ordinary step.
- */
-/**
  * T-92: why none of this tutorial's reference files are read, under the step's question, on
  * every step: it is the reason the dial writes nothing, the outline is empty, and Check my work
  * and Ask refuse, so it belongs above all of them rather than beside one. Drawn only when there
@@ -1088,6 +1079,15 @@ function referenceNoteHtml(note: unknown): string {
   return `<p class="reference-note" id="reference-note" role="note">${escapeHtml(planText(note))}</p>`;
 }
 
+/**
+ * What the dial just did to the learner's own file — refused to overwrite, kept theirs, wrote
+ * over it — where the eye already is, in the run of the page rather than in a toast that has
+ * since vanished (conventions.md: a surface that can have something to say, says it).
+ *
+ * Rendered only when there is really a sentence: unlike `#step-note` this node is not written
+ * by the client script, so an always-present empty one would serve nobody and would put an
+ * empty paragraph's margin under the dial on every ordinary step.
+ */
 function writeNoteHtml(note: unknown): string {
   if (typeof note !== 'string' || note === '') return '';
   return `<p class="write-note" id="write-note">${escapeHtml(planText(note))}</p>`;

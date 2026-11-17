@@ -562,7 +562,7 @@ suite('containment — a destination that leaves the target is refused, never cl
     const escape = step({ id: 'st-x-escape', ordinal: 9, kind: 'file', target: { file: '../../etc/passwd' } });
     // Empty, and since T-92 carrying why: an empty shape alone is drawn as "declares nothing".
     assert.deepEqual(fileShape(refRoot, escape), {
-      signatures: [], imports: [], refused: '../../etc/passwd points outside the reference repository, so there is nothing to copy from',
+      signatures: [], imports: [], refused: 'No outline: ../../etc/passwd points outside the reference repository, so it is not read.',
     });
   });
 });
@@ -696,7 +696,7 @@ suite('containment — a symlinked DIRECTORY, where the lexical check ends and t
     assert.match(refusalOf(planWrite(util, 'automated', refRoot, target, plan, core)), /reference repository/);
     // Empty, and since T-92 carrying why: no line of the secret reaches the panel, the reason does.
     assert.deepEqual(fileShape(refRoot, util), {
-      signatures: [], imports: [], refused: 'src/util.ts leaves the reference repository through a symlink, so there is nothing to copy from',
+      signatures: [], imports: [], refused: 'No outline: src/util.ts leaves the reference repository through a symlink, so it is not read.',
     }, 'the panel is a place to read the answer out of, so a refused read must not reach it either');
     assert.deepEqual(fs.readdirSync(target), [], 'nothing was written for a file we would not read');
   });
@@ -836,7 +836,7 @@ suite('fileShape — enough to know what to write, never the answer (AC2)', () =
     // Empty, and since T-92 carrying why, so the panel does not say the file "declares nothing".
     const shape = fileShape(refRoot, missing);
     assert.deepEqual([shape.signatures, shape.imports], [[], []]);
-    assert.match(shape.refused ?? '', /^the reference file src\/nowhere\.ts could not be read — ENOENT/);
+    assert.equal(shape.refused, 'No outline: src/nowhere.ts is not in the reference repository.');
   });
 });
 
