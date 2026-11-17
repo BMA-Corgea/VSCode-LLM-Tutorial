@@ -17,6 +17,7 @@
  */
 
 import * as assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -314,6 +315,75 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       undoSlowCheck?.();
       fs.rmSync(repo, { recursive: true, force: true });
       fs.rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  // ── T-141: what a stranger's first run says ───────────────────────────────────────────────────────
+
+  test('T-141: an idea typed without recreate is answered in the form\'s own words, and no ticket number is on the page', async () => {
+    let builds = 0;
+    const { page, read } = await open(() => { builds += 1; });
+    await fill(page, { idea: 'a chat app', recreate: false, repo: '', target: tmpDir('screen-t141-target-'), dial: 'manual' });
+    await press(page);
+    const after = await until(read, (s) => s.problems[0] !== '', 'the press answers under the idea field');
+    assert.match(after.problems[0] ?? '', /tick "Just recreate the repo as it stands"/, 'the line under the idea does not name the box to tick by its label');
+    const text = await screen.reader<string>(TITLE, 'document.body.innerText', page, gone)();
+    assert.doesNotMatch(text, /\bT-\d+\b/, `the Start form shows a ticket number: ${/\bT-\d+\b/.exec(text)?.[0] ?? ''}`);
+    assert.equal(builds, 0);
+  });
+
+  test('T-141: a build that ends while git has no name and email says so before the walk, with the two commands; with one, or with commits off, it does not', async () => {
+    const saved = { global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM };
+    const settings = vscode.workspace.getConfiguration('buildTutorials');
+    const withIdentity = path.join(tmpDir('screen-t141-gitconfig-'), 'gitconfig');
+    fs.writeFileSync(withIdentity, '[user]\n\tname = A Learner\n\temail = learner@example.com\n');
+    const built: BuildOutcome = { ok: true, plan: { chapters: [], steps: [] }, cost: { metered: false, usd: 0, inputTokens: 0, outputTokens: 0 } };
+    const { page, read } = await open((r) => { void runBuild(context, core, r, () => Promise.resolve(built)); });
+    /** One build to its ending, then the notifications once the walk is offered: the offer comes after the identity check. */
+    const endingOf = async (gitConfig: string, commitPerStep: boolean): Promise<string[]> => {
+      process.env.GIT_CONFIG_GLOBAL = gitConfig; // so git reads neither ~/.gitconfig nor its XDG file
+      process.env.GIT_CONFIG_NOSYSTEM = '1';
+      await settings.update('commitPerStep', commitPerStep, vscode.ConfigurationTarget.Global);
+      // The fixture's own condition: git, asked as the build asks it, sees exactly this identity or none.
+      const asked = spawnSync('git', ['config', 'user.name'], { cwd: tmpDir('screen-t141-ask-'), encoding: 'utf8' });
+      assert.equal(asked.stdout.trim(), gitConfig === withIdentity ? 'A Learner' : '', `git saw ${JSON.stringify(asked.stdout.trim())} as the name`);
+      // Nothing of the round before may be read as this one's: the centre is empty before the press.
+      await vscode.commands.executeCommand('notifications.clearAll');
+      const emptyBy = Date.now() + 5_000;
+      let leftOver = await centre();
+      while (leftOver.length > 0 && Date.now() < emptyBy) {
+        await vscode.commands.executeCommand('notifications.clearAll');
+        await sleep(200);
+        leftOver = await centre();
+      }
+      assert.deepEqual(leftOver, [], 'the notifications of the round before were still there');
+      await fill(page, validRequest());
+      await until(read, filled, 'the valid form shows no problems');
+      await press(page);
+      const deadline = Date.now() + 15_000;
+      let listed = await centre();
+      while (!listed.some((n) => n.includes('open the folder to start')) && Date.now() < deadline) {
+        await sleep(200);
+        listed = await centre();
+      }
+      assert.ok(listed.some((n) => n.includes('open the folder to start')), `the walk was never offered: ${JSON.stringify(listed)}`);
+      return listed;
+    };
+    const told = (listed: string[]): string | undefined => listed.find((n) => n.includes('git has no name and email set'));
+    try {
+      const first = await endingOf('/dev/null', true);
+      const none = told(first);
+      assert.ok(none !== undefined, `a build that ended with no git identity did not say so before the walk: ${JSON.stringify(first)}`);
+      assert.match(none, /git config --global user\.name "Your Name"/);
+      assert.match(none, /git config --global user\.email "you@example\.com"/);
+      const withOne = await endingOf(withIdentity, true);
+      assert.equal(told(withOne), undefined, `it said so with a git identity set: ${JSON.stringify(withOne)}`);
+      const commitsOff = await endingOf('/dev/null', false);
+      assert.equal(told(commitsOff), undefined, `it said so with per-step commits turned off: ${JSON.stringify(commitsOff)}`);
+    } finally {
+      if (saved.global === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved.global;
+      if (saved.nosystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM; else process.env.GIT_CONFIG_NOSYSTEM = saved.nosystem;
+      await settings.update('commitPerStep', undefined, vscode.ConfigurationTarget.Global);
     }
   });
 
