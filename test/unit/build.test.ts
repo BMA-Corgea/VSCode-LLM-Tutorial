@@ -572,7 +572,8 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     markerOf(target, request, liveElsewhere());
     const outcome = await buildFromRequest(request, baseContext()); // as if it had passed the press before the other build began
     assert.equal(outcome.ok, false);
-    assert.match(outcome.reason ?? '', /another build started in .* while this one was fetching the repository/);
+    // A local folder is not fetched: what this build was doing meanwhile is checking it (T-72's walk).
+    assert.equal(outcome.reason, `another build started in ${target} while this one was checking the repository — wait for it to finish, or pick an empty or new folder`);
     assert.equal(readMarker(target)?.id, 'another-window', "the other build's marker was overwritten or deleted");
   });
 
@@ -625,7 +626,7 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     const request = { ...requestFor(makeTsFixture(), target), repo: 'https://github.com/BMA-Corgea/fixture' };
     const outcome = await buildFromRequest(request, { ...baseContext(), globalStorageRoot: storage, git: fetchWhileAnotherFinishes });
     assert.equal(outcome.ok, false);
-    assert.match(outcome.reason ?? '', /another build finished a tutorial in .* while this one was fetching the repository/);
+    assert.equal(outcome.reason, `another build finished a tutorial in ${target} while this one was fetching and checking the repository — it is left as it is; pick an empty or new folder to build another`);
     assert.equal(fs.readFileSync(path.join(buildDir(target), 'plan.json'), 'utf8'), theirs, 'the finished tutorial was overwritten');
     assert.equal(readMarker(target), null, 'this build wrote its marker into a finished tutorial');
   });
@@ -690,6 +691,132 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     await assert.rejects(buildFromRequest(request, baseContext({ writeOps: full })), /ENOSPC/);
     assert.deepEqual(fs.readdirSync(target), [], 'a temp file or an empty build folder was left');
     assert.equal(validateRequest(request).problems.target, undefined, 'the form refuses the folder');
+  });
+
+  // ── T-72's check of the repository, merged with T-71 (the merge check, .autodev/reviews/T-72-merge-check.md) ──
+  // The walk of `.gitattributes` files takes as long as the repository does. It asks `isCancelled` before
+  // each folder, so a fake `isCancelled` is a moment DURING the walk: another window acts there.
+
+  /** A reference repo-tour must never read: its `.gitattributes` is a link to /dev/zero. Only `lstat`ed here. */
+  const hostileReference = (): string => {
+    const root = makeTsFixture();
+    fs.mkdirSync(path.join(root, '.git'));
+    fs.symlinkSync('/dev/zero', path.join(root, '.gitattributes'));
+    return root;
+  };
+  /** Every build of a hostile reference uses this: a check that lets it past fails the test, not the process. */
+  const noDigest = (): BuildCore => ({ ...realCore, digest: () => Promise.reject(new Error('T-72: the digest ran, past the check of the repository')) });
+  /** Another window's build in this folder, live, in its write: its marker, its request, an atomic write's temp file. */
+  const anotherWindowBuilds = (target: string, request: BuildRequest): void => {
+    markerOf(target, request, liveElsewhere());
+    fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify(request));
+    fs.writeFileSync(path.join(buildDir(target), 'plan.json.0123456789ab.tmp'), '{');
+  };
+  const itsFiles = [MARKER_FILE, 'plan.json.0123456789ab.tmp', 'request.json'];
+
+  test('T-72 merge check 1: a refused Resume of a marker from before ids leaves alone the live build another window started during the check', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(hostileReference(), target);
+    markerOf(target, request, {}); // a host from before T-71 died in this build: no id, no heartbeat
+    let calls = 0;
+    const duringTheCheck = (): boolean => {
+      if (++calls === 1) anotherWindowBuilds(target, request);
+      return false;
+    };
+    const outcome = await resumeIfMarked(target, { ...baseContext({ core: noDigest(), isCancelled: duringTheCheck }), confirm: () => Promise.resolve('Resume') });
+    assert.ok(calls >= 1, 'the fixture has to start the other build during the check');
+    assert.equal(readMarker(target)?.id, 'another-window', 'the refusal removed the marker of the live build another window started during the check');
+    assert.deepEqual(fs.readdirSync(buildDir(target)).sort(), itsFiles, "the refusal removed that build's own files");
+    assert.match(outcome?.reason ?? '', /^\.gitattributes is a link, which repo-tour would follow/);
+  });
+
+  test('T-72 merge check 1: nor does a Cancel during the check, in a folder whose marker from before ids is past its 6 hours', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, { startedAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() });
+    assert.equal(unfinishedBuildIn(target), 'build-again', 'the fixture has to be a folder the press builds in again');
+    let calls = 0;
+    const pressedDuringTheCheck = (): boolean => {
+      if (++calls === 1) anotherWindowBuilds(target, request);
+      return calls > 1;
+    };
+    const outcome = await buildFromRequest(request, baseContext({ core: noDigest(), isCancelled: pressedDuringTheCheck }));
+    assert.equal(readMarker(target)?.id, 'another-window', 'the Cancel removed the marker of the live build another window started during the check');
+    assert.deepEqual(fs.readdirSync(buildDir(target)).sort(), itsFiles, "the Cancel removed that build's own files");
+    assert.deepEqual(outcome, { ok: false, cancelled: true, reason: 'build cancelled while checking the repository' });
+  });
+
+  test('T-72 merge check 2: a live build another window starts while this one checks the repository is refused, not overwritten', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    let digests = 0;
+    const counted: BuildCore = { ...realCore, digest: (...args) => { digests += 1; return realCore.digest(...args); } };
+    let calls = 0;
+    const duringTheCheck = (): boolean => {
+      if (++calls === 1) markerOf(target, request, liveElsewhere());
+      return false;
+    };
+    const outcome = await buildFromRequest(request, baseContext({ core: counted, isCancelled: duringTheCheck }));
+    assert.equal(readMarker(target)?.id, 'another-window', "the other build's marker was overwritten by this build's first write");
+    assert.equal(readMarker(target)?.endedAt, undefined, "the other build's marker was marked as ended");
+    assert.equal(digests, 0, 'it went on to read the repository for a folder another build had taken');
+    assert.equal(outcome.reason, `another build started in ${target} while this one was checking the repository — wait for it to finish, or pick an empty or new folder`);
+  });
+
+  test('T-72 merge check 2: a tutorial another build finishes while this one checks the repository is left as it is', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    const theirs = JSON.stringify({ chapters: [{ id: 'theirs' }] });
+    let calls = 0;
+    const duringTheCheck = (): boolean => {
+      if (++calls === 1) {
+        fs.mkdirSync(buildDir(target), { recursive: true });
+        fs.writeFileSync(path.join(buildDir(target), 'plan.json'), theirs);
+      }
+      return false;
+    };
+    const outcome = await buildFromRequest(request, baseContext({ isCancelled: duringTheCheck }));
+    assert.equal(fs.readFileSync(path.join(buildDir(target), 'plan.json'), 'utf8'), theirs, 'the tutorial another build finished during the check was overwritten');
+    assert.equal(readMarker(target), null, 'this build wrote its marker into a finished tutorial');
+    assert.equal(outcome.reason, `another build finished a tutorial in ${target} while this one was checking the repository — it is left as it is; pick an empty or new folder to build another`);
+  });
+
+  test('T-72 merge check: a refusal or a Cancel during the check still removes the marker it was taking over, with an id or without', async () => {
+    const crashed = (): Partial<BuildMarker> => ({ id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+    const failed = (): Partial<BuildMarker> => ({ ...liveElsewhere(), id: 'failed', endedAt: new Date().toISOString() });
+    for (const [kind, fields] of [['from before ids', () => ({})], ['crashed, of this machine', crashed], ['failed', failed]] as const) {
+      for (const ending of ['refused', 'cancelled'] as const) {
+        const label = `a marker ${kind}, ${ending}`;
+        const target = tmpDir('build-tutorials-target-');
+        const request = requestFor(ending === 'refused' ? hostileReference() : makeTsFixture(), target);
+        markerOf(target, request, fields());
+        fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify(request));
+        let calls = 0;
+        const outcome = await resumeIfMarked(target, {
+          ...baseContext({ core: noDigest(), isCancelled: () => ending === 'cancelled' && ++calls > 1 }),
+          confirm: () => Promise.resolve('Resume'),
+        });
+        assert.equal(outcome?.ok, false, `${label}: the fixture has to be offered and resumed`);
+        assert.equal(outcome?.cancelled, ending === 'cancelled' ? true : undefined, `${label}: ${outcome?.reason}`);
+        assert.equal(readMarker(target), null, `${label}: the marker it was taking over was left, so every reload asks again`);
+        assert.deepEqual(fs.readdirSync(target), [], `${label}: the target has to be free again, or the next press is refused as "not empty"`);
+      }
+    }
+  });
+
+  test('T-72 merge check: a Cancel of a build whose folder a window from before ids took over leaves that marker alone', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    // As an extension from before T-71 writes it, in a window not reloaded since: no id, no heartbeat.
+    const theirs = { startedAt: new Date().toISOString(), phase: 'digest', request };
+    let cancelled = false;
+    const core: BuildCore = {
+      ...realCore,
+      digest: (...args) => { fs.writeFileSync(markerPath(target), JSON.stringify(theirs)); cancelled = true; return realCore.digest(...args); },
+    };
+    const outcome = await buildFromRequest(request, baseContext({ core, isCancelled: () => cancelled }));
+    assert.equal(outcome.cancelled, true, outcome.reason);
+    assert.equal(readMarker(target)?.startedAt, theirs.startedAt, 'the Cancel deleted a marker that was not its own, because it had no id to compare');
   });
 });
 

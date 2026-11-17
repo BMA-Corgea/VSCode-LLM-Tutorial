@@ -606,10 +606,23 @@ export function readFreshMarker(target: string, now: () => number = Date.now): B
   return marker;
 }
 
-function deleteMarker(target: string, id?: string): void {
-  // Never another build's marker (T-71 re-review R2): a build deletes only its own, or none at all.
+/**
+ * What a marker is known by: its id, or its start for one from before ids. The reload's prompt matches
+ * on it too (`resumeIfMarked`).
+ */
+function markerKey(marker: Pick<BuildMarker, 'id' | 'startedAt'>): string | undefined {
+  return marker.id ?? marker.startedAt;
+}
+
+/**
+ * Removes `whose` marker, and what that build left beside it, and only while the marker on disk is still
+ * that one. Never another build's (T-71 re-review R2). It used to compare ids only when both had one, so
+ * a marker from before ids, or a caller with none, deleted whatever marker was on disk when it ran: that
+ * of a build another window had started meanwhile (T-72 merge check).
+ */
+function deleteMarker(target: string, whose: Pick<BuildMarker, 'id' | 'startedAt'>): void {
   const there = readMarker(target);
-  if (there && id !== undefined && there.id !== undefined && there.id !== id) return;
+  if (there && markerKey(there) !== markerKey(whose)) return;
   try {
     if (there) fs.unlinkSync(markerPath(target));
   } catch {
@@ -746,7 +759,7 @@ export async function buildFromRequest(request: BuildRequest, ctx: BuildContext)
     if (left?.id === marker.id) {
       try { writeMarker(target, { ...marker, endedAt: new Date().toISOString() }, ctx.writeOps ?? realFsWriteOps); } catch { /* stale in 90 s */ }
     } else if (left === null) {
-      deleteMarker(target, marker.id);
+      deleteMarker(target, marker);
     }
     ctx.core.release?.(); // a refusal after the digest, a failure, a cancel: nothing may keep a worker alive
   }
@@ -756,7 +769,8 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   const target = request.target;
   const git = ctx.git ?? realGit;
   // Whether a finished plan was there as this build began, as for a Resume of a build that crashed
-  // just after writing it. Only a plan that appears DURING the fetch is another build's tutorial (R2).
+  // just after writing it. Only a plan that appears DURING the fetch or the walk is another build's
+  // tutorial (R2).
   const planBefore = planIn(target);
 
   let repoRoot: string;
@@ -789,34 +803,40 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return { ok: false, reason };
   }
 
-  // The folder is checked again just before this build's first write (T-71 re-review R2). A fetch can
-  // take minutes, and another window may have started a build in the same folder meanwhile, or
-  // finished one there.
+  const fromUrl = parseGithubUrl(request.repo) !== null;
+
+  // T-72: a .gitattributes repo-tour would read without end is refused here, before the digest and
+  // before this build's first write (src/start/gitattributes.ts). The walk stops at a Cancel. It takes
+  // as long as the repository does, so it comes BEFORE the check for another build below, which has to
+  // stay right beside the first write (T-72 merge check): with the walk between them, a marker or a plan
+  // another window wrote during it was overwritten.
+  ctx.onProgress?.('checking the repository…');
+  const hazard = await hazardousGitAttributes(repoRoot, ctx.isCancelled);
+  if (hazard === 'cancelled' || hazard) {
+    // The marker this build was about to take the folder from goes with it: the one a crash left (a
+    // Resume), a failed build's (a retry). Resuming can never make this file safe, and a marker left here
+    // asks again on every reload and leaves the target "not empty" for the next press (T-72 code review,
+    // finding 1). Read now, after the walk, and only one that is not running: a build another window
+    // started during the walk is that window's, and is left alone with everything beside it.
+    const there = readMarker(target);
+    if (there && !markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) deleteMarker(target, there);
+    if (hazard === 'cancelled') return cancel(target, 'while checking the repository');
+    return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard, fromUrl ? 'url' : 'folder') };
+  }
+
+  // The folder is checked again just before this build's first write (T-71 re-review R2), with nothing
+  // awaited in between. A fetch can take minutes, and so can the walk; another window may have started a
+  // build in the same folder meanwhile, or finished one there.
+  const meanwhile = fromUrl ? 'fetching and checking the repository' : 'checking the repository';
   const there = readMarker(target);
   // Positive evidence of another live build only. Every marker this version writes carries a
   // heartbeat (`runPhase`), so one without is from before T-71: the one a Resume is taking over, or
   // one the press already weighed (`unfinishedBuildIn`) before this build began.
   if (there && there.id !== marker.id && markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) {
-    return { ok: false, reason: `another build started in ${target} while this one was fetching the repository — wait for it to finish, or pick an empty or new folder` };
+    return { ok: false, reason: `another build started in ${target} while this one was ${meanwhile} — wait for it to finish, or pick an empty or new folder` };
   }
   if (!planBefore && planIn(target)) {
-    return { ok: false, reason: `another build finished a tutorial in ${target} while this one was fetching the repository — it is left as it is; pick an empty or new folder to build another` };
-  }
-
-  // T-72: a .gitattributes repo-tour would read without end is refused here, before the digest and
-  // before this build's first write (src/start/gitattributes.ts). The walk stops at a Cancel.
-  // Merging T-71: the marker on disk now is the one just checked above and found not to be another
-  // live build's: the one a crash left (a Resume), a failed build's (a retry), or none. A refusal, or
-  // a Cancel during this walk, removes exactly that one. Resuming can never make this file safe, and a
-  // marker left here asks again on every reload and leaves the target "not empty" for the next press
-  // (T-72 code review, finding 1); a Cancel later in the same Resume, after its first write, removes it
-  // too. Nothing else is touched: a marker that has appeared since carries another id.
-  ctx.onProgress?.('checking the repository…');
-  const hazard = await hazardousGitAttributes(repoRoot, ctx.isCancelled);
-  if (hazard === 'cancelled' || hazard) {
-    if (there) deleteMarker(target, there.id);
-    if (hazard === 'cancelled') return cancel(target, 'while checking the repository');
-    return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard, parseGithubUrl(request.repo) ? 'url' : 'folder') };
+    return { ok: false, reason: `another build finished a tutorial in ${target} while this one was ${meanwhile} — it is left as it is; pick an empty or new folder to build another` };
   }
 
   runPhase(target, marker, 'digest', ctx, true);
@@ -839,7 +859,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   const unsupported = detectUnsupportedLanguages(digestResult);
   if (unsupported) {
     const reason = languageRefusalMessage(repoRoot, unsupported);
-    deleteMarker(target, marker.id); // deterministic — resuming can never make an unsupported repo supported
+    deleteMarker(target, marker); // deterministic — resuming can never make an unsupported repo supported
     return { ok: false, reason };
   }
 
@@ -900,7 +920,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return fail(err);
   }
 
-  deleteMarker(target, marker.id); // success — nothing left to resume
+  deleteMarker(target, marker); // success — nothing left to resume
   return { ok: true, plan: interpreted.plan, cost: interpreted.cost };
 
   // The marker is deliberately LEFT on any of these failures (digest/buildPlan/interpretPlan/
@@ -928,7 +948,7 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     return { ok: false, reason: `${why} — it stopped and wrote nothing more; wait for any build there to finish, or pick an empty or new folder` };
   }
   function cancel(t: string, when: string): BuildOutcome {
-    deleteMarker(t, marker.id); // an explicit user cancel — not a crash — so there is nothing to resume
+    deleteMarker(t, marker); // an explicit user cancel — not a crash — so there is nothing to resume
     return { ok: false, cancelled: true, reason: `build cancelled ${when}` };
   }
 }
@@ -1001,9 +1021,9 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
   // The answer can come long after the question (review F1): a build may have started there since,
   // here or in another window. Then neither resume nor discard: that build owns the folder now.
   const current = readMarker(target);
-  if (!current || (current.id ?? current.startedAt) !== (marker.id ?? marker.startedAt) || running(current)) return undefined;
+  if (!current || markerKey(current) !== markerKey(marker) || running(current)) return undefined;
   if (answer === 'Discard') {
-    deleteMarker(target, marker.id);
+    deleteMarker(target, marker);
     return undefined;
   }
   if (answer !== 'Resume') return undefined; // dismissed — leave the marker for next time

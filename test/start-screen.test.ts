@@ -182,6 +182,13 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     return assert.fail(`no Cancel button on the progress notification (saw ${JSON.stringify(await screen.notifications())})`);
   }
 
+  /** Waits until the build has said `line` on its progress notification. */
+  async function untilSaid(said: ReadonlyArray<{ line: string }>, line: string, ms: number): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!said.some((s) => s.line === line) && Date.now() < deadline) await sleep(20);
+    assert.ok(said.some((s) => s.line === line), `the build never said "${line}": it said ${JSON.stringify(said.map((s) => s.line))}`);
+  }
+
   async function until(read: () => Promise<Snap>, ok: (s: Snap) => boolean, what: string, ms = 10_000): Promise<Snap> {
     const deadline = Date.now() + ms;
     let now = await read();
@@ -241,11 +248,21 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     }
     const target = tmpDir('screen-t30-target-');
     const outcomes: BuildOutcome[] = [];
+    // What the build says on its progress notification, and when (the same calls that draw it).
+    const said: Array<{ line: string; at: number }> = [];
+    // T-72: before the read, the build checks the repository's folders (src/start/gitattributes.ts), and
+    // a Cancel that lands there stops the check, not the read (the merge check's screen run, 2026-11-11:
+    // "build cancelled while checking the repository"). The check is made slow here, so that a Cancel
+    // pressed before the read has begun lands in it every time. It runs on this thread, so a slower
+    // `fs.promises.readdir` slows it; the read runs on its own thread, with its own `fs`, at its own speed.
+    const promises = fs.promises as unknown as { readdir: (...args: unknown[]) => Promise<unknown> };
+    const realReaddir = promises.readdir;
+    promises.readdir = async (...args: unknown[]): Promise<unknown> => { await sleep(15); return realReaddir.apply(fs.promises, args); };
     try {
       const request: BuildRequest = { idea: '', recreate: true, repo, target, dial: 'manual' };
       const { page, read } = await open((r) => {
         void runBuild(context, core, r, async (rr, ctx) => {
-          const outcome = await buildFromRequest(rr, ctx);
+          const outcome = await buildFromRequest(rr, { ...ctx, onProgress: (line) => { said.push({ line, at: Date.now() }); ctx.onProgress?.(line); } });
           outcomes.push(outcome);
           return outcome;
         });
@@ -255,16 +272,22 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       await press(page);
       const building = await until(read, (s) => s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
 
-      // The real button, the moment it can be pressed: the read has only just begun.
+      // The real button, as soon as the read has begun.
+      await untilSaid(said, 'reading the repository…', 60_000);
       const pressedAt = await pressCancel();
       const cancelled = await until(read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back', 60_000);
       const tookMs = Date.now() - pressedAt;
+      promises.readdir = realReaddir;
       console.log(`T-30 AC3 measured: Cancel to the button back ${tookMs} ms`);
 
       assert.ok(tookMs <= STALL_BOUND_MS, `the Cancel took ${tookMs} ms to land, past the bound of ${STALL_BOUND_MS} ms`);
       assert.notDeepEqual(cancelled, building, 'the press has to change what is on screen');
       assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
       assert.equal(outcomes[0]?.reason, 'build cancelled while reading the repository');
+      // The fixture's own condition: the check outlasted a press, so a Cancel pressed early lands in it.
+      const checking = said.find((s) => s.line === 'checking the repository…')?.at ?? Number.NaN;
+      const reading = said.find((s) => s.line === 'reading the repository…')?.at ?? Number.NaN;
+      assert.ok(reading - checking >= 2_000, `the check took ${reading - checking} ms: too short to stand for a large repository's`);
       const listed = await centre();
       assert.ok(listed.some((n) => n.includes('build cancelled while reading the repository')), 'the notification says it was cancelled, and when');
       assert.deepEqual(listed.filter((n) => n.includes('Cancel')), [], 'the progress notification and its Cancel button should be gone');
@@ -282,6 +305,7 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
       assert.equal(outcomes.length, 2);
       assert.equal(outcomes[1]?.cancelled, undefined);
     } finally {
+      promises.readdir = realReaddir;
       fs.rmSync(repo, { recursive: true, force: true });
       fs.rmSync(target, { recursive: true, force: true });
     }
