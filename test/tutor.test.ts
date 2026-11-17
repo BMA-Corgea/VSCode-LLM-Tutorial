@@ -95,6 +95,7 @@ import { getTranscript } from '../src/tutor/transcript.js';
 import type { WalkSession } from '../src/walk/session.js';
 import { loadPlan, loadProgress } from '../src/walk/store.js';
 import { writeFixtureTarget } from './unit/walk-fixtures.js';
+import { recordBuiltHere } from './support/built-here.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
 
@@ -176,7 +177,7 @@ const REFERENCE_FILES = ['src/parse.ts', 'src/api/routes.ts', 'src/api/render.ts
  * The author's copy of `src/parse.ts` is the learner's plus `AUTHOR_ONLY_LINE`, so the diff is
  * non-empty, small, and has something in it a test can name.
  */
-function newTutorial(): { target: string; refRoot: string } {
+async function newTutorial(): Promise<{ target: string; refRoot: string }> {
   const target = tmpDir('tutor-test-target-');
   writeFixtureTarget(target);
 
@@ -192,6 +193,8 @@ function newTutorial(): { target: string; refRoot: string } {
     path.join(target, '.repo-tour', 'build', 'request.json'),
     `${JSON.stringify({ idea: '', recreate: true, repo: refRoot, referenceRoot: refRoot, target, dial: 'manual' }, null, 2)}\n`,
   );
+  // T-92: what the Start build records, or the walk rightly reads no reference for this request.
+  await recordBuiltHere(target, refRoot);
   return { target, refRoot };
 }
 
@@ -426,7 +429,7 @@ suite('AC1/AC2 — the answer lands in the panel and on disk, under the step it 
   teardown(teardownTutor);
 
   test('a question asked in the REGISTERED panel comes back as a turn, in the state and in progress.json', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     const { calls, core } = await recordingCore('Because the router would otherwise have two jobs.');
     await useCore(core);
@@ -453,7 +456,7 @@ suite('AC1/AC2 — the answer lands in the panel and on disk, under the step it 
   });
 
   test('switching steps switches transcripts, and coming back restores', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     await useCore((await recordingCore('The parser stays one job.')).core);
 
@@ -514,7 +517,7 @@ suite('AC3 — the prompt is the core\'s own, and the step is really in it', () 
    * is a claim about the prompt that ships and not about a fake agreeing with itself.
    */
   test('the runner receives this step\'s question, the author\'s option and the learner\'s real diff', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     const { calls, core } = await recordingCore('Because a tokenizer has one job.');
     await useCore(core);
@@ -556,7 +559,7 @@ suite('AC3 — the prompt is the core\'s own, and the step is really in it', () 
    * every refusal is what leaves a minute of somebody's typing where they left it.
    */
   test('a refusal leaves no accepted-question marker on the page, and a real ask leaves one', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     const { core } = await recordingCore('Because a tokenizer has one job.', { ok: false, detail: 'claude: not found on PATH' });
     await useCore(core);
@@ -593,7 +596,7 @@ suite('a chapter\'s own directory is not something to send (security review, fin
   teardown(teardownTutor);
 
   test('a `shape` step\'s ask carries no diff of the tree, and nothing the learner ignored', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     // The two files the reviewer's run leaked, written the way a learner really would: named
     // in their own `.gitignore`, inside the chapter the step is about.
     fs.writeFileSync(path.join(target, '.gitignore'), 'src/.env\nsrc/scratch.txt\n');
@@ -620,7 +623,7 @@ suite('a chapter\'s own directory is not something to send (security review, fin
   test('the file steps in that same chapter still get their real diff', async () => {
     // The control, and the reason the test above is not just "the tutor stopped working":
     // the refusal is about what the target IS, not about this chapter or this reference tree.
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     const { calls, core } = await recordingCore('Because a tokenizer has one job.');
     await useCore(core);
@@ -650,7 +653,7 @@ suite('nothing in this file can reach a model', () => {
    * this sentence, went through their injected runner and nowhere near a CLI.
    */
   test('the spend guard is armed: the session\'s only route to a provider is core.runLlm', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     await useCore(await coreWith());
     await goTo(session, STEPS.file);
@@ -696,7 +699,7 @@ suite('AC4 — an unreachable provider is answered in the provider\'s own words'
    * controls are read off the ELEMENTS of the page that is really on screen.
    */
   test('the panel shows the provider\'s reason, offers Ask rather than Cancel, and never spent a thing', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     const { calls, core } = await recordingCore('this answer must never be reached');
     const real = await realCore();
@@ -736,7 +739,7 @@ suite('AC4 — an unreachable provider is answered in the provider\'s own words'
   });
 
   test('the learner\'s question is not recorded, because nothing was asked and nothing was charged', async () => {
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     const real = await realCore();
     await useCore(await coreWith({ availability: (id) => real.availability(id) }));
@@ -782,7 +785,7 @@ suite('AC5 — a reply renders as text, and a fence is the only markup it can pr
       'Angle brackets are ordinary: Array<T> & Map<K, V>.',
     ].join('\n');
 
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     await useCore((await recordingCore(payload)).core);
     await goTo(session, STEPS.file);
@@ -833,7 +836,7 @@ suite('a cancelled ask stops waiting, and its answer never arrives afterwards', 
    */
   test('the spinner goes at once, the panel says the model is still finishing, and the late answer lands nowhere', async () => {
     const answer = gate();
-    const { target } = newTutorial();
+    const { target } = await newTutorial();
     const { session, panel } = await openWalk(target);
     await useCore(await coreWith({ runLlm: () => answer.promise }));
     await goTo(session, STEPS.file);
