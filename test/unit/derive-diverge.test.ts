@@ -563,6 +563,28 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.deepEqual(second.staleDependents, ['s-render'], 'render.ts imports routes.ts, and D writes routes.ts now');
   });
 
+  test('a walked symbol step of a file another step writes now anchors nothing of it: a press upstream still rewrites the file', async () => {
+    const plan = repoPlan();
+    plan.steps = plan.steps.map((s) => (s.id === 's-status' ? { ...s, decision: { ...s.decision, options: options() } } : s));
+    const { root, gs, target } = setup();
+    // At s-status, s-handle comes first in plan order: walked, it is kept and taken over with the file step.
+    const first = await divergePlan(input(plan, root, 's-status', 'alt-1', walkedAt(plan, 's-status')), depsFor(model().run, gs, target));
+    if (!first.ok || !first.changed) assert.fail(first.ok ? 'nothing changed' : first.reason);
+    assert.equal(takenOverBy(first.plan, stepNamed(first.plan, 's-handle')!)?.id, 's-status', 'discriminates: the walked symbol step was taken over');
+    const out = await divergePlan(input(first.plan, root, 's-parse', 'alt-1', walkedAt(first.plan, 's-parse', ['s-handle']), treeOf(first)), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(fileWriters(out.plan).get('src/api/routes.ts')?.derivedFrom, 's-parse', 'routes.ts was rewritten: the walked symbol step stood on the author\'s file, not on the code that replaced it');
+    assert.equal(content(stepNamed(out.plan, 's-handle')), content(stepNamed(first.plan, 's-handle')), 'and, walked, it is kept as it was');
+  });
+
+  test('D never stands on a step at its own file, even in a plan that had it standing on the file step it took over', async () => {
+    const { root, gs, target, first } = await symbolPress();
+    const old = { ...first.plan, steps: first.plan.steps.map((s) => (s.id === 's-handle' ? { ...s, dependsOn: ['s-routes'] } : s)) };
+    const out = await divergePlan(input(old, root, 's-handle', 'author', walkedAt(old, 's-handle'), treeOf(first)), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.deepEqual(stepNamed(out.plan, 's-handle')?.dependsOn, [], `D stands on no step at routes.ts: ${JSON.stringify(stepNamed(out.plan, 's-handle')?.dependsOn)}`);
+  });
+
   // The stopped re-review's NF3: a step downstream of D that a walked step stands on is kept, on the old road, and it was
   // named nowhere: the landing said "No later step needed re-planning".
   test('a step kept on the old road only because a walked step stands on it is recorded beside the walked ones', async () => {

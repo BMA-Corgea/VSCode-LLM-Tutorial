@@ -124,9 +124,9 @@ function fileStepOf(d: StepLike, writers: ReadonlyMap<string, StepLike>): StepLi
  * The plan as a graph over step ids, with the edge from each file to its chapter's shape step.
  *
  * One writer per file (the re-review of the fixes, R3, ruled 2026-11-11): a step that stands on a step whose file has
- * been taken over stands on that file, which its writer holds now, so the edge goes to the writer. The writer does not
- * stand on the steps it took over: it replaced their code. The taken-over steps keep their own edges, which is what
- * they stood on when the learner walked them.
+ * been taken over stands on that file, which its writer holds now, so the edge goes to the writer. A step at that same
+ * file keeps its edge: a taken-over step stands on what it stood on when the learner walked it, and so anchors nothing
+ * of the code that replaced it.
  */
 function graphOf(steps: readonly StepLike[], writers: ReadonlyMap<string, StepLike>): GraphNode[] {
   const shapeOf = new Map(steps.filter((s) => s.kind === 'shape').map((s) => [s.chapter, s.id] as const));
@@ -135,8 +135,8 @@ function graphOf(steps: readonly StepLike[], writers: ReadonlyMap<string, StepLi
     const to = byId.get(id);
     const writer = to === undefined ? undefined : takenOverIn(writers, to);
     if (to === undefined || writer === undefined) return [id];
-    if (from.kind !== 'shape' && from.target.file === to.target.file) return from.id === writer.id ? [] : [id];
-    return writer.id === from.id ? [] : [writer.id];
+    if (from.kind !== 'shape' && from.target.file === to.target.file) return [id];
+    return [writer.id];
   };
   return steps.map((s) => {
     const shape = s.kind === 'file' ? shapeOf.get(s.chapter) : undefined;
@@ -373,7 +373,8 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
 
     if (ownFile !== null) {
       deps.onProgress?.(`writing ${ownFile}…`);
-      const fileDeps = owner.dependsOn.flatMap((id) => { const dep = byId.get(id); return dep?.kind === 'file' ? [dep] : []; });
+      // What D's file stood on, never a step at D's own file (see `dEdges` below).
+      const fileDeps = owner.dependsOn.flatMap((id) => { const dep = byId.get(id); return dep?.kind === 'file' && dep.target.file !== ownFile ? [dep] : []; });
       const dependencies: DependencyForPrompt[] = fileDeps.map((dep) => ({ ...decisionOf(dep, roadOf(dep)), ...shownContent(dep.target.file, written, contentOf) }));
       const refused = await writeFile(ownFile, `derive:code:${d.id}`, shapeDecision(d.chapter), { ...decisionOf(d, answer), path: ownFile }, dependencies, new Set(fileDeps.map((dep) => dep.target.file)));
       if (refused !== null) return fail(refused.refused);
@@ -424,14 +425,12 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const freshAtFile = new Map(merged.fresh.filter((f) => f.node.kind === 'file').map((f) => [f.node.path, f.id] as const));
     // At a symbol press D writes its file from now on, so it stands on what the file's step stood on, whether that step
     // went with the file (MF3) or stays, walked, taken over (R3). It never stands on a step at its own file: it replaced
-    // their code. An edge to a step whose file was taken over names the step that writes the file now.
-    const dEdges = [...new Set((owner.id === d.id ? d.dependsOn : owner.dependsOn).flatMap((id) => {
+    // their code (a plan written before one writer per file has D standing on the file step it took over).
+    const dEdges = [...new Set(owner.dependsOn.flatMap((id) => {
       const dep = byId.get(id);
       if (dep !== undefined && dep.kind !== 'shape' && dep.target.file === ownFile) return [];
-      const live = dep === undefined ? id : takenOverIn(writers, dep)?.id ?? id;
-      if (!replaced.has(live)) return live === d.id ? [] : [live];
-      const gone = byId.get(live);
-      const now = gone === undefined || gone.kind === 'shape' ? undefined : freshAtFile.get(gone.target.file);
+      if (!replaced.has(id)) return id === d.id ? [] : [id];
+      const now = dep === undefined || dep.kind === 'shape' ? undefined : freshAtFile.get(dep.target.file);
       return now === undefined || now === d.id ? [] : [now];
     }))];
     const answered: StepLike = {

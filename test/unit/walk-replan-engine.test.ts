@@ -290,6 +290,17 @@ suite('one writer per file after a symbol press, through the walk and the real e
     assert.doesNotMatch(notes, /may need revisiting/, 'revisiting it would do nothing: it writes nothing for the file now');
   });
 
+  test('on another step\'s page a walked file step that was taken over is named with the step that writes its file now', async () => {
+    const h = harness(at('s-routes'), scriptedModel().run, 'automated');
+    await drain(h);
+    await symbolPress(h);
+    h.session.goTo('s-parse'); await drain(h);
+    h.session.choose('s-parse', 'alt-1'); await drain(h);
+    assert.match(h.view().choiceNote ?? '', /^Re-planned/, `discriminates: it landed: ${JSON.stringify(h.view().choiceNote ?? null)}`);
+    const notes = h.notes();
+    assert.match(notes, /step \d+ \(src\/api\/routes\.ts, written at step \d+ now\)/, `the walked file step is named with where its file is written now: ${JSON.stringify(notes)}`);
+  });
+
   test('a press upstream after a symbol press asks about the file once, and lands with one step left for it', async () => {
     const m = scriptedModel();
     const h = harness(at('s-routes'), m.run, 'manual');
