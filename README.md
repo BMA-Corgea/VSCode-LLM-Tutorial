@@ -43,8 +43,9 @@ report in plain sentences, never a stack trace.
 
 - **What do you want to build?** — an idea, in your own words.
 - **Just recreate the repo as it stands** — the mode that is built today. Typing an idea
-  without ticking this says so, right under the field: *"Idea-first builds arrive with T-9 —
-  tick recreate to build from a repo."* Never a silent decline.
+  without ticking this says so, right under the field: *Building from an idea is not available
+  yet — tick "Just recreate the repo as it stands" and give a reference repo* — never a silent
+  decline.
 - **Reference repo** — a local absolute path, or a `https://github.com/<owner>/<repo>` URL. A
   URL is cloned in full (the witness needs history) and reused with `git fetch` next time. A
   repo whose source is outside the four languages the shipped grammars cover is refused,
@@ -222,7 +223,10 @@ you actually made. The folder is `git init`ed if it needs to be.
 
 **The commits are yours, not the extension's.** They use that folder's own git identity, and if
 none is configured no commit is made and the panel says so — this will never invent an author
-or borrow one. Turn it off with `buildTutorials.commitPerStep`.
+or borrow one. You hear of it before the first step: when git lacks your name or email as the
+plan is built, the build's ending says so, with the two commands that set them
+(`git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`).
+Nothing runs them for you. Turn commits off with `buildTutorials.commitPerStep`.
 
 ---
 
