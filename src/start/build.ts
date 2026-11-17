@@ -834,6 +834,11 @@ export interface BuildContext {
 export interface BuildOutcome {
   ok: boolean;
   cancelled?: boolean;
+  /**
+   * The reload's Resume looked and did nothing (T-120): what it found, or the answer it was given, no longer fit
+   * the folder. `reason` says why, as information: a control that declines in silence is a broken control.
+   */
+  declined?: boolean;
   plan?: BuildPlanLike;
   cost?: InterpretCostLike;
   /** set on a refusal or an error — the same text `onProblem` (panel wiring) shows in the form. */
@@ -1169,6 +1174,11 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
   // is alive while it closes, beating as it goes. Wait for that host to go before deciding. Not for a
   // pid this process itself has, which would never go.
   const closing = (m: BuildMarker): boolean => m.pid !== process.pid && markerHostAlive(m as unknown as Record<string, unknown>);
+  /** Where a build that reads as running is, for the words (T-120): this window, another machine, or another window. */
+  const runningWhere = (m: BuildMarker): string => (BUILDING_NOW.has(path.resolve(target))
+    ? 'in this window'
+    : typeof m.host === 'string' && m.host !== os.hostname() ? 'on another machine' : 'in another window');
+  const declined = (reason: string): BuildOutcome => ({ ok: false, declined: true, reason });
   // The marker is read again at every poll: a build that ends, goes or changes hands while this waits
   // decides it at once (the check's note), and so does a Cancel of the progress this runs under.
   if (running(marker) && closing(marker)) {
@@ -1178,22 +1188,25 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
       await new Promise((resolve) => setTimeout(resolve, HOST_EXIT_POLL_MS));
       waitingOn = readFreshMarker(target, ctx.now ?? Date.now);
     }
-    if (ctx.isCancelled?.()) return undefined;
+    if (ctx.isCancelled?.()) return undefined; // the learner's own Cancel: nothing to say
     marker = readFreshMarker(target, ctx.now ?? Date.now);
-    if (!marker) return undefined;
+    if (!marker) return declined(`the build in ${target} ended while this window waited for it, so there is nothing to resume`);
   }
-  if (running(marker)) return undefined;
+  if (running(marker)) return declined(`a build in ${target} is running ${runningWhere(marker)}, so it is not offered here`);
 
   const answer = await ctx.confirm(`A build for ${target} was interrupted (in progress: ${marker.phase}). Resume it?`);
+  if (answer !== 'Resume' && answer !== 'Discard') return undefined; // dismissed — leave the marker for next time
   // The answer can come long after the question (review F1): a build may have started there since,
-  // here or in another window. Then neither resume nor discard: that build owns the folder now.
+  // here or in another window. Then neither resume nor discard: that build owns the folder now. Said, not
+  // done in silence (T-120).
   const current = readMarker(target);
-  if (!current || markerKey(current) !== markerKey(marker) || running(current)) return undefined;
+  if (!current) return declined(`the build in ${target} was discarded or finished in another window since you were asked, so nothing was done`);
+  if (markerKey(current) !== markerKey(marker)) return declined(`another build started in ${target} since you were asked, so nothing was done`);
+  if (running(current)) return declined(`the build in ${target} started running again since you were asked, so nothing was done`);
   if (answer === 'Discard') {
     deleteMarker(target, marker);
     return undefined;
   }
-  if (answer !== 'Resume') return undefined; // dismissed — leave the marker for next time
 
   // Every finished interpretation is cached by content hash, so re-running from the start —
   // simpler and more honest than trying to resume mid-phase — is cheap, not wasteful.

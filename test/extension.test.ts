@@ -144,6 +144,8 @@ interface CountingDeps extends ResumeDeps {
   loadCoreCalls: number;
   progressCalls: number;
   confirmed: string[];
+  /** What the reload said when it declined (T-120). */
+  told: string[];
 }
 
 function countingDeps(answer: 'Resume' | 'Discard' | undefined): CountingDeps {
@@ -151,6 +153,8 @@ function countingDeps(answer: 'Resume' | 'Discard' | undefined): CountingDeps {
     loadCoreCalls: 0,
     progressCalls: 0,
     confirmed: [],
+    told: [],
+    tell: (message: string) => { deps.told.push(message); },
     loadCore: () => { deps.loadCoreCalls++; return Promise.resolve(fakeCore()); },
     withProgress: (task) => {
       deps.progressCalls++;
@@ -225,6 +229,22 @@ suite('resumeOnActivate (T-3 rework, review finding 1)', () => {
       context.workspaceState.get<string>(CURRENT_BUILD_KEY), target,
       'and so keeps the bookmark pointing at it',
     );
+  });
+
+  test('T-120: a build running on another machine is not offered, and the reload says why, through its own seam', async () => {
+    const target = tmpDir('resume-running-elsewhere-');
+    const marker = writeMarkerAt(target, 60 * 1000);
+    // Another machine's build, beating now: running, and not a host this one can wait for.
+    fs.writeFileSync(markerPath(target), JSON.stringify({ ...marker, id: 'elsewhere', pid: 4242, host: 'another-machine', heartbeatAt: new Date().toISOString() }, null, 2));
+    await context.workspaceState.update(CURRENT_BUILD_KEY, target);
+    const deps = countingDeps('Resume');
+
+    await resumeOnActivate(context, deps);
+
+    assert.equal(deps.confirmed.length, 0, 'the prompt was shown for a build that is running');
+    assert.deepEqual(deps.told, [`Build Tutorials: a build in ${target} is running on another machine, so it is not offered here`], 'the reload declined in silence');
+    assert.equal(readMarker(target)?.id, 'elsewhere', 'its marker was touched');
+    assert.equal(context.workspaceState.get<string>(CURRENT_BUILD_KEY), target, 'and the bookmark stays, as the marker does');
   });
 
   test('Discard removes the marker AND clears the key', async () => {

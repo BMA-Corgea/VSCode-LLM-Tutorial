@@ -372,25 +372,31 @@ suite('the write-ahead marker (AC4)', () => {
   });
 
   test('T-71 review F1: a Resume or a Discard answered after a build has started there since does nothing to it', async () => {
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    let digests = 0;
-    const counted: BuildCore = { ...realCore, digest: async (...args) => { digests += 1; await gate; return realCore.digest(...args); } };
-    const target = tmpDir('build-tutorials-target-');
-    const request = requestFor(makeTsFixture(), target);
-    fs.mkdirSync(path.dirname(markerPath(target)), { recursive: true });
-    fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'interpret', request }));
+    // Each answer has its own folder, gate and count (T-120): sharing them, the first answer's build finished and
+    // removed the marker, so the Discard was never asked, and this passed for it without testing it.
     for (const answer of ['Resume', 'Discard'] as const) {
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let digests = 0;
+      const counted: BuildCore = { ...realCore, digest: async (...args) => { digests += 1; await gate; return realCore.digest(...args); } };
+      const target = tmpDir('build-tutorials-target-');
+      const request = requestFor(makeTsFixture(), target);
+      fs.mkdirSync(path.dirname(markerPath(target)), { recursive: true });
+      fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'interpret', request }));
       let answerNow: (() => void) | undefined;
       const asked = new Promise<void>((resolve) => { answerNow = resolve; });
-      const prompt = resumeIfMarked(target, { ...baseContext({ core: counted }), confirm: async () => { await asked; return answer; } });
+      let prompted = 0;
+      const prompt = resumeIfMarked(target, { ...baseContext({ core: counted }), confirm: async () => { prompted += 1; await asked; return answer; } });
       const fromTheForm = buildFromRequest(request, baseContext({ core: counted })); // pressed while the prompt is open
       await new Promise((resolve) => setTimeout(resolve, 50));
       const theirs = readMarker(target)?.startedAt;
       answerNow?.();
-      assert.equal(await prompt, undefined, `${answer} after a build started there must do nothing`);
+      // T-120: nothing done, and said: the folder is that build's now.
+      assert.deepEqual(await prompt, { ok: false, declined: true, reason: `another build started in ${target} since you were asked, so nothing was done` },
+        `${answer} after a build started there must do nothing, and say why`);
+      assert.equal(prompted, 1, `${answer}: the fixture has to ask`);
       assert.equal(readMarker(target)?.startedAt, theirs, `${answer} touched the running build's marker`);
-      assert.equal(digests, answer === 'Resume' ? 1 : 2, 'only the form\'s builds ran');
+      assert.equal(digests, 1, 'only the form\'s build ran');
       release?.();
       await fromTheForm;
     }
@@ -447,7 +453,7 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     let asked = 0;
     // Its host is alive and stays alive: not a closing one (re-check N1), so after the wait, still not offered.
     const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Discard'); }, hostExitWaitMs: 300 });
-    assert.equal(outcome, undefined);
+    assert.deepEqual(outcome, { ok: false, declined: true, reason: `a build in ${target} is running in another window, so it is not offered here` }); // T-120: said
     assert.equal(asked, 0, 'the prompt was shown for a build that is running in another window');
     assert.equal(readMarker(target)?.id, 'another-window', "the other window's marker was touched");
   });
@@ -587,7 +593,7 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
         ...baseContext({ onPhase: (p) => { phases.push(p); } }),
         confirm: () => { markerOf(target, request, liveElsewhere()); return Promise.resolve(answer); },
       });
-      assert.equal(outcome, undefined, `${answer}: acted on a folder another window's build had taken`);
+      assert.deepEqual(outcome, { ok: false, declined: true, reason: `another build started in ${target} since you were asked, so nothing was done` }, `${answer}: acted on a folder another window's build had taken, or said nothing`);
       assert.deepEqual(phases, [], `${answer}: a second build ran there`);
       assert.equal(readMarker(target)?.id, 'another-window', `${answer}: the other window's marker was touched`);
     }
@@ -605,7 +611,7 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
       confirm: () => { asked += 1; markerOf(target, request, { ...elsewhere, heartbeatAt: new Date().toISOString() }); return Promise.resolve('Discard'); },
     });
     assert.equal(asked, 1, 'a build silent for 10 minutes on another machine should be offered');
-    assert.equal(outcome, undefined);
+    assert.deepEqual(outcome, { ok: false, declined: true, reason: `the build in ${target} started running again since you were asked, so nothing was done` }); // T-120: said
     assert.equal(readMarker(target)?.id, 'on-a-laptop', 'Discard deleted the marker of a build that had just beaten again');
   });
 
@@ -883,6 +889,80 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     const outcome = await buildFromRequest(request, baseContext({ core, isCancelled: () => cancelled }));
     assert.equal(outcome.cancelled, true, outcome.reason);
     assert.equal(readMarker(target)?.startedAt, theirs.startedAt, 'the Cancel deleted a marker that was not its own, because it had no id to compare');
+  });
+});
+
+// ── T-120: a Resume or a Discard the reload declines says why ────────────────────────────────────
+
+suite('T-120: a reload that declines to resume or discard says why', () => {
+  const DEAD_PID = 2 ** 22 + 54_321;
+  const markerOf = (target: string, request: BuildRequest, fields: Partial<BuildMarker>): void => {
+    fs.mkdirSync(path.dirname(markerPath(target)), { recursive: true });
+    fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'interpret', request, ...fields }));
+  };
+  const liveElsewhere = (): Partial<BuildMarker> => ({ id: 'another-window', pid: process.ppid, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date().toISOString() });
+  /** A build of this machine whose host is gone: offered at once. */
+  const crashed = (): Partial<BuildMarker> => ({ id: 'crashed', pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace(), heartbeatAt: new Date(Date.now() - 600_000).toISOString() });
+
+  test('AC1: a build another window is running is not offered, and the reload says so', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    markerOf(target, requestFor(makeTsFixture(), target), liveElsewhere());
+    let asked = 0;
+    const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Resume'); }, hostExitWaitMs: 300 });
+    assert.equal(asked, 0, 'the prompt was shown for a build another window is running');
+    assert.deepEqual(outcome, { ok: false, declined: true, reason: `a build in ${target} is running in another window, so it is not offered here` }, 'the reload declined in silence');
+    assert.equal(readMarker(target)?.id, 'another-window');
+  });
+
+  test('AC2: a build that ends while the reload waits for its host leaves nothing to resume, and the reload says so', async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    markerOf(target, requestFor(makeTsFixture(), target), liveElsewhere());
+    setTimeout(() => { fs.rmSync(markerPath(target), { force: true }); }, 300);
+    let asked = 0;
+    const outcome = await resumeIfMarked(target, { ...baseContext(), confirm: () => { asked += 1; return Promise.resolve('Resume'); }, hostExitWaitMs: 6_000 });
+    assert.equal(asked, 0);
+    assert.deepEqual(outcome, { ok: false, declined: true, reason: `the build in ${target} ended while this window waited for it, so there is nothing to resume` }, 'the reload\'s wait ended in silence');
+  });
+
+  test('AC3: a Resume or a Discard answered after the folder changed does nothing, and says which change', async () => {
+    const changes: Array<[string, (target: string, request: BuildRequest) => void, (target: string) => string]> = [
+      ['discarded or finished elsewhere', (t) => { fs.rmSync(markerPath(t), { force: true }); },
+        (t) => `the build in ${t} was discarded or finished in another window since you were asked, so nothing was done`],
+      ['another build started there', (t, r) => { markerOf(t, r, liveElsewhere()); },
+        (t) => `another build started in ${t} since you were asked, so nothing was done`],
+      ['the same build running again', (t, r) => { markerOf(t, r, { ...crashed(), host: 'another-machine', heartbeatAt: new Date().toISOString() }); },
+        (t) => `the build in ${t} started running again since you were asked, so nothing was done`],
+    ];
+    for (const [label, change, reason] of changes) {
+      for (const answer of ['Resume', 'Discard'] as const) {
+        const target = tmpDir('build-tutorials-target-');
+        const request = requestFor(makeTsFixture(), target);
+        markerOf(target, request, crashed());
+        const phases: string[] = [];
+        const outcome = await resumeIfMarked(target, {
+          ...baseContext({ onPhase: (p) => { phases.push(p); } }),
+          confirm: () => { change(target, request); return Promise.resolve(answer); },
+        });
+        assert.deepEqual(outcome, { ok: false, declined: true, reason: reason(target) }, `${label}, ${answer}: the reload declined in silence, or said the wrong thing`);
+        assert.deepEqual(phases, [], `${label}, ${answer}: a build ran`);
+      }
+    }
+  });
+
+  test('AC4: what the learner chose stays silent: a dismissed prompt, even over a changed folder, and a Cancel of the wait', async function () {
+    this.timeout(20_000);
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, crashed());
+    assert.equal(await resumeIfMarked(target, { ...baseContext(), confirm: () => Promise.resolve(undefined) }), undefined, 'a dismissed prompt said something');
+    assert.equal(await resumeIfMarked(target, { ...baseContext(), confirm: () => { markerOf(target, request, liveElsewhere()); return Promise.resolve(undefined); } }), undefined,
+      'a dismissed prompt over a changed folder said something');
+    const waiting = tmpDir('build-tutorials-target-');
+    markerOf(waiting, requestFor(makeTsFixture(), waiting), liveElsewhere());
+    const started = Date.now();
+    assert.equal(await resumeIfMarked(waiting, { ...baseContext({ isCancelled: () => Date.now() - started > 300 }), confirm: () => Promise.resolve('Resume'), hostExitWaitMs: 6_000 }), undefined,
+      'a Cancel of the wait said something');
   });
 });
 

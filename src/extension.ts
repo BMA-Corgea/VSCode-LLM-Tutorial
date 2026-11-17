@@ -274,6 +274,8 @@ export interface ResumeDeps {
   ) => Promise<T>;
   /** The Resume/Discard prompt. `undefined` = dismissed, which leaves the marker for next time. */
   confirm: (message: string) => Promise<'Resume' | 'Discard' | undefined>;
+  /** Says, as information, why the reload resumed or discarded nothing (T-120). */
+  tell: (message: string) => void;
 }
 
 const REAL_RESUME_DEPS: ResumeDeps = {
@@ -283,6 +285,7 @@ const REAL_RESUME_DEPS: ResumeDeps = {
     (progress, token) => task(progress, token),
   )),
   confirm: (message) => Promise.resolve(vscode.window.showInformationMessage(message, 'Resume', 'Discard')),
+  tell: (message) => { void vscode.window.showInformationMessage(message); },
 };
 
 /**
@@ -329,7 +332,9 @@ export async function resumeOnActivate(
     };
     return resumeIfMarked(target, resumeCtx);
   });
-  reportOutcome(outcome, false);
+  // T-120: a reload that looked and did nothing says why; every other ending is reported as before.
+  if (outcome?.declined) deps.tell(`Build Tutorials: ${outcome.reason ?? 'nothing was resumed'}`);
+  else reportOutcome(outcome, false);
   if (outcome?.ok) await openOrOfferWalk(context, target);
   // Resumed to completion, or Discarded (`resumeIfMarked` removes the marker either way):
   // nothing is left to resume, so the bookmark goes too. A dismissed prompt or a failed
