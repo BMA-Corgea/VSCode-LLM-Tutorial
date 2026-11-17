@@ -73,6 +73,14 @@
  * AC6 with `diff -r` against a repository like repo-tour will see output, and must not read it
  * as a regression.
  *
+ * **And a THIRD exception since T-92: a taught `file` step whose name the same rule withholds.**
+ * The dial never writes it, the outline does not show it, the check does not compare it and the
+ * tutor is sent neither copy, each saying so (`taughtFileWithheld`). Such a step is never marked
+ * done, because a passed check and an automated write are the two ways a step is done, and the
+ * check's sentence tells the learner to write the file themselves and move on. The rule's
+ * whole-word `token`, `auth` and `key` mean a lexer's `token.ts` or an app's `auth.ts` is one;
+ * measured, that is 14 of 5,118 real source files and none of the 42 taught steps on this disk.
+ *
  * `test/dial.test.ts`'s AC6 pair still passes unmodified, and the reason is worth knowing
  * rather than relying on: its fixture's never-taught files (`data/seed.bin`, `data/seed.json`,
  * `src/generated.ts`) happen to carry no withheld name. That is a property of the fixture, not
@@ -214,8 +222,9 @@ export function isRefusal(plan: WritePlan): plan is WriteRefusal {
 
 /** An untrusted path, shortened for a message. A plan is generated data, and a message that
  *  quotes a ten-kilobyte path back at the learner is its own small denial of service. */
-function label(value: string): string {
-  return value.length <= 120 ? value : `${value.slice(0, 119)}…`;
+function label(value: unknown): string {
+  const text = String(value);
+  return text.length <= 120 ? text : `${text.slice(0, 119)}…`;
 }
 
 function messageOf(err: unknown): string {
@@ -381,6 +390,68 @@ function realNameInside(root: string, absPath: string): string | null {
   return relative.length === 0 ? null : relative;
 }
 
+// ── what a TAUGHT file is (T-92) ────────────────────────────────────────────────────────────
+
+/**
+ * Why a taught step's reference file is never read, as a predicate phrase completing "<file> …",
+ * or `null` for the ordinary case, which is nearly every file and must stay that way.
+ *
+ * T-12's name rule (`withheldReason`, below) ran over `plan.reproduce` alone, and its own note
+ * said it "does not touch `planWrite`: a file the plan turns into a taught STEP is a different
+ * decision". It is the same decision. `plan.json` names the taught files too, a plan can be one
+ * a repository shipped (`src/walk/provenance.ts`), and a taught file goes further than a copied
+ * one: the dial copies it into a folder that is committed per step, the outline lifts its lines
+ * onto the page, the check parses it, and the tutor sends a diff of it to a model. So every one
+ * of those reads asks this first (`readReference`, `referenceExtract`, the tutor's
+ * `learnerDiffFor`), and refuses what the reproduce copy refuses, by both of its asks: the name
+ * the plan spells, and the name the file really has once its links are followed inside `root`
+ * (`config.ts -> .env` is `.env`).
+ *
+ * The cost was measured, as the rule's own note says over-refusal must be: of 5,118 real source
+ * files across 16 repositories, 14 are withheld by name (`Auth.tsx`, `mint_token.py`,
+ * `demo-password.ts` …), and none of the 42 taught steps in the two real plans on this disk.
+ * Such a step is still walked; the learner writes that file themselves, and is told why.
+ *
+ * Asked AFTER containment by every caller, never instead of it: this answers WHAT, and only a
+ * contained path has a name worth asking about.
+ */
+export function taughtFileWithheld(root: string, file: string): string | null {
+  const named = withheldReason(file);
+  if (named !== null) return named;
+  const abs = resolveInsideTarget(root, file);
+  if (abs === null) return null;
+  // Lazy, as in `reproduceFiles`: a name already refused is never resolved on disk.
+  const aliased = realNameInside(root, abs);
+  const viaAlias = aliased !== null && aliased !== file ? withheldReason(aliased) : null;
+  return viaAlias === null ? null : `is a link to a file that ${viaAlias}`;
+}
+
+/**
+ * The whole gate a read of a taught step's reference file passes, as a predicate phrase, or
+ * `null` when the file may be read: lexical containment, then the filesystem half, then the name
+ * rule. For a caller with no containment of its own (`src/dial/check.ts`); `readReference` asks
+ * the same three questions in its own words.
+ */
+export function taughtReadRefusal(root: string, file: string): string | null {
+  return readRefusal(root, file, 'the reference repository');
+}
+
+/**
+ * The same gate for the LEARNER's copy of a taught file, in the learner's words: the check parses
+ * it and draws what it found (T-92's security review, N2), and the tutor already asks it of both
+ * trees. A learner's `config.ts` that is a link to their `.env`, or out of their folder, is not read.
+ */
+export function learnerReadRefusal(target: string, file: string): string | null {
+  return readRefusal(target, file, 'the folder you are building in');
+}
+
+function readRefusal(root: string, file: string, where: string): string | null {
+  const abs = resolveInsideTarget(root, file);
+  if (abs === null) return `points outside ${where}`;
+  if (!insideRealRoot(root, abs)) return `leaves ${where} through a symlink`;
+  return taughtFileWithheld(root, file);
+}
+
 // ── reading the reference ───────────────────────────────────────────────────────────────────
 
 type ReferenceRead = { text: string } | WriteRefusal;
@@ -413,6 +484,27 @@ function readReference(refRoot: string, file: string): ReferenceRead {
     return { refused: `${label(file)} is not UTF-8 text — a file like that is reproduced from the plan's reproduce list, never taught as a step` };
   }
   return { text };
+}
+
+/**
+ * `readReference` for a TAUGHT step's file (T-92): the same containment and the same read, and
+ * between them the name rule (`taughtFileWithheld`), asked of a contained path before it is opened.
+ * An escape is still reported as an escape, in `readReference`'s own words.
+ *
+ * A wrapper rather than a change to `readReference` on purpose: that function is also how code
+ * outside the walk reads one of the extension's OWN files by a relative name (T-22's re-plan engine
+ * carries earlier re-derived files from one derived tree into the next), and a file a model wrote
+ * there under a name like `src/auth.ts` is not a credentials file the build would withhold.
+ */
+function readTaughtReference(refRoot: string, file: string): ReferenceRead {
+  const abs = resolveInsideTarget(refRoot, file);
+  if (abs !== null && insideRealRoot(refRoot, abs)) {
+    const withheld = taughtFileWithheld(refRoot, file);
+    if (withheld !== null) {
+      return { refused: `${label(file)} ${withheld}, so it is not read from the reference repository — write it yourself if you want it` };
+    }
+  }
+  return readReference(refRoot, file);
 }
 
 // ── planning a write ────────────────────────────────────────────────────────────────────────
@@ -488,7 +580,7 @@ export function planWrite(
     return { refused: `${label(String(file))} points outside the folder you are building in — nothing was written` };
   }
 
-  const read = readReference(refRoot, file);
+  const read = readTaughtReference(refRoot, file);
   if ('refused' in read) return read;
 
   // Every `return` below that carries bytes goes through here and none may go around it: this
@@ -531,6 +623,8 @@ export interface FileShape {
   signatures: string[];
   /** the reference's import statements, one per entry, continuations folded in */
   imports: string[];
+  /** T-92: why the reference file was not read, a sentence for the page; absent when it was */
+  refused?: string;
 }
 
 /** A JS-like import: `import …`, a re-export with a source, or a `require` binding. */
@@ -633,15 +727,25 @@ function boundShape(lines: string[]): string[] {
  * The line and no more is the whole discipline here. It tells the learner what they are being
  * asked to write — the name, the parameters, the return type — and stops exactly where the
  * decision starts, so the panel can be honest about the shape without becoming a place to
- * read the answer. A range that is not a range, an unreadable reference, and a file that
- * leaves the reference root all produce an empty shape rather than a throw: nothing to show
- * is a state the panel renders, and this is called while the learner is looking at it.
+ * read the answer. A range that is not a range produces an empty shape rather than a throw:
+ * nothing to show is a state the panel renders, and this is called while the learner is looking
+ * at it. A reference file that was not read at all (it leaves the reference root, cannot be read,
+ * or is withheld by name, T-92) produces an empty shape CARRYING the sentence why, which the
+ * panel draws in place of "there is no shape to show".
  */
 export function fileShape(refRoot: string, step: StepLike): FileShape {
-  const empty: FileShape = { signatures: [], imports: [] };
   const file = step.target.file;
+  // T-92: the reason rides on the shape. An empty shape alone is drawn as "this file declares no
+  // imports and no load-bearing signatures", which is false of a file nobody read. The sentences are
+  // the outline's own: the copy's ("nothing to copy from", "write it yourself") are not about it.
+  const gate = taughtReadRefusal(refRoot, file);
+  if (gate !== null) return { signatures: [], imports: [], refused: `No outline: ${label(file)} ${gate}, so it is not read.` };
   const read = readReference(refRoot, file);
-  if ('refused' in read) return empty;
+  if ('refused' in read) {
+    const abs = resolveInsideTarget(refRoot, file);
+    const there = abs !== null && fs.existsSync(abs);
+    return { signatures: [], imports: [], refused: there ? `No outline: ${read.refused}.` : `No outline: ${label(file)} is not in the reference repository.` };
+  }
 
   const lines = read.text.split(/\r?\n/);
   const ranges = loadBearingOf(step);
@@ -742,8 +846,9 @@ export function reproduceEntries(plan: PlanLike): string[] {
  * so the next reader does not mistake this for more than it is (T-5's finding 1 cost more in
  * its comment than in its code). A `config.json` that is a LINK to `.env` is a different case
  * and is refused, because that is still a question about a name: the one the file has once the
- * link is followed, which `reproduceFiles` asks separately. It also does not touch `planWrite`: a file the plan turns into a
- * taught STEP is a different decision, made where a learner is being asked to write it.
+ * link is followed, which `reproduceFiles` asks separately. Since T-92 it also guards every read
+ * of a TAUGHT step's file (`taughtFileWithheld`, above `readReference`): the dial, the outline,
+ * the check and the tutor refuse what the reproduce copy refuses.
  */
 
 /** The three reasons, as predicate phrases — each one completes "refused — it …". */

@@ -3207,3 +3207,41 @@ suite('T-21 AC7 — the promise that the options are not choosable is retired ev
     assert.ok(!/does not let the learner pick/.test(header), 'and no longer says the opposite');
   });
 });
+
+suite('T-92: the page says why no reference file is read', () => {
+  const WHY = 'This tutorial was not built in this editor, so none of its reference files are read.';
+
+  test('the standing reason is drawn under the question, escaped, and only when there is one', () => {
+    const html = renderStepHtml(stateAt('st-2-file-parse', { referenceNote: `${WHY} <img src=x onerror=alert(1)>` }), FAKE_SKINS);
+    assert.match(html, /<p class="reference-note" id="reference-note" role="note">/);
+    assert.ok(html.includes(escapeForHtml(`${WHY} <img src=x onerror=alert(1)>`)), 'the reason is not on the page, escaped');
+    assert.ok(!html.includes('<img src=x'), 'a reason drew markup');
+    assert.ok(html.indexOf('id="reference-note"') < html.indexOf('<h2>Options</h2>'), 'the reason is not above the controls it explains');
+    assert.doesNotMatch(renderStepHtml(stateAt('st-2-file-parse'), FAKE_SKINS), /id="reference-note"/, 'a note drawn for a tutorial built here');
+  });
+
+  test('an outline that was not read says why instead of "declares nothing"', () => {
+    const refused = 'src/auth.ts is shaped like a credentials file, so it is not read from the reference repository — write it yourself if you want it';
+    const html = renderStepHtml(stateAt('st-2-file-parse', { shape: { signatures: [], imports: [], refused } }), FAKE_SKINS);
+    assert.ok(html.includes(escapeForHtml(refused)), 'the outline does not say why it is empty');
+    assert.ok(!html.includes(escapeForHtml(SHAPE_EMPTY_MESSAGE)), 'a file nobody read was said to declare nothing');
+    const empty = renderStepHtml(stateAt('st-2-file-parse', { shape: { signatures: [], imports: [] } }), FAKE_SKINS);
+    assert.ok(empty.includes(escapeForHtml(SHAPE_EMPTY_MESSAGE)), 'the genuinely empty shape lost its sentence');
+  });
+
+  test('an outline refusal naming a hostile file name is drawn escaped (security review N6)', () => {
+    const refused = 'No outline: src/<img src=x onerror=alert(1)>&"q".ts is shaped like a credentials file, so it is not read.';
+    const html = renderStepHtml(stateAt('st-2-file-parse', { shape: { signatures: [], imports: [], refused } }), FAKE_SKINS);
+    assert.ok(html.includes('src/&lt;img src=x onerror=alert(1)&gt;&amp;'), 'the refusal\'s file name is not escaped');
+    assert.ok(!html.includes('<img src=x'), 'a refusal drew markup');
+  });
+
+  test('each of the two moves the repaint key, or it is stored and never shown', () => {
+    const key = (overrides: Partial<StepViewState>): string => stepRenderKey(stateAt('st-2-file-parse', overrides), FAKE_SKINS);
+    assert.notEqual(key({}), key({ referenceNote: WHY }), 'state.referenceNote appearing');
+    assert.notEqual(key({ referenceNote: WHY }), key({ referenceNote: `${WHY} Another.` }), 'state.referenceNote changing');
+    const shape = { signatures: [], imports: [] };
+    assert.notEqual(key({ shape }), key({ shape: { ...shape, refused: 'not read' } }), 'state.shape.refused appearing');
+    assert.notEqual(key({ shape: { ...shape, refused: 'not read' } }), key({ shape: { ...shape, refused: 'not read, again' } }), 'state.shape.refused changing');
+  });
+});

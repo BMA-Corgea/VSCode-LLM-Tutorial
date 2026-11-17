@@ -24,6 +24,7 @@ import { detoursRoot } from '../src/detour/store.js';
 import type { ExtensionApi } from '../src/extension.js';
 import { StartPanel, type StartPanelDeps } from '../src/start/panel.js';
 import { writeFixtureTarget } from './unit/walk-fixtures.js';
+import { recordBuiltHere } from './support/built-here.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
 const REFERENCE_FILES = ['src/parse.ts', 'src/api/routes.ts', 'src/api/render.ts'];
@@ -119,6 +120,8 @@ suite('T-40: each panel grants its webview the icon font and nothing else', func
         path.join(target, '.repo-tour', 'build', 'request.json'),
         `${JSON.stringify({ idea: '', recreate: true, repo: reference, referenceRoot: reference, target, dial: 'manual' }, null, 2)}\n`,
       );
+      // T-92: what the Start build records, or the walk rightly reads no reference for this request.
+      await recordBuiltHere(target, reference);
       await api._walk.openAt(target);
       const session = api._walk.session();
       const panel = api._walk.panel();
