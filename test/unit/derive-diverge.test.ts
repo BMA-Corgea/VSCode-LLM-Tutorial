@@ -580,9 +580,14 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
   test('D never stands on a step at its own file, even in a plan that had it standing on the file step it took over', async () => {
     const { root, gs, target, first } = await symbolPress();
     const old = { ...first.plan, steps: first.plan.steps.map((s) => (s.id === 's-handle' ? { ...s, dependsOn: ['s-routes'] } : s)) };
-    const out = await divergePlan(input(old, root, 's-handle', 'author', walkedAt(old, 's-handle'), treeOf(first)), depsFor(model().run, gs, target));
+    const m = model();
+    const out = await divergePlan(input(old, root, 's-handle', 'author', walkedAt(old, 's-handle'), treeOf(first)), depsFor(m.run, gs, target));
     if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
     assert.deepEqual(stepNamed(out.plan, 's-handle')?.dependsOn, [], `D stands on no step at routes.ts: ${JSON.stringify(stepNamed(out.plan, 's-handle')?.dependsOn)}`);
+    const own = m.asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/api/routes.ts');
+    assert.ok(own, 'discriminates: D\'s own code was asked for');
+    const shown = ((own.input['dependencies'] as Array<{ path: string }> | undefined) ?? []).map((dep) => dep.path);
+    assert.ok(!shown.includes('src/api/routes.ts'), `nor is its code question shown its own file as something it stands on: ${JSON.stringify(shown)}`);
   });
 
   // The stopped re-review's NF3: a step downstream of D that a walked step stands on is kept, on the old road, and it was
