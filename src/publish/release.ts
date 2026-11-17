@@ -245,14 +245,19 @@ export function isReadOnlyGh(args: readonly string[]): boolean {
 }
 
 /**
- * What the shell may run WITHOUT a check: `git` (rev-parse and show, in this checkout) and `unzip`
- * (listing, unpacking and reading what was downloaded). Anything else, `gh` above all, is refused
- * there, so the only door to GitHub stays `gh()`, behind `isReadOnlyGh` (review N1).
+ * What the shell may run WITHOUT a check: `git` to READ this checkout (its first word `rev-parse` or
+ * `show`, nothing else: `git push` is a write to GitHub too, re-check RN3) and `unzip` (listing,
+ * unpacking and reading what was downloaded). Anything else, `gh` above all, is refused there, so the
+ * only door to GitHub stays `gh()`, behind `isReadOnlyGh` (review N1).
  */
 export const DIRECT_COMMANDS: readonly string[] = ['git', 'unzip'];
 
-export function isDirectCommand(command: string): boolean {
-  return DIRECT_COMMANDS.includes(command);
+/** The git subcommands the shell reads with; the first argument must be one of them. */
+const GIT_READS: readonly string[] = ['rev-parse', 'show'];
+
+export function isDirectCommand(command: string, args: readonly string[] = []): boolean {
+  if (!DIRECT_COMMANDS.includes(command)) return false;
+  return command !== 'git' || GIT_READS.includes(args[0] ?? '');
 }
 
 // ── small readers, so a JSON shape that changed is a refusal rather than a crash ─────────
@@ -512,6 +517,14 @@ export function readRunnerVscode(log: CommandResult, run: CiRun, jobId: number):
   if (!/(?:^|\s)PROVEN\s+Visual Studio Code\b/m.test(text)) {
     return refuse('runner-version-unknown',
       `The log of job ${jobId} in ${RELEASE_WORKFLOW} run ${run.id} has no "PROVEN   Visual Studio Code" from its install check, so it does not show the file proven on VS Code ${versions[0] ?? ''}.`,
+      remedy);
+  }
+  // The validated version is the one `@vscode/test-electron` downloaded for the suites. The install
+  // check uses that build only when no `code` is on PATH; a runner that had one would be proven on a
+  // VS Code whose version this log never states (re-check RN1). So the proof must name the download.
+  if (!/(?:^|\s)PROVEN\s+Visual Studio Code \(downloaded by @vscode\/test-electron into \.vscode-test\//m.test(text)) {
+    return refuse('runner-version-unknown',
+      `The install check in job ${jobId} of ${RELEASE_WORKFLOW} run ${run.id} proved a VS Code other than the one its tests downloaded (one on PATH, by its wording), so the version it was proven on is not in the log.`,
       remedy);
   }
   return accept({ version: versions[0] ?? '' });

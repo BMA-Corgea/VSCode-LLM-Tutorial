@@ -38,6 +38,16 @@ const VSIX = `build-tutorials-${VERSION}.vsix`;
 
 const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 
+/** Where this machine's git and unzip are, resolved once, for the links in the script's PATH. */
+function onPath(name: string): string {
+  const found = spawnSync('which', [name], { encoding: 'utf8' });
+  const at = found.stdout.trim();
+  assert.ok(found.status === 0 && at.length > 0, `${name} is not on this machine's PATH`);
+  return at;
+}
+const REAL_GIT = onPath('git');
+const REAL_UNZIP = onPath('unzip');
+
 // ── a zip, stored (no compression), enough for unzip -Z1 / -qq / -p to read ──────────────
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
@@ -204,6 +214,12 @@ function buildWorld(options: WorldOptions = {}): World {
   const log = path.join(tmp, 'stub-calls.jsonl');
   fs.writeFileSync(log, '');
   fs.writeFileSync(path.join(bin, 'gh'), STUB_GH, { mode: 0o755 });
+  // The script's PATH is this folder ALONE (re-check RN2): the stub, and links to the real node (the
+  // stub's interpreter), git and unzip. The real gh is never reachable, so a stub that cannot run fails
+  // the script instead of handing its reads to GitHub.
+  for (const [name, real] of [['node', process.execPath], ['git', REAL_GIT], ['unzip', REAL_UNZIP]] as const) {
+    fs.symlinkSync(real, path.join(bin, name));
+  }
 
   // Never readable, so a script that opened it would fail; never named, which the tests check.
   fs.chmodSync(decoyPath, 0o000);
@@ -215,7 +231,7 @@ function buildWorld(options: WorldOptions = {}): World {
         cwd: tree,
         encoding: 'utf8',
         env: {
-          ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+          ...process.env, PATH: bin,
           RELEASE_STUB_LOG: log, RELEASE_STUB_RULES: rulesPath, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...env,
         },
       });
@@ -235,6 +251,23 @@ function withWorld(options: WorldOptions, body: (world: World) => void): void {
     fs.rmSync(world.tmp, { recursive: true, force: true });
   }
 }
+
+/** A stub that cannot run must fail the script at its first gh call: the real gh is never on its PATH (re-check RN2). */
+suite('release-draft.mjs, driven: the real gh is out of reach', () => {
+  test('with the stub unable to run, the script fails on its first gh call and nothing else answers it', () => {
+    withWorld({}, (world) => {
+      fs.chmodSync(path.join(world.tmp, 'bin', 'gh'), 0o644);
+      const r = world.run([world.sha]);
+      assert.notEqual(r.status, 0, 'the script went on with no stub to answer it');
+      assert.deepEqual(world.calls(), [], 'the stub ran after all');
+      const said = `${r.stdout}\n${r.stderr}`;
+      // execvp skips a found-but-unrunnable gh and tries the next folder on PATH: only a PATH with no
+      // other gh on it ends in the spawn's own error rather than in an answer from GitHub.
+      assert.match(said, /spawnSync gh (?:EACCES|ENOENT)/, 'something other than the stub answered gh: the real one is on the script\'s PATH');
+      assert.doesNotMatch(said, /HTTP 404|Not Found/, 'GitHub answered: the real gh is on the script\'s PATH');
+    });
+  });
+});
 
 /** Every gh call the script made was a read, and none of them reached the real gh. */
 function assertOnlyReads(world: World, expected: string[][]): void {

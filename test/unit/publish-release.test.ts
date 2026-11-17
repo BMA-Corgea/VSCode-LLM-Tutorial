@@ -356,6 +356,15 @@ suite('release: the runner\'s VS Code, as the run\'s own job log names it', () =
     refused(readRunnerVscode(ran(two), RUN, JOB), 'runner-version-unknown', '1.146.0', '1.147.0');
   });
 
+  test('a VS Code on the runner\'s PATH is refused: its tests validated the downloaded one, so the log does not say its version (re-check RN1)', () => {
+    const onPath = LOG.replace(
+      'PROVEN   Visual Studio Code (downloaded by @vscode/test-electron into .vscode-test/, not a system install)',
+      'PROVEN   Visual Studio Code (on PATH)',
+    );
+    assert.notEqual(onPath, LOG, 'the fixture changed nothing');
+    refused(readRunnerVscode(ran(onPath), RUN, JOB), 'runner-version-unknown', String(JOB), 'on PATH');
+  });
+
   test('an install check that proved no VS Code is refused, and UNPROVEN never reads as PROVEN', () => {
     const unproven = LOG.replace('  PROVEN   Visual Studio Code (downloaded', '  UNPROVEN Visual Studio Code - not on PATH (downloaded');
     refused(readRunnerVscode(ran(unproven), RUN, JOB), 'runner-version-unknown', String(JOB), 'PROVEN');
@@ -374,6 +383,8 @@ suite('release: the runner\'s VS Code, as the run\'s own job log names it', () =
     const verifyInstall = read('scripts/verify-install.mjs');
     assert.ok(verifyInstall.includes("label: 'Visual Studio Code'"), 'verify-install labels the editor "Visual Studio Code"');
     assert.match(verifyInstall, /PROVEN\$\{OFF\} {3}\$\{r\.editor\.label\}/, 'verify-install prints "PROVEN   <label>"');
+    assert.ok(verifyInstall.includes("how: 'downloaded by @vscode/test-electron into .vscode-test/, not a system install'"),
+      'verify-install names the downloaded build the way readRunnerVscode requires');
     assert.match(CI, /^\s*runs-on:\s*ubuntu-latest\s*$/m, 'the notes call the runner GitHub\'s Ubuntu runner');
   });
 });
@@ -879,9 +890,17 @@ suite('release: every gh command the shell runs is a read', () => {
   });
 
   test('the shell runs only git and unzip directly: gh never bypasses the read-only check (review N1)', () => {
-    for (const command of ['git', 'unzip']) assert.equal(isDirectCommand(command), true, command);
+    assert.equal(isDirectCommand('git', ['rev-parse', '--verify', '--quiet', 'x^{commit}']), true);
+    assert.equal(isDirectCommand('unzip', ['-Z1', 'x.zip']), true);
     for (const command of ['gh', '/usr/bin/gh', 'sh', 'bash', 'node', 'npm', 'curl', '']) {
-      assert.equal(isDirectCommand(command), false, `${command} must not be run without a check`);
+      assert.equal(isDirectCommand(command, ['rev-parse']), false, `${command} must not be run without a check`);
+    }
+  });
+
+  test('git runs only to read this checkout, rev-parse and show, never push, tag or anything else (re-check RN3)', () => {
+    assert.equal(isDirectCommand('git', ['show', `${SHA}:package.json`]), true);
+    for (const args of [['push'], ['push', 'origin', 'main'], ['tag', 'v0.1.0'], ['-C', '.', 'push'], ['config', 'a', 'b'], ['--exec-path=x', 'show'], []]) {
+      assert.equal(isDirectCommand('git', args), false, `git ${args.join(' ')} must not run`);
     }
   });
 
