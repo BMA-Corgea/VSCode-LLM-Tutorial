@@ -89,16 +89,14 @@ export interface ValidationResult {
 }
 
 /**
- * The exact honesty line AC2 names verbatim. Byte-for-byte from THIS ticket's own spec,
- * `.autodev/specs/T-3-start-screen.md` line 12 ("captured, not re-composed") — no quotes
- * around recreate, no trailing period. It had been copied from the older
- * `.autodev/specs/T-1-build-tutorials-v1.md` §5.2 wording instead, which quotes it; the two
- * spec documents disagree and the ticket's own text is canonical (T-3 rework, review
- * advisory 1). Exported so the panel's client-side fallback rendering (a fresh page, before
- * any message round-trip) and every test that checks this wording read it from one place
- * rather than retyping it.
+ * The honesty line T-3's AC2 asks for, under the idea field: an idea typed without ticking recreate
+ * builds nothing, and the form says so rather than declining in silence. T-3's words named an internal
+ * ticket ("Idea-first builds arrive with T-9"), which a stranger cannot read (T-141). These say it in the
+ * form's own words, and name the box to tick by its label. No trailing period, as before. Exported so the
+ * panel's client-side fallback rendering (a fresh page, before any message round-trip) and every test
+ * that checks this wording read it from one place rather than retyping it.
  */
-export const IDEA_FIRST_MESSAGE = 'Idea-first builds arrive with T-9 — tick recreate to build from a repo';
+export const IDEA_FIRST_MESSAGE = 'Building from an idea is not available yet — tick "Just recreate the repo as it stands" and give a reference repo';
 
 const GITHUB_URL_RE = /^https:\/\/github\.com\/([^/\s]+)\/([^/\s#?]+?)(?:\.git)?\/?$/;
 

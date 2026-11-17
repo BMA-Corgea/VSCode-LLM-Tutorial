@@ -34,6 +34,7 @@ import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
+import { identityConfigured, NO_IDENTITY_NOTE } from './dial/commit.js';
 import { tutorCoreFor, type TutorCore } from './tutor/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
 
@@ -221,8 +222,26 @@ export async function runBuild(
   // After the progress has closed: the ending is told once, on screen and in a notification, and
   // nothing waits on the person to dismiss anything.
   reportOutcome(outcome, true);
+  if (outcome.ok) await tellIfNoIdentity(request.target);
   await forgetUnlessResumable(context, request.target);
   if (outcome.ok) await openOrOfferWalk(context, request.target);
+}
+
+/**
+ * T-141: a learner whose git has no name and email hears of it as the build ends, before the walk, rather
+ * than first at a passing check whose step was not committed. Only while steps are to be committed. It
+ * asks git exactly as the walk's commit will (`identityConfigured`, in the tutorial folder) and sets
+ * nothing. Told after the ending, never in it: the ending does not wait on git. It never throws, and a git
+ * that cannot be asked says nothing here (the walk's commit says what happened then).
+ */
+async function tellIfNoIdentity(target: string): Promise<void> {
+  if (!vscode.workspace.getConfiguration('buildTutorials').get<boolean>('commitPerStep', true)) return;
+  try {
+    if (await identityConfigured(target, realGit)) return;
+  } catch {
+    return;
+  }
+  void vscode.window.showWarningMessage(`Build Tutorials: ${NO_IDENTITY_NOTE}`);
 }
 
 async function runStartCommand(context: vscode.ExtensionContext): Promise<void> {
@@ -321,6 +340,7 @@ export async function resumeOnActivate(
     return resumeIfMarked(target, resumeCtx);
   });
   reportOutcome(outcome, false);
+  if (outcome?.ok) await tellIfNoIdentity(target);
   if (outcome?.ok) await openOrOfferWalk(context, target);
   // Resumed to completion, or Discarded (`resumeIfMarked` removes the marker either way):
   // nothing is left to resume, so the bookmark goes too. A dismissed prompt or a failed

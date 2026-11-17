@@ -338,6 +338,16 @@ async function configValue(target: string, key: string, git: GitRunner): Promise
  * rather than reporting a more specific reason for a distinction that changes nothing about
  * what happens next.
  */
+/**
+ * What the build's ending says when steps are to be committed and git has no name and email for the
+ * tutorial folder (T-141). Before it, a learner first heard of it at their first passing check, as a
+ * step that was not committed. It names the two commands and runs neither (this file's header). They
+ * are `--global` ones because the folder is not a repository yet when the build ends (`ensureRepo`
+ * `git init`s it at the first commit), and outside one `git config user.name "…"` fails.
+ */
+export const NO_IDENTITY_NOTE = 'git has no name and email set, so the steps you finish will not be committed until you set them: '
+  + 'git config --global user.name "Your Name" and git config --global user.email "you@example.com" (the tutorial works either way)';
+
 export async function identityConfigured(target: string, git: GitRunner): Promise<boolean> {
   const [name, email] = await Promise.all([
     configValue(target, 'user.name', git),
