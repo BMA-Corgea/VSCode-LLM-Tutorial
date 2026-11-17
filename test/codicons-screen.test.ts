@@ -30,6 +30,7 @@ import type { LlmReply, TutorCore } from '../src/tutor/core.js';
 import { detoursRoot } from '../src/detour/store.js';
 import { Screen, sleep } from './support/screen.js';
 import { writeFixtureTarget } from './unit/walk-fixtures.js';
+import { recordBuiltHere } from './support/built-here.js';
 
 const STEP_TITLE = 'Build Tutorials: Step';
 const NARRATOR_TITLE = 'Build Tutorials: Detour';
@@ -156,7 +157,7 @@ async function getApi(): Promise<ExtensionApi> {
 }
 
 /** A tutorial the tutor can be asked about and a detour taken from: the fixture beside a reference. */
-function tutorial(dirs: string[]): string {
+async function tutorial(dirs: string[]): Promise<string> {
   const target = fs.mkdtempSync(path.join(os.tmpdir(), 't40-target-'));
   const reference = fs.mkdtempSync(path.join(os.tmpdir(), 't40-reference-'));
   dirs.push(target, reference);
@@ -170,6 +171,8 @@ function tutorial(dirs: string[]): string {
     path.join(target, '.repo-tour', 'build', 'request.json'),
     `${JSON.stringify({ idea: '', recreate: true, repo: reference, referenceRoot: reference, target, dial: 'manual' }, null, 2)}\n`,
   );
+  // T-92: what the Start build records, or the walk rightly reads no reference for this request.
+  await recordBuiltHere(target, reference);
   return target;
 }
 
@@ -181,7 +184,7 @@ suite('T-40: VS Code\'s own icons, in the real panels', function () {
     const screen = await Screen.open(api._context);
     const dirs: string[] = [];
     try {
-      await api._walk.openAt(tutorial(dirs));
+      await api._walk.openAt(await tutorial(dirs));
       await vscode.commands.executeCommand('buildTutorials.step.focus');
       const session = api._walk.session();
       assert.ok(session, 'opening the walk should leave a session behind');
