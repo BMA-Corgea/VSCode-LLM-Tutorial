@@ -562,7 +562,7 @@ function lstatOrNull(p: string): fs.Stats | null {
   }
 }
 
-interface BuildFolderProblem { folder: string; why: 'link' | 'not-a-folder' }
+interface BuildFolderProblem { folder: string; why: 'link' | 'not-a-folder' | 'gone' }
 
 /**
  * What is wrong with `<target>/.repo-tour/build` as a place for this build's files, or `null`: both
@@ -581,15 +581,16 @@ function buildFolderProblem(target: string): BuildFolderProblem | null {
   try {
     if (fs.realpathSync(folders[1]) === path.join(fs.realpathSync(target), ...BUILD_DIR)) return null;
   } catch {
-    /* gone meanwhile: not a place to write either */
+    // Gone between the lstat and now: not a place to write either, and not a link (review F2).
+    return { folder: folders[1], why: 'gone' };
   }
   return { folder: folders[1], why: 'link' };
 }
 
 function folderRefusal(problem: BuildFolderProblem): string {
-  return problem.why === 'link'
-    ? `${problem.folder} is a link to somewhere else, so this build writes nothing through it — pick an empty or new folder`
-    : `${problem.folder} is not a folder, so this build writes nothing there — pick an empty or new folder`;
+  if (problem.why === 'link') return `${problem.folder} is a link to somewhere else, so this build writes nothing through it — pick an empty or new folder`;
+  if (problem.why === 'gone') return `${problem.folder} could not be found as this build was about to write there, so it wrote nothing — pick an empty or new folder`;
+  return `${problem.folder} is not a folder, so this build writes nothing there — pick an empty or new folder`;
 }
 
 /** The build folder when it is there and real, else `null`. Never makes anything: what reads and removals use. */
@@ -603,9 +604,10 @@ function realBuildDir(target: string): string | null {
  * write in this file goes through here, just before it writes. The folders are made one level at a time, the
  * outer one first, and each is proved before the next is made: a `mkdir` at a link's own name, dangling or
  * not, makes nothing, so nothing is ever made through one. (The recursive `mkdir` of the whole path that
- * `writeJsonAtomic` does walks straight through a link at `.repo-tour`.) What is left is a swap in the
- * microseconds between this and the write, which nothing in Node (no `openat`) can close; the `realpath`
- * in `buildFolderProblem` catches one that comes before it.
+ * `writeJsonAtomic` does walks straight through a link at `.repo-tour`.) What is left is a swap of a FOLDER
+ * in the microseconds between this and the write, which nothing in Node (no `openat`) can close; the
+ * `realpath` in `buildFolderProblem` catches one that comes before it. (A file's own name can be held:
+ * `readGuarded` opens the marker with `O_NOFOLLOW`.)
  */
 export function provenBuildDir(target: string): string {
   fs.mkdirSync(target, { recursive: true }); // the learner's own folder, a link included: theirs to choose
@@ -674,10 +676,48 @@ export function readMarker(target: string): BuildMarker | null {
   if (dir === null) return null;
   const file = path.join(dir, MARKER_FILE);
   if (lstatOrNull(file)?.isFile() !== true) return null;
+  const text = readGuarded(file, MARKER_MAX_BYTES);
+  if (text === null) return null;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as BuildMarker;
+    return JSON.parse(text) as BuildMarker;
   } catch {
     return null;
+  }
+}
+
+/** A real marker is well under a kilobyte; past this, it is not one of ours. */
+const MARKER_MAX_BYTES = 1024 * 1024;
+
+/**
+ * A file's text, opened without following a link at its own name and without waiting on a pipe
+ * (`O_NOFOLLOW`, `O_NONBLOCK`), read only when what was opened is a regular file (`fstat`) no larger than
+ * `maxBytes`; else `null` (T-91 review F3, as repo-tour's `readGuardedFile` does). The `lstat` before it
+ * says as much for a file that stays put; this holds for one swapped in after that `lstat`. Where the
+ * platform has no `O_NOFOLLOW` (Windows), the `lstat` is what there is.
+ */
+function readGuarded(file: string, maxBytes: number): string | null {
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+  let fd: number;
+  try {
+    fd = fs.openSync(file, flags);
+  } catch {
+    return null;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) return null;
+    const buf = Buffer.alloc(st.size);
+    let n = 0;
+    while (n < st.size) {
+      const got = fs.readSync(fd, buf, n, st.size - n, n);
+      if (got === 0) break;
+      n += got;
+    }
+    return buf.subarray(0, n).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -691,7 +731,9 @@ export function readFreshMarker(target: string, now: () => number = Date.now): B
   const marker = readMarker(target);
   if (!marker) return null;
   const ageMs = now() - new Date(marker.startedAt).getTime();
-  if (ageMs > STALE_AFTER_MS) return null; // old enough that we stay quiet about it
+  // Old enough that we stay quiet about it. So is one that starts far in the future, or never: either would
+  // read as fresh for ever, and every reload would ask again (T-91 review F5). A clock a little ahead is fine.
+  if (!(Math.abs(ageMs) <= STALE_AFTER_MS)) return null;
   return marker;
 }
 
@@ -815,12 +857,18 @@ function runPhase(target: string, marker: BuildMarker, phase: BuildPhase, ctx: B
   return true;
 }
 
-/** Whether anything is at `<target>/.repo-tour/build/plan.json`, a link included. */
+/**
+ * Whether anything is at `<target>/.repo-tour/build/plan.json`, a link included, in a real build folder. One
+ * seen through a linked `.repo-tour` or `build` is no tutorial of this folder's (T-91 review F1): the build
+ * then refuses the link in its own words, at its first write, not as "another build finished a tutorial".
+ */
 function planIn(target: string): boolean {
+  const dir = realBuildDir(target);
+  if (dir === null) return false;
   try {
-    return fs.lstatSync(path.join(buildDir(target), 'plan.json'), { throwIfNoEntry: false }) !== undefined;
+    return fs.lstatSync(path.join(dir, 'plan.json'), { throwIfNoEntry: false }) !== undefined;
   } catch {
-    return false; // no build folder to hold one (`.repo-tour` a file, say)
+    return false;
   }
 }
 
@@ -1050,8 +1098,8 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     // nothing more is written through it.
     const problem = buildFolderProblem(target);
     if (problem !== null) {
-      const became = problem.why === 'link' ? 'a link to somewhere else' : 'something other than a folder';
-      return { ok: false, reason: `${problem.folder} became ${became} while this build was running — it stopped and wrote nothing more; pick an empty or new folder` };
+      const became = problem.why === 'link' ? 'became a link to somewhere else' : problem.why === 'gone' ? 'went away' : 'became something other than a folder';
+      return { ok: false, reason: `${problem.folder} ${became} while this build was running — it stopped and wrote nothing more; pick an empty or new folder` };
     }
     // R2: the folder is another build's now, or its marker was removed. This build wrote nothing more.
     const why = readMarker(target)
@@ -1142,5 +1190,7 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
 
   // Every finished interpretation is cached by content hash, so re-running from the start —
   // simpler and more honest than trying to resume mid-phase — is cheap, not wasteful.
-  return buildFromRequest(marker.request, ctx);
+  // Into the folder whose marker this is, whatever folder its request names: a marker is a file in the learner's
+  // folder, and one put there by anything else must not choose where this build writes (T-91 review F5).
+  return buildFromRequest({ ...marker.request, target }, ctx);
 }

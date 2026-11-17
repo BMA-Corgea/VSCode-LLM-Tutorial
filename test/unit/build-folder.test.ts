@@ -92,12 +92,11 @@ suite('T-91: the Start build never writes, removes or reads its files through a 
     assert.equal(outcome.reason, refused(buildDir(target)));
   });
 
-  test('a link that leads nowhere is refused too, and nothing is made at its end', async () => {
+  test('a link that leads nowhere is refused too, in the same sentence', async () => {
     const target = tmp('t91-target-');
     const nowhere = path.join(tmp('t91-outside-'), 'not-yet');
     fs.symlinkSync(nowhere, path.join(target, '.repo-tour'));
     const outcome = await buildFromRequest(requestFor(tsFixture(), target), context()).catch((err: Error) => ({ ok: false, reason: `threw: ${err.message}` }));
-    assert.equal(fs.existsSync(nowhere), false, 'the build made a folder at the end of a dangling link');
     assert.equal(outcome.reason, refused(path.join(target, '.repo-tour')));
   });
 
@@ -107,6 +106,11 @@ suite('T-91: the Start build never writes, removes or reads its files through a 
     const outcome = await buildFromRequest(requestFor(tsFixture(), target), context()).catch((err: Error) => ({ ok: false, reason: `threw: ${err.message}` }));
     assert.equal(outcome.reason, `${path.join(target, '.repo-tour')} is not a folder, so this build writes nothing there — pick an empty or new folder`);
     assert.equal(fs.readFileSync(path.join(target, '.repo-tour'), 'utf8'), 'not a folder');
+    const inner = tmp('t91-target-');
+    fs.mkdirSync(path.join(inner, '.repo-tour'));
+    fs.writeFileSync(buildDir(inner), 'not a folder either');
+    const second = await buildFromRequest(requestFor(tsFixture(), inner), context()).catch((err: Error) => ({ ok: false, reason: `threw: ${err.message}` }));
+    assert.equal(second.reason, `${buildDir(inner)} is not a folder, so this build writes nothing there — pick an empty or new folder`);
   });
 
   test('a link swapped in mid-build, this build\'s marker copied through it, is not written through: the build stops', async () => {
@@ -173,6 +177,102 @@ suite('T-91: the Start build never writes, removes or reads its files through a 
     }
     assert.deepEqual(contents(outside), [], 'the build wrote through a link it took for a folder');
     assert.equal(outcome.reason, refused(buildDir(target)));
+  });
+
+  test('review F1: a .repo-tour that becomes a link to a finished tutorial during the check is refused as a link, not as another build\'s tutorial', async () => {
+    const target = tmp('t91-target-');
+    const outside = tmp('t91-outside-');
+    fs.mkdirSync(path.join(outside, 'build'));
+    fs.writeFileSync(path.join(outside, 'build', 'plan.json'), JSON.stringify({ chapters: [{ id: 'theirs' }] }));
+    let calls = 0;
+    const duringTheCheck = (): boolean => {
+      if (++calls === 1) fs.symlinkSync(outside, path.join(target, '.repo-tour'));
+      return false;
+    };
+    const before = contents(outside);
+    const outcome = await buildFromRequest(requestFor(tsFixture(), target), context({ isCancelled: duringTheCheck }));
+    assert.ok(calls >= 1, 'the fixture has to plant the link during the check');
+    assert.equal(outcome.reason, refused(path.join(target, '.repo-tour')), 'a plan read through a link was taken for one another build finished here');
+    assert.deepEqual(contents(outside), before);
+  });
+
+  test('review F2: a build folder that goes away between its lstat and its realpath is not called a link', async () => {
+    const target = tmp('t91-target-');
+    fs.mkdirSync(buildDir(target), { recursive: true });
+    const mutable = fs as unknown as { realpathSync: typeof fs.realpathSync };
+    const realRealpath = mutable.realpathSync;
+    mutable.realpathSync = ((p: fs.PathLike, opts?: unknown) => {
+      if (String(p) === buildDir(target)) throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${String(p)}'`), { code: 'ENOENT' });
+      return (realRealpath as (q: fs.PathLike, o?: unknown) => string)(p, opts);
+    }) as typeof fs.realpathSync;
+    let outcome;
+    try {
+      outcome = await buildFromRequest(requestFor(tsFixture(), target), context());
+    } finally {
+      mutable.realpathSync = realRealpath;
+    }
+    assert.equal(outcome.reason, `${buildDir(target)} could not be found as this build was about to write there, so it wrote nothing — pick an empty or new folder`);
+  });
+
+  test('review F3: a marker that is a link the lstat does not see (one swapped in just after it) is still no marker', () => {
+    const target = tmp('t91-target-');
+    const outside = tmp('t91-outside-');
+    const request = requestFor(tsFixture(), target);
+    someoneElses(outside, request);
+    fs.mkdirSync(buildDir(target), { recursive: true });
+    fs.symlinkSync(path.join(outside, 'building.json'), markerPath(target));
+    const mutable = fs as unknown as { lstatSync: typeof fs.lstatSync };
+    const realLstat = mutable.lstatSync;
+    mutable.lstatSync = ((p: fs.PathLike, opts?: fs.StatSyncOptions) => realLstat(String(p) === markerPath(target) ? path.join(outside, 'building.json') : p, opts)) as typeof fs.lstatSync;
+    let read;
+    try {
+      assert.equal(fs.lstatSync(markerPath(target)).isFile(), true, 'the fixture has to hide the link from the lstat');
+      read = readMarker(target);
+    } finally {
+      mutable.lstatSync = realLstat;
+    }
+    assert.equal(read, null, 'the marker was read through a link the lstat did not see');
+  });
+
+  test('review F5: a Resume builds in the folder whose marker it read, whatever folder the marker\'s request names', async () => {
+    const target = tmp('t91-target-');
+    const elsewhere = tmp('t91-elsewhere-');
+    const request = requestFor(tsFixture(), elsewhere);
+    fs.mkdirSync(buildDir(target), { recursive: true });
+    fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt: new Date(Date.now() - 60_000).toISOString(), phase: 'digest', request }));
+    const outcome = await resumeIfMarked(target, { ...context(), confirm: () => Promise.resolve('Resume') });
+    assert.deepEqual(contents(elsewhere), [], 'the Resume wrote in the folder the marker named, not the one it was found in');
+    assert.equal(outcome?.ok, true, outcome?.reason);
+    assert.equal(fs.existsSync(path.join(buildDir(target), 'plan.json')), true);
+  });
+
+  test('review F5: a marker that starts in the future, or never, is not offered on every reload for ever', () => {
+    for (const startedAt of [new Date(Date.UTC(2099, 0, 1)).toISOString(), 'not a date']) {
+      const target = tmp('t91-target-');
+      fs.mkdirSync(buildDir(target), { recursive: true });
+      fs.writeFileSync(markerPath(target), JSON.stringify({ startedAt, phase: 'digest', request: requestFor(tsFixture(), target) }));
+      assert.equal(readFreshMarker(target), null, `a marker started ${startedAt} reads as fresh, so every reload asks again`);
+    }
+  });
+
+  test('review F6: a build that fails after its folder became a link does not mark its ending through it', async () => {
+    const target = tmp('t91-target-');
+    const outside = tmp('t91-outside-');
+    let before: string[] = [];
+    const core: BuildCore = {
+      ...realCore,
+      digest: () => {
+        fs.cpSync(buildDir(target), outside, { recursive: true });
+        fs.renameSync(buildDir(target), path.join(target, '.repo-tour', 'moved'));
+        fs.symlinkSync(outside, buildDir(target));
+        before = contents(outside);
+        return Promise.reject(new Error('the network blinked'));
+      },
+    };
+    const outcome = await buildFromRequest(requestFor(tsFixture(), target), context({ core }));
+    assert.ok(before.length > 0, 'the fixture has to swap the link in during the read');
+    assert.deepEqual(contents(outside), before, 'the ending wrote endedAt, or removed something, through the link');
+    assert.equal(outcome.ok, false);
   });
 
   test('a Cancel over a linked .repo-tour removes nothing where it points: another build\'s marker, request and temp file stay', async () => {
