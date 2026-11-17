@@ -501,6 +501,18 @@ suite('release: the notes a stranger reads', () => {
     }
   });
 
+  test('each paragraph is one line: GitHub renders a single newline in a release body as a line break', () => {
+    let inFence = false;
+    let prose = 0;
+    for (const line of notes().split('\n')) {
+      if (line.trim().startsWith('```')) { inFence = !inFence; continue; }
+      if (inFence || line.trim() === '' || line.startsWith('#')) continue;
+      prose += 1;
+      assert.match(line, /[.:]$/, `a line that does not end a sentence breaks mid-sentence on GitHub: ${line}`);
+    }
+    assert.ok(prose >= 10, `the control: the notes have prose to check (${prose} lines)`);
+  });
+
   test('they carry no ticket number and no local path', () => {
     const text = notes();
     assert.ok(text.includes(RUN_URL), 'the control: these are the notes, not an empty string that contains nothing');

@@ -634,14 +634,15 @@ export interface NotesInput {
 /**
  * The release notes, in Markdown. They say what it is, what it needs, what is proven and what is
  * not, how to install from the file, and exactly which bytes these are and where they came from.
- * No ticket number and no local path: a stranger can read neither.
+ * No ticket number and no local path: a stranger can read neither. Each paragraph is one line,
+ * because GitHub renders a single newline in a release body as a line break.
  */
 export function composeReleaseNotes(input: NotesInput): string {
   const { version, sha, run, vsixName, vsixSha256 } = input;
   return [
-    'Build Tutorials is a VS Code extension that turns an existing repository into a step-by-step tutorial for rebuilding it:',
-    'one decision at a time, each with the options the author had, the why behind the one they took, and the commit where it',
-    'happened. Then you build it yourself, typing as much of it as you choose.',
+    'Build Tutorials is a VS Code extension that turns an existing repository into a step-by-step tutorial for rebuilding it: '
+      + 'one decision at a time, each with the options the author had, the why behind the one they took, and the commit where it '
+      + 'happened. Then you build it yourself, typing as much of it as you choose.',
     '',
     '## What it needs',
     '',
@@ -665,19 +666,19 @@ export function composeReleaseNotes(input: NotesInput): string {
     '   ```',
     '',
     '   or from the Extensions view: *⋯ → Install from VSIX…*, and pick the file.',
-    '3. Run **Build Tutorials: Doctor** from the Command Palette. It says in plain sentences whether it found the core, its',
-    '   four grammars and the `claude` CLI.',
+    '3. Run **Build Tutorials: Doctor** from the Command Palette. It says in plain sentences whether it found the core, its '
+      + 'four grammars and the `claude` CLI.',
     '',
-    `Then **Build Tutorials: Start** builds a tutorial from a GitHub URL or a local folder. The [README](https://github.com/${RELEASE_REPO}#readme)`,
-    'walks through the rest.',
+    'Then **Build Tutorials: Start** builds a tutorial from a GitHub URL or a local folder. '
+      + `The [README](https://github.com/${RELEASE_REPO}#readme) walks through the rest.`,
     '',
     '## Where this file came from',
     '',
     `\`${vsixName}\` is the artifact CI built and checked for one commit, byte for byte. It was not built on anyone's machine.`,
     '',
     `- sha256: \`${vsixSha256}\`. Check your download with \`sha256sum ${vsixName}\`.`,
-    `- CI run: ${run.url}. Every step of it passed, including packaging, which reads the finished archive back, and the`,
-    '  install check, which installs this file into an isolated profile and proves it activates.',
+    `- CI run: ${run.url}. Every step of it passed, including packaging, which reads the finished archive back, and the `
+      + 'install check, which installs this file into an isolated profile and proves it activates.',
     `- Commit: [\`${sha}\`](https://github.com/${RELEASE_REPO}/commit/${sha}), version ${version}.`,
     '',
   ].join('\n');
