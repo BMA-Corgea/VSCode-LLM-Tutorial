@@ -181,6 +181,7 @@ import {
   // that actually compares two files. A reader scanning one should never have to work out
   // which of the two they are looking at.
   runCheck as runStructuralCheck,
+  checkRefusal,
   type CheckOutcome,
 } from '../dial/check.js';
 import {
@@ -189,6 +190,7 @@ import {
   planWrite,
   deliverableEntries,
   reproduceFiles,
+  taughtReadRefusal,
   writeTextAtomic,
   type FileShape,
 } from '../dial/writer.js';
@@ -202,7 +204,7 @@ import {
 } from '../tutor/ask.js';
 import { DetourSession, type DetourAdapters, type DetourView } from '../detour/session.js';
 import { tutorialId } from '../detour/store.js';
-import { tutorContext } from '../tutor/context.js';
+import { WITHHELD_FROM_TUTOR, tutorContext, withheldFromTutorNote } from '../tutor/context.js';
 import type { AskMessage, TutorCore } from '../tutor/core.js';
 import { appendTurn, clearTranscript, getTranscript, sentTurns } from '../tutor/transcript.js';
 import {
@@ -227,6 +229,7 @@ import {
   type StepLike,
 } from './model.js';
 import { resolveInsideTarget } from './paths.js';
+import { isWithheld, type RequestWithheld } from './provenance.js';
 
 /**
  * One consistent snapshot of "where the walk is", as every surface sees it. Structurally this
@@ -324,6 +327,14 @@ export interface WalkView {
   transcript: AskMessage[];
   /** T-6 (AC4): what the tutor is doing, as opposed to what it has said — see `TutorView`. */
   tutor?: TutorView;
+  /**
+   * T-92: why none of this tutorial's reference files are read, when its `request.json` was not
+   * the build's own (`src/walk/provenance.ts`): it came with the folder, or was built in another
+   * editor, or names another root. A STANDING line, on every step, because it explains why the
+   * dial writes nothing, the outline is empty, and Check my work and Ask refuse. Absent for a
+   * tutorial built here, which is the ordinary case.
+   */
+  referenceNote?: string;
   /**
    * T-7: the detour's transient state — is one being written, is one open, and what the last
    * attempt had to say (`DetourView`, `src/detour/session.ts`).
@@ -456,8 +467,12 @@ export interface WalkAdapters {
    * plan carries the decisions — it simply cannot be written INTO, since there is nothing to
    * copy from, so every position behaves like `manual` and nothing is claimed on the learner's
    * behalf.
+   *
+   * T-92: `{ withheld }` is a request this extension did not build HERE (`believeRequest`, which
+   * `src/extension.ts` wires in front of the store's reader). It is walked exactly as a missing
+   * one is, and its sentence is drawn on the page: its reference root never reaches a reader.
    */
-  loadRequest(target: string): ResolvedRequest | null;
+  loadRequest(target: string): ResolvedRequest | RequestWithheld | null;
   /**
    * repo-tour's core, lazily. A PROMISE rather than the getter `StepPanelDeps.skins` uses,
    * and the difference is load-bearing: `activate()` is synchronous and opens the walk before
@@ -676,6 +691,14 @@ export class WalkSession {
    */
   private detourSession: DetourSession | undefined;
 
+  /**
+   * T-92: the sentence saying why this tutorial's reference is not read, when `loadRequest`
+   * answered `{ withheld }`; `undefined` otherwise. Set once, at `open`, beside `request`, which is
+   * then `null`: so every reader that asks `this.request` for a root finds none, and every place
+   * that refuses for want of one can say the true reason instead of "no reference recorded".
+   */
+  private referenceWithheld: string | undefined;
+
   private constructor(
     public readonly target: string,
     private readonly adapters: WalkAdapters,
@@ -713,13 +736,19 @@ export class WalkSession {
    */
   static open(target: string, adapters: WalkAdapters): WalkSession {
     const plan = adapters.loadPlan(target);
+    // The adapters in the order they always ran: plan, progress, request.
+    const progress = adapters.loadProgress(target, plan);
+    const loaded = adapters.loadRequest(target);
+    // T-92: an unbelieved request is held as no request at all, and its sentence beside it.
+    const withheld = loaded !== null && isWithheld(loaded) ? loaded.withheld : undefined;
     const session = new WalkSession(
       target,
       adapters,
       plan,
-      adapters.loadProgress(target, plan),
-      adapters.loadRequest(target),
+      progress,
+      loaded !== null && isWithheld(loaded) ? null : loaded,
     );
+    session.referenceWithheld = withheld;
     session.resolveCurrent();
     session.refresh(true);
     session.enterCurrentStep();
@@ -933,6 +962,12 @@ export class WalkSession {
       }
       if (outcome.note !== undefined) {
         this.refresh(false);
+        return;
+      }
+      // T-92: with no reference to copy from, nothing was copied, and "already copied" would be
+      // false. The page no longer offers the copy then (`buildView`); this is a stale page's press.
+      if (this.request === null) {
+        if (step) this.noteFor(step.id, `Nothing was copied. ${this.referenceWithheld ?? 'This tutorial has no reference repository recorded, so there is nothing to copy from.'}`);
         return;
       }
       // Pressed against a page whose offer is already spent — the panel hides it once
@@ -1394,7 +1429,10 @@ export class WalkSession {
     // answer `applyCheck` gives for the same folder, in the same words.
     const refRoot = this.request?.referenceRoot;
     if (refRoot === undefined) {
-      refuse('This tutorial has no reference repository recorded, so there is nothing for the tutor to read. Nothing was asked, and your question is still in the box.');
+      refuse(this.referenceWithheld !== undefined
+        // T-92: the true reason, which says nothing is sent; then what happened to their question.
+        ? `${this.referenceWithheld} Nothing was asked, and your question is still in the box.`
+        : 'This tutorial has no reference repository recorded, so there is nothing for the tutor to read. Nothing was asked, and your question is still in the box.');
       return;
     }
 
@@ -1448,6 +1486,9 @@ export class WalkSession {
     // rebuilds turns as `{ role, content }` and so keeps the sentence while dropping the field
     // that marked it. The filter belongs here, upstream of that trimmer.
     ticket.send(settings, ctx, sentTurns(this.progress, stepId));
+    // T-92: the context carries no diff of a withheld file, and the learner is told so beside the
+    // input, as a sentence about this ask: their question went, their file did not.
+    if (ctx.build?.learnerDiff === WITHHELD_FROM_TUTOR) this.setTutorNote(stepId, withheldFromTutorNote(String(step.target.file)));
 
     // Registered BEFORE the commit, and the order is the last of AC4's locks. `commit`
     // persists and then pushes to four surfaces, any of which is an adapter that can throw —
@@ -1996,7 +2037,17 @@ export class WalkSession {
 
     const refRoot = this.request?.referenceRoot;
     if (refRoot === undefined) {
-      this.noteFor(stepId, 'This tutorial has no reference repository recorded, so there is nothing to check against.');
+      this.noteFor(stepId, this.referenceWithheld !== undefined
+        ? `Nothing was checked. ${this.referenceWithheld}`
+        : 'This tutorial has no reference repository recorded, so there is nothing to check against.');
+      return;
+    }
+    // T-92: a reference file the check will not read (withheld by name, or leaving the reference
+    // through a link) is said as such. `runStructuralCheck` answers `null` for it, which reads below
+    // as "has not been created", false of a file the learner can see.
+    const refused = checkRefusal(refRoot, this.target, step);
+    if (refused !== null) {
+      this.noteFor(stepId, refused);
       return;
     }
 
@@ -2247,6 +2298,9 @@ export class WalkSession {
     if (to === null || !this.adapters.fileExists(to)) return false;
     const from = resolveInsideTarget(refRoot, entry);
     if (from === null) return false;
+    // T-92 (security review, N3): an entry that leaves the reference through a link, or is a link to a
+    // withheld file, is never written, so it replaces nothing; and its source is not read to say so.
+    if (taughtReadRefusal(refRoot, entry) !== null) return false;
     const mine = this.adapters.readText(to);
     return !(mine !== undefined && mine === this.adapters.readText(from) && !mine.includes('\uFFFD'));
   }
@@ -2465,9 +2519,11 @@ export class WalkSession {
       ...(this.choiceRefusal?.stepId === step.id
         ? { choiceNote: choiceRefusalText(this.choiceRefusal.reason, this.choiceRefusal.inARow) }
         : {}),
-      ...(reproducible > 0
+      // T-92: offered only with a reference to copy from; a press with none copies nothing.
+      ...(reproducible > 0 && this.request !== null
         ? { reproduce: { count: reproducible, done: this.progress.reproduced !== undefined } }
         : {}),
+      ...(this.referenceWithheld !== undefined ? { referenceNote: this.referenceWithheld } : {}),
       // T-6 (AC2). Read through `getTranscript` and never off `progress.steps[id].transcript`,
       // because that is the one function that decides what is safe to render back to a learner
       // as their own conversation — `store.ts` validates `check` and passes `transcript`

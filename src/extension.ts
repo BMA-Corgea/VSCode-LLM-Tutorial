@@ -34,6 +34,7 @@ import { WalkSession, type WalkAdapters, type WalkView } from './walk/session.js
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
+import { believeRequest } from './walk/provenance.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
 import { tutorCoreFor, type TutorCore } from './tutor/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
@@ -414,7 +415,10 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     fileExists: (absPath) => isOpenableFile(target, absPath),
     loadPlan,
     loadProgress,
-    loadRequest,
+    // T-92: `request.json` is believed only on the build's own record in this extension's storage,
+    // asked before the store resolves anything. A folder whose `.repo-tour/` came with it is walked,
+    // and reads no reference at all.
+    loadRequest: (t) => believeRequest(t, context.globalStorageUri.fsPath, loadRequest),
     saveProgress,
 
     // ── T-5: what the dial needs from the outside world ──────────────────────────────────

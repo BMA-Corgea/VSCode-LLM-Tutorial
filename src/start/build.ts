@@ -21,6 +21,7 @@ import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import { gitAttributesRefusal, hazardousGitAttributes } from './gitattributes.js';
 import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, pidSpace, type BuildRequest } from './request.js';
+import { recordBuiltReference } from '../walk/provenance.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
 // repo-tour's real types — see src/core.ts's header for why the boundary is typed this loosely). ──
@@ -1068,6 +1069,12 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     // Into the build folder proved just now (T-91), never through a link swapped in during the build.
     const dir = provenBuildDir(target);
     writeJsonAtomic(path.join(dir, 'request.json'), { ...request, referenceRoot: repoRoot }, writeOps);
+    // T-92: the record a walk believes `request.json` by, in the extension's own storage, bound to
+    // the bytes just written and to the root they name. A repository can ship a `request.json`; it
+    // cannot write this. Before the plan, so a folder whose walk can open always has its record. A
+    // failure here is the build's own (`fail`, marker kept, no plan written). It reads the request
+    // back at `realpath(target)/.repo-tour/build/`, the folder T-91 has just proved.
+    recordBuiltReference(ctx.globalStorageRoot, target, repoRoot);
     writeJsonAtomic(path.join(dir, 'plan.json'), interpreted.plan, writeOps);
   } catch (err) {
     return fail(err);
