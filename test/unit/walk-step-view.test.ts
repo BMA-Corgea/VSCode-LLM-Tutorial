@@ -45,7 +45,7 @@ import path from 'node:path';
 import { DIALS } from '../../src/start/request.js';
 import { type SkinsModule } from '../../src/start/view.js';
 import type { CheckReport } from '../../src/dial/core.js';
-import { FALLBACK_DIAL, stepDial, type OptionLike, type PlanLike, type StepLike } from '../../src/walk/model.js';
+import { FALLBACK_DIAL, MODEL_CODE_NOTE, stepDial, type OptionLike, type PlanLike, type StepLike } from '../../src/walk/model.js';
 import { MAX_OPTION_ID,
   MAX_ASK_TEXT, NOTHING_TO_ASK_MESSAGE, handleStepMessage, parseStepMessage,
   type StepEffects, type StepViewState,
@@ -3349,6 +3349,15 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
     delete bare.target;
     const plan = { ...base.plan, steps: [...base.plan.steps, bare as StepLike], divergences: [{ stepId: ON, answer: 'stream', staleDependents: ['st-9-bare'], keptOnOldRoad: ['st-9-bare'], at: 't', tree: 'k/t' }] };
     assert.ok(html({ ...base, plan }).includes('step 9'), 'the page draws, naming the step by its place');
+  });
+
+  // T-61 (a): only a step with code of its own says a model wrote it; a chapter step a re-plan wrote has none.
+  test('a chapter step a re-plan wrote does not say a model wrote its code: it has none (T-61 a)', () => {
+    const base = stateAt('st-1-shape-src');
+    const shape = { ...base.step, derivedFrom: 'st-2-file-parse' };
+    assert.ok(!html({ ...base, step: shape }).includes(escapeForHtml(MODEL_CODE_NOTE)), 'a chapter step has no code');
+    const file = { ...stateAt('st-2-file-parse').step, derivedFrom: 'st-2-file-parse' };
+    assert.ok(html({ ...stateAt('st-2-file-parse'), step: file }).includes(escapeForHtml(MODEL_CODE_NOTE)), 'discriminates: a file step a re-plan wrote does');
   });
 
   // The stopped re-review's NF6: on D's own page, the landing's line and the page's note said one fact twice.

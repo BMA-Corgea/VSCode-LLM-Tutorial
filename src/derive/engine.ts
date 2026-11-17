@@ -367,24 +367,16 @@ const REFUSED_PY_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }
   { re: /(?<![.\w])os\s*\.\s*exec\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bexec\w*\b/, name: 'os.exec', what: RUNS_PROGRAMS },
   { re: /(?<![.\w])os\s*\.\s*spawn\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bspawn\w*\b/, name: 'os.spawn', what: RUNS_PROGRAMS },
 ];
-/** A CommonJS `require` of one of the refused modules, read on the file's own text (`codeOnly` blanks the name). */
-const JS_REQUIRE_OF = /(?<![.\w$])require\s*\(\s*(['"`])((?:node:)?([\w/]+))\1\s*\)/g;
 const REFUSED_TAIL = 'code a model writes may not, so this step keeps the author\u2019s road';
 
-function runsAsTheLearner(extract: ExtractLike, content: string, code: string, language: CodeLanguage): string | null {
+function runsAsTheLearner(extract: ExtractLike, code: string, language: CodeLanguage): string | null {
   const refused = language === 'python' ? REFUSED_PYTHON_MODULES : REFUSED_NODE_MODULES;
+  // repo-tour's `extract` reads every import, a CommonJS `require` of a plain string included.
   for (const imp of extract.imports) {
     if (imp.resolved !== null || imp.raw.startsWith('.')) continue;
     const name = language === 'python' ? (imp.raw.split('.')[0] ?? '') : (imp.raw.replace(/^node:/, '').split('/')[0] ?? '');
     const what = refused.get(name);
     if (what !== undefined) return `imports ${quote(imp.raw)}, ${what}: ${REFUSED_TAIL}`;
-  }
-  if (language !== 'python') {
-    for (const m of content.matchAll(JS_REQUIRE_OF)) {
-      const what = REFUSED_NODE_MODULES.get((m[3] ?? '').split('/')[0] ?? '');
-      // Only where the code itself has a require there: a comment or a string that quotes one is not one.
-      if (what !== undefined && /(?<![.\w$])require\s*\(/.test(code.slice(m.index, m.index + m[0].length))) return `requires ${quote(m[2] ?? '')}, ${what}: ${REFUSED_TAIL}`;
-    }
   }
   for (const { re, name, what } of language === 'python' ? REFUSED_PY_CALLS : REFUSED_JS_CALLS) {
     if (re.test(code)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
@@ -401,7 +393,7 @@ export function refusalForFile(
   const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles, rules)
     ?? computedImportReason(code, language, rules)
     ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null)
-    ?? runsAsTheLearner(extract, content, code, language);
+    ?? runsAsTheLearner(extract, code, language);
   return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
 }
 
