@@ -126,6 +126,8 @@ interface Harness {
   session: WalkSession;
   target: string;
   overwriteAsks: string[];
+  /** what each Overwrite question said, in order (T-61) */
+  overwriteQuestions: string[];
   view(): WalkView;
   html(): string;
   /** the options area's notes, as text */
@@ -148,6 +150,7 @@ function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'
   saveProgress(target, progress(plan));
   fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial, referenceRoot: repo }));
   const overwriteAsks: string[] = [];
+  const overwriteQuestions: string[] = [];
   const core: TutorCore = { ...realCore, runLlm: () => Promise.reject(new Error('a test in walk-replan-engine.test.ts reached the real model')), availability: () => Promise.resolve({ ok: true, detail: 'stubbed' }) };
   const store = path.join(gs, 'derived');
   const replanner: Replanner = {
@@ -166,7 +169,7 @@ function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'
     reportError: () => undefined,
     core: () => Promise.resolve(dialCore),
     readText: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return undefined; } },
-    confirmOverwrite: (file) => { overwriteAsks.push(file); return Promise.resolve(true); },
+    confirmOverwrite: (file, question) => { overwriteAsks.push(file); overwriteQuestions.push(question ?? ''); return Promise.resolve(true); },
     git: () => Promise.reject(new Error('no git here')),
     commitPerStep: () => false,
     replanner: () => Promise.resolve(replanner),
@@ -174,7 +177,7 @@ function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'
   const session = WalkSession.open(target, adapters);
   sessions.push(session);
   const h: Harness = {
-    session, target, overwriteAsks,
+    session, target, overwriteAsks, overwriteQuestions,
     view: () => { const v = session.getView(); assert.ok(v, 'the walk has a current step'); return v; },
     html: () => renderStepHtml({ ...h.view(), skin: 'system' }, SKINS),
     notes: () => {
@@ -314,6 +317,46 @@ suite('one writer per file after a symbol press, through the walk and the real e
     const replacing = ((m.asked.filter((a) => a.task === 'replan').at(-1)?.input['replacing'] as Array<{ path: string }> | undefined) ?? []).map((r) => r.path);
     assert.deepEqual(replacing.filter((p) => p === 'src/api/routes.ts'), ['src/api/routes.ts'], `routes.ts is asked about once: ${JSON.stringify(replacing)}`);
     assert.deepEqual(loadPlan(h.target).steps.filter((s) => s.target.file === 'src/api/routes.ts').map((s) => `${s.kind}:${s.derivedFrom ?? 'the author'}`), ['file:s-parse']);
+  });
+});
+
+// T-61 (a), ruled 2026-11-17: wherever code a model wrote reaches the learner, the walk says so first.
+suite('model-written code: the learner is told before it reaches them (T-61 a)', () => {
+  const SAID = /A model wrote this code\. Read it before you run it: it runs with your permissions\./;
+
+  test('the dial says it when it writes a file a model wrote, and not when it writes the author\'s', async () => {
+    const h = harness(at('s-routes'), scriptedModel().run, 'automated');
+    await drain(h);
+    assert.match(h.view().writeNote ?? '', /written for you/, 'discriminates: the author\'s file was written');
+    assert.doesNotMatch(h.view().writeNote ?? '', SAID, 'the author\'s code is not the model\'s');
+    await symbolPress(h);
+    h.session.goTo('s-handle'); await drain(h);
+    assert.ok(routesOf(h).startsWith(MODELS), 'discriminates: D wrote the model\'s code');
+    assert.match(h.view().writeNote ?? '', SAID, `the note says a model wrote it: ${JSON.stringify(h.view().writeNote ?? null)}`);
+  });
+
+  test('the Overwrite question for a file a model wrote says so, and the author\'s does not', async () => {
+    const h = harness(at('s-routes'), scriptedModel().run, 'automated', { 'src/api/routes.ts': 'the learner\'s own routes.ts\n' });
+    await drain(h);
+    assert.equal(h.overwriteQuestions.length, 1, 'discriminates: the author\'s file was asked about');
+    assert.doesNotMatch(h.overwriteQuestions[0]!, SAID);
+    await symbolPress(h);
+    h.session.goTo('s-handle'); await drain(h);
+    assert.equal(h.overwriteQuestions.length, 2, 'discriminates: the model\'s file was asked about');
+    assert.match(h.overwriteQuestions[1]!, SAID, `the question says a model wrote it: ${JSON.stringify(h.overwriteQuestions[1])}`);
+  });
+
+  test('every step whose code a model wrote says it on its page, once, and no author\'s step does', async () => {
+    const h = harness(at('s-routes'), scriptedModel().run, 'manual');
+    await drain(h);
+    assert.doesNotMatch(h.notes(), SAID, 'an author\'s step');
+    await symbolPress(h);
+    assert.equal((h.notes().match(new RegExp(SAID.source, 'g')) ?? []).length, 1, `D's page, once: ${JSON.stringify(h.notes())}`);
+    const fresh = loadPlan(h.target).steps.find((s) => s.derivedFrom !== undefined && s.id !== 's-handle' && s.kind === 'file')!;
+    h.session.goTo(fresh.id); await drain(h);
+    assert.match(h.notes(), SAID, 'a step a re-plan wrote');
+    h.session.goTo('s-routes'); await drain(h);
+    assert.doesNotMatch(h.notes(), SAID, 'the author\'s file step D took over');
   });
 });
 

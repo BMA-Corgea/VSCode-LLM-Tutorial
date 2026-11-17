@@ -493,9 +493,10 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
      * what the dial would write (identical content is not a conflict), and only once per
      * step per session. A dismissed dialog is `false`: silence means keep what they have.
      */
-    confirmOverwrite: async (relPath) => {
+    // The walk words the question (`overwriteQuestion`): it says when a model wrote the code it would write (T-61).
+    confirmOverwrite: async (_relPath, question) => {
       const choice = await vscode.window.showWarningMessage(
-        `${relPath} already has your own changes. Overwrite it with this step's version?`,
+        question,
         { modal: true },
         'Overwrite',
         'Keep mine',

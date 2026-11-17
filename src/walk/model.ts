@@ -221,6 +221,18 @@ export function stepsTakenOverBy(plan: PlanLike, writer: StepLike): StepLike[] {
   return byOrdinal(plan).filter((s) => takenOverIn(writers, s)?.id === writer.id);
 }
 
+/**
+ * T-61 (a), ruled 2026-11-17: said wherever code a model wrote reaches the learner, on the page of every step whose code a
+ * model wrote, in what the dial says when it writes such a file, and in the question before it writes over theirs. The
+ * learner runs their app themselves (the walk's check is structural), so this is where they are told.
+ */
+export const MODEL_CODE_NOTE = 'A model wrote this code. Read it before you run it: it runs with your permissions.';
+
+/** T-61: whether this step's code is a model's: a step a re-plan wrote or re-derived, with a file of its own. */
+export function writesModelCode(step: Pick<StepLike, 'kind' | 'derivedFrom'>): boolean {
+  return step.derivedFrom !== undefined && step.kind !== 'shape';
+}
+
 /** T-22: the plan's own record of the last re-plan decided at this step, if it has one. */
 export function divergenceAt(plan: PlanLike, stepId: string): { answer: string | undefined; staleDependents: string[]; keptOnOldRoad: string[]; replanned: boolean } | undefined {
   const all: unknown = plan['divergences'];

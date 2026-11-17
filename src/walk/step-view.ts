@@ -176,7 +176,7 @@ import { codicon } from '../webview/codicons.js';
 import { renderPage, type PageAssets } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
-import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, fileWriters, optionsTable, planEnds, pressRules, stepsTakenOverBy, takenOverIn, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
+import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, MODEL_CODE_NOTE, writesModelCode, divergenceAt, fileWriters, optionsTable, planEnds, pressRules, stepsTakenOverBy, takenOverIn, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
 import { DERIVED_CODE_MISSING_MESSAGE } from './reference.js';
 
@@ -910,6 +910,8 @@ function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replan
   const { road, stale } = roadNotes(step, plan);
   const roadNote = road === '' ? '' : `<p class="options-diverged" role="note">${escapeHtml(road)}</p>`;
   const writtenNote = noAuthor ? `<p class="options-diverged" role="note">${escapeHtml(WRITTEN_BY_THE_MODEL_NOTE)}</p>` : '';
+  // T-61 (a): the step's code is a model's, and it runs as the learner when they run their app.
+  const modelCodeNote = writesModelCode(step) ? `<p class="options-diverged options-model-code" role="note">${escapeHtml(MODEL_CODE_NOTE)}</p>` : '';
   const staleNote = stale === '' ? '' : `<p class="options-stale options-diverged" role="note">${escapeHtml(stale)}</p>`;
   const running = replanning === undefined
     ? ''
@@ -917,7 +919,7 @@ function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replan
     : `<p class="options-replanning" id="replan-status" role="status">${codicon('loading', 'lead', { spin: true })}${escapeHtml(planText(replanning.message))} <button type="button" class="btn" id="btn-replan-cancel">${REPLAN_CANCEL_LABEL}</button></p>`;
   // T-22 (code review SF5): a re-derived step whose code is gone says so where its road is drawn.
   const missingNote = codeMissing ? `<p class="options-refused options-missing" role="note">${escapeHtml(DERIVED_CODE_MISSING_MESSAGE)}</p>` : '';
-  const notes = `${running}${refusedNote}${missingNote}${roadNote}${writtenNote}${staleNote}`;
+  const notes = `${running}${refusedNote}${missingNote}${roadNote}${writtenNote}${modelCodeNote}${staleNote}`;
   const outcome = notes !== '' ? `<div class="options-outcome" id="outcome-choice">${notes}</div>` : '';
   return `${outcome}<ul class="options">${items}</ul>${omittedNote}`;
 }
