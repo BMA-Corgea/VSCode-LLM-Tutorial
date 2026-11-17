@@ -110,9 +110,11 @@ function run(command, args) {
   return result(spawnSync(command, args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
 }
 
-// gh with no prompts, no update notice, and no forced terminal formatting in what it prints.
+// gh with no prompts, no update notice, and no forced terminal formatting in what it prints:
+// CLICOLOR_FORCE makes gh colour its JSON, which then reads as no JSON at all (review N2).
 const ghEnv = { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
 delete ghEnv.GH_FORCE_TTY;
+delete ghEnv.CLICOLOR_FORCE;
 
 /** The one way this file reaches GitHub. A command that is not a read is refused before it runs. */
 function readOnly(args) {
@@ -194,7 +196,11 @@ const { vsixName } = must(R.checkArtifactEntries(run('unzip', ['-Z1', zipPath]),
 const vsixDir = path.join(runDir, 'ci-vsix');
 fs.mkdirSync(vsixDir);
 const unpacked = run('unzip', ['-qq', '-n', zipPath, '-d', vsixDir]);
-must(R.checkExtraction(unpacked, fs.readdirSync(vsixDir), vsixName));
+// By type, not by name (review N5): unzip restores a symlink entry as a link, and everything below
+// would then read, hash and upload whatever it points at.
+const unpackedEntries = fs.readdirSync(vsixDir, { withFileTypes: true })
+  .map((entry) => (entry.isFile() ? entry.name : `${entry.name} (not a file)`));
+must(R.checkExtraction(unpacked, unpackedEntries, vsixName));
 const vsixPath = path.join(vsixDir, vsixName);
 const vsix = must(R.checkVsixManifest(run('unzip', ['-p', vsixPath, 'extension/package.json']), version));
 const vsixSha = R.sha256Hex(fs.readFileSync(vsixPath));
