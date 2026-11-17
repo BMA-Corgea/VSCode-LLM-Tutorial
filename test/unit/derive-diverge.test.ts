@@ -467,9 +467,13 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     const plan: PlanLike = { ...repoPlan(), chapters: [{ key: 'src', title: 'src', subtitle: 's', tierPath: 'src' }], steps: [
       step('s-src', 1, 'src', 'shape', 'src'), step('s-api', 2, 'src', 'file', 'src/api.ts', ['s-zed']), step('s-zed', 3, 'src', 'file', 'src/zed.ts', ['s-api']),
     ] };
-    const out = await divergePlan(input(plan, root, 's-api', 'alt-1', ['s-src']), depsFor(model().run, tempDir('diverge-gs-'), tempDir('diverge-target-')));
+    const m = model();
+    const out = await divergePlan(input(plan, root, 's-api', 'alt-1', ['s-src']), depsFor(m.run, tempDir('diverge-gs-'), tempDir('diverge-target-')));
     if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
     assert.equal(stepNamed(out.plan, 's-zed'), undefined, 'discriminates: zed.ts imports the decision, so it was replaced');
+    // The re-check of 2026-11-17, C6: the question's "steps that stay exactly as they are" never holds one it replaces.
+    const shown = ((m.asked.find((a) => a.task === 'replan')?.input['shown'] as Array<{ path: string }> | undefined) ?? []).map((s) => s.path);
+    assert.ok(!shown.includes('src/zed.ts'), `zed.ts is replaced, so it is not shown as a step that stays: ${JSON.stringify(shown)}`);
     const ids = new Set(out.plan.steps.map((s) => s.id));
     assert.deepEqual(out.plan.steps.flatMap((s) => s.dependsOn.filter((dep) => !ids.has(dep)).map((dep) => `${s.id} -> ${dep}`)), [], 'no step depends on one the re-plan removed');
   });
@@ -588,17 +592,36 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.ok(out.keptOnOldRoad?.includes('s-handle'), `and D is named as kept on the old road: ${JSON.stringify(out.keptOnOldRoad)}`);
   });
 
-  test('D never stands on a step at its own file, even in a plan that had it standing on the file step it took over', async () => {
+  // The re-check of 2026-11-17, C5: a plan written before one writer per file has D standing on the file step it took over.
+  test('on a plan that had D standing on the file step it took over, D stands on what that step stood on, and is shown that, never its own file', async () => {
     const { root, gs, target, first } = await symbolPress();
     const old = { ...first.plan, steps: first.plan.steps.map((s) => (s.id === 's-handle' ? { ...s, dependsOn: ['s-routes'] } : s)) };
     const m = model();
     const out = await divergePlan(input(old, root, 's-handle', 'author', walkedAt(old, 's-handle'), treeOf(first)), depsFor(m.run, gs, target));
     if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
-    assert.deepEqual(stepNamed(out.plan, 's-handle')?.dependsOn, [], `D stands on no step at routes.ts: ${JSON.stringify(stepNamed(out.plan, 's-handle')?.dependsOn)}`);
+    assert.deepEqual(stepNamed(out.plan, 's-handle')?.dependsOn, ['s-parse'], `D stands on what routes.ts's step stood on: ${JSON.stringify(stepNamed(out.plan, 's-handle')?.dependsOn)}`);
     const own = m.asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/api/routes.ts');
     assert.ok(own, 'discriminates: D\'s own code was asked for');
     const shown = ((own.input['dependencies'] as Array<{ path: string }> | undefined) ?? []).map((dep) => dep.path);
     assert.ok(!shown.includes('src/api/routes.ts'), `nor is its code question shown its own file as something it stands on: ${JSON.stringify(shown)}`);
+    assert.ok(shown.includes('src/parse.ts'), `and it is shown parse.ts, which the file imports: ${JSON.stringify(shown)}`);
+  });
+
+  // The re-check of 2026-11-17, C1: one writer per file stopped at the graph. D's own code question and stored edges read
+  // the raw edge to a taken-over step, and showed the author's decision, road and reason over the model's code.
+  test('a press at a file that imports a file a symbol press took over is shown that file under the decision that writes it now', async () => {
+    const plan = repoPlan();
+    plan.steps = plan.steps.map((s) => (s.id === 's-render' ? { ...s, dependsOn: ['s-routes'] } : s));
+    const { root, gs, target, first } = await symbolPress(plan, ['s-render']);
+    const m = model();
+    const out = await divergePlan(input(first.plan, root, 's-render', 'alt-1', walkedAt(first.plan, 's-render'), treeOf(first)), depsFor(m.run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const own = m.asked.find((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'src/view/render.ts');
+    const routes = ((own?.input['dependencies'] as Array<{ path: string; question: string; why: string }> | undefined) ?? []).find((dep) => dep.path === 'src/api/routes.ts');
+    assert.ok(routes, 'discriminates: render.ts\'s code question is shown routes.ts');
+    assert.equal(routes.question, 's-handle?', `under the decision of the step that writes it now, not the author's step it took over: ${JSON.stringify(routes)}`);
+    assert.match(routes.why, /The learner chose this road instead of the recommended one/, 'with the reason for the road that code follows, not the author\'s');
+    assert.deepEqual(stepNamed(out.plan, 's-render')?.dependsOn, ['s-handle'], 'and render.ts now stands on that step');
   });
 
   // The stopped re-review's NF3: a step downstream of D that a walked step stands on is kept, on the old road, and it was
@@ -651,12 +674,16 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.deepEqual([...first.written].sort(), first.plan.steps.filter((s) => !before.has(s.id)).map((s) => s.id).sort(), 'written: exactly the steps it gained');
     assert.ok(!first.replaced.includes('s-parse') && !first.written.includes('s-parse'), 'D is in neither: it keeps its id, and its own code is counted apart');
 
+    // The re-check of 2026-11-17, C4 (NF4's second fix): a replaced id never comes back, so nothing the learner did at the
+    // old step, and no record the plan kept at its id, is inherited by the new one.
     const routes = first.plan.steps.find((s) => s.target.file === 'src/api/routes.ts' && s.kind === 'file')!;
     const second = await divergePlan(input(first.plan, root, 's-parse', 'author', [], treeOf(first)), depsFor(model(undefined, keepsItsWords).run, gs, target));
     if (!second.ok || !second.changed) assert.fail(second.ok ? 'nothing changed' : second.reason);
-    assert.ok(second.plan.steps.some((s) => s.id === routes.id), 'discriminates: the model kept the words, so the step came back under its old id');
+    const again = second.plan.steps.find((s) => s.target.file === 'src/api/routes.ts' && s.kind === 'file')!;
+    assert.deepEqual([again.decision.question, again.decision.options.map((o) => o.label)], [routes.decision.question, routes.decision.options.map((o) => o.label)], 'discriminates: the model kept the words, so the old id was its id');
     assert.ok(second.replaced.includes(routes.id), 'its code is gone, so it was replaced');
-    assert.ok(second.written.includes(routes.id), 'and the step under that id is one this press wrote');
+    assert.notEqual(again.id, routes.id, 'and the step written in its place has an id of its own');
+    assert.ok(second.written.includes(again.id), 'which is one this press wrote');
   });
 
   // The re-review of the review fixes, R10 (must-fix): a new file was never shown a new file it stands on, because
