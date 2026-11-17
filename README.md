@@ -12,22 +12,34 @@ share one core.
 
 ## Install
 
-Grab the `.vsix` and install it from the command line, or from the Extensions view's
-*⋯ → Install from VSIX…*:
+Download `build-tutorials-0.1.0.vsix` from the latest release on the
+[Releases page](https://github.com/BMA-Corgea/VSCode-LLM-Tutorial/releases), then install it from
+the command line, or from the Extensions view's *⋯ → Install from VSIX…*:
 
 ```bash
-codium --install-extension build-tutorials-0.0.1.vsix   # VSCodium
-code   --install-extension build-tutorials-0.0.1.vsix   # VS Code
+codium --install-extension build-tutorials-0.1.0.vsix   # VSCodium
+code   --install-extension build-tutorials-0.1.0.vsix   # VS Code
 ```
+
+The `.vsix` on a release is the one CI built and checked for that release's commit, never a build
+from somebody's machine, and the release notes name its sha256, the CI run and the commit.
+
+**What it needs:**
+
+- VS Code or VSCodium 1.95 or later.
+- git.
+- The `claude` CLI on your PATH and logged in. It is what the build asks for each step's *why*,
+  and what the tutor and the detour talk to. Everything else works without it, and the doctor
+  tells you plainly whether it is there.
+
+Proven on Linux only: VS Code 1.145.2 and VSCodium on the maintainer's machine, and VS Code 1.146.0
+on GitHub's runner. macOS and Windows are unproven. It builds from an existing repository only.
+Building from an idea, in your own words, is not available yet.
 
 **The `.vsix` carries its own engine.** repo-tour's core, `web-tree-sitter` and the
 tree-sitter grammars travel inside the package, so there is nothing else to clone and nothing
 to configure. Leave `buildTutorials.repoTourPath` empty and it uses the copy it shipped with;
 you only ever set it to run against a repo-tour checkout you are editing yourself.
-
-You will also want the **`claude` CLI** on your PATH. It is what the build asks for each step's
-*why*, and what the tutor and the detour talk to. Everything else works without it, and the
-doctor tells you plainly whether it is there.
 
 Run **Build Tutorials: Doctor** from the Command Palette any time you want to know what this
 machine can actually do: whether the core was found and where, whether each of its eight
@@ -353,6 +365,16 @@ value set once cannot authorise the next release) and the artifact's **file name
 sitting at the right name reads as a fresh one — the transcript says so on screen rather than
 implying more. Both registry tools are pinned to exact versions, because a publish is the one
 moment this project runs third-party code with a live credential in scope.
+
+**A GitHub release carries the `.vsix` CI built, never one built here.** `node
+scripts/release-draft.mjs <sha>` (after `npm run -s build`) takes one commit on `main` and checks
+that its CI run passed every step, that the artifact the run uploaded is unexpired and hashes to
+the digest GitHub recorded, and that the `.vsix` inside is this extension at that commit's
+version. It then prints, and does not run, the `gh release create --draft` command that would put
+that `.vsix` on a draft release, with notes saying what it is, what it needs and where it came
+from. `--verify-draft` checks the draft's own `.vsix` against the CI artifact's, byte for byte.
+Every command the script runs only reads from GitHub; creating and publishing the draft are the
+owner's.
 
 ## Licence
 
