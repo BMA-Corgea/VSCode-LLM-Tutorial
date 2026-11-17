@@ -20,6 +20,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, pidSpace, type BuildRequest } from './request.js';
+import { recordBuiltReference } from '../walk/provenance.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
 // repo-tour's real types — see src/core.ts's header for why the boundary is typed this loosely). ──
@@ -873,6 +874,10 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     // Resume finishes the job) or a COMPLETE plan — never a half-written file with nothing
     // left to signal that it is broken (T-3 rework, review finding 2).
     const writeOps = ctx.writeOps ?? realFsWriteOps;
+    // T-92: the record a walk believes `request.json`'s root by, in the extension's own storage,
+    // FIRST, so this folder never holds a request this build does not stand behind. A repository
+    // can ship a `request.json`; it cannot write this. A failure here is the build's own (`fail`).
+    recordBuiltReference(ctx.globalStorageRoot, target, repoRoot);
     // `repoRoot`, not `request.repo`: for a GitHub URL those differ, and the one worth
     // recording is where the clone actually landed. Writing only the URL is what made the
     // dial silently refuse on every URL-built tutorial (T-5 security review, finding 2).

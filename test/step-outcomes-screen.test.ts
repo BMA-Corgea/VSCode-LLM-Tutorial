@@ -36,6 +36,7 @@ import type { PlanLike } from '../src/walk/model.js';
 import { CHECK_HEADING, DETOUR_WAITING_MESSAGE } from '../src/walk/step-view.js';
 import { Screen, sleep } from './support/screen.js';
 import { repoTourShapedPlan, writeFixtureTarget } from './unit/walk-fixtures.js';
+import { recordBuiltHere } from './support/built-here.js';
 
 const TITLE = 'Build Tutorials: Step';
 const STEP = 'st-4-symbol-render';
@@ -97,7 +98,7 @@ function tallPlan(): PlanLike {
 }
 
 /** A tutorial the tutor can be asked about, beside its reference: `WalkSession.beginAsk` needs `request.json`. */
-function tallTutorial(dirs: string[]): string {
+async function tallTutorial(dirs: string[]): Promise<string> {
   const target = fs.mkdtempSync(path.join(os.tmpdir(), 't42-target-'));
   const reference = fs.mkdtempSync(path.join(os.tmpdir(), 't42-reference-'));
   dirs.push(target, reference);
@@ -111,6 +112,8 @@ function tallTutorial(dirs: string[]): string {
     path.join(target, '.repo-tour', 'build', 'request.json'),
     `${JSON.stringify({ idea: '', recreate: true, repo: reference, referenceRoot: reference, target, dial: 'manual' }, null, 2)}\n`,
   );
+  // T-92: what the Start build records, or the walk rightly reads no reference for this request.
+  await recordBuiltHere(target, reference);
   return target;
 }
 
@@ -159,7 +162,7 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
         restorePath = process.env.PATH;
         process.env.PATH = `${shim}${path.delimiter}${process.env.PATH ?? ''}`;
       }
-      await api._walk.openAt(tallTutorial(dirs));
+      await api._walk.openAt(await tallTutorial(dirs));
       await vscode.commands.executeCommand('buildTutorials.step.focus');
       const session = api._walk.session();
       assert.ok(session, 'opening the walk should leave a session behind');

@@ -58,7 +58,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { GIT_TIMEOUT_MS, GitTimeoutError, type GitRunner } from '../../src/start/build.js';
 import type { Dial } from '../../src/start/request.js';
-import type { ResolvedRequest } from '../../src/walk/store.js';
+import { buildDir, loadRequest, type ResolvedRequest } from '../../src/walk/store.js';
+import { NOT_BUILT_HERE, believeRequest, recordBuiltReference, type RequestWithheld } from '../../src/walk/provenance.js';
+import { WITHHELD_FROM_TUTOR } from '../../src/tutor/context.js';
 import type { CheckReport, DialCore, StubQuestion } from '../../src/dial/core.js';
 import {
   emptyProgress,
@@ -157,7 +159,7 @@ interface FakeOptions {
   /** `request.json`. ABSENT MEANS `null`, and that is the T-4 default on purpose: a session
    *  with no request has no reference root, so no position writes and every one of the suites
    *  written before this ticket goes on describing a walk that touches nothing. */
-  request?: ResolvedRequest;
+  request?: ResolvedRequest | RequestWithheld;
   /** `core()` resolves `undefined` — repo-tour is not loadable at all. */
   coreMissing?: boolean;
   /** The core's `check` REJECTS — a missing grammar, an unloadable parser. Real breakage, and
@@ -4162,6 +4164,143 @@ suite('a model call in flight does not freeze the walk (T-7 code review finding 
     assert.equal(view?.detour?.generating, false, 'while the wait really does come off the button');
     assert.equal(view?.tutor?.spend?.unwatched, 1, 'which is what `unwatched` is for');
 
+    session.dispose();
+  });
+});
+
+/**
+ * T-92 (b), at the session: a folder whose `.repo-tour/build/` came with it.
+ *
+ * The REAL disk and the REAL `believeRequest`, wired exactly as `src/extension.ts` wires the
+ * adapter, so the question is the one a stranger meets: a cloned repository ships `plan.json`
+ * and a `request.json` naming a folder of the learner's (here `home`, holding an innocently named
+ * `notes/plan.ts`), and the walk opens. Nothing may be read from that folder, by any of the four
+ * taught reads, and the page must say why rather than look like a dial that does nothing.
+ */
+suite('a tutorial this editor did not build reads no reference, and says why (T-92)', () => {
+  const STEP = 'st-2-file-parse';
+  const FILE = 'notes/plan.ts';
+  const MARKER = 'HOME-SECRET-0a91';
+  const box = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-t92-'));
+
+  suiteTeardown(() => {
+    fs.rmSync(box, { recursive: true, force: true });
+  });
+
+  let n = 0;
+  /** A cloned folder carrying its own plan and a request naming `home`; an empty extension storage. */
+  function shipped(): { target: string; home: string; storage: string; plan: PlanLike } {
+    n += 1;
+    const home = path.join(box, `home-${n}`);
+    fs.mkdirSync(path.join(home, 'notes'), { recursive: true });
+    fs.writeFileSync(path.join(home, FILE), `export const diary = '${MARKER}';\n`);
+    const target = path.join(box, `cloned-${n}`);
+    const plan = planTargeting(FILE);
+    writeFixtureTarget(target, plan);
+    fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify({
+      idea: '', recreate: true, repo: home, referenceRoot: home, target, dial: 'automated',
+    }));
+    const storage = path.join(box, `storage-${n}`);
+    fs.mkdirSync(storage);
+    return { target, home, storage, plan };
+  }
+
+  /** The session as the extension opens it: `loadRequest` through `believeRequest`. */
+  function openOn(target: string, storage: string, plan: PlanLike, extra: FakeOptions = {}): { session: WalkSession; fake: Fake } {
+    const fake = fakeAdapters({
+      plan,
+      target,
+      request: believeRequest(loadRequest(target), target, storage) ?? undefined,
+      // Parked on the file step with no override of its own, so the request's global dial applies.
+      progress: setCurrent(markDone(emptyProgress(plan), 'st-1-shape-src'), STEP),
+      ...extra,
+    });
+    return { session: WalkSession.open(target, fake.adapters), fake };
+  }
+
+  function lastView(fake: Fake): WalkView | undefined {
+    return pick(fake, 'setPanel').at(-1)?.view;
+  }
+
+  test('automated writes nothing from a root nobody built here, and the page says why', async () => {
+    const { target, home, storage, plan } = shipped();
+    const { session, fake } = openOn(target, storage, plan);
+    await session.settled();
+    assert.equal(fs.existsSync(path.join(target, FILE)), false, `${FILE} was copied in from a folder the repository chose`);
+    const read = pick(fake, 'readText').map((call) => call.absPath).filter((p) => p.startsWith(home));
+    assert.deepEqual(read, [], 'the walk read from the folder the repository chose');
+    assert.equal(lastView(fake)?.referenceNote, NOT_BUILT_HERE, 'the page does not say why nothing is written');
+    assert.equal(lastView(fake)?.dial, 'manual', 'the dial claims a position that writes, with nothing to write from');
+    session.dispose();
+  });
+
+  test('Check my work and Ask answer with the same sentence, and nothing reaches the core or a model', async () => {
+    const { target, storage, plan } = shipped();
+    fs.mkdirSync(path.join(target, 'notes'), { recursive: true });
+    fs.writeFileSync(path.join(target, FILE), 'export const mine = 1;\n');
+    const { session, fake } = openOn(target, storage, plan, { tutorReply: 'should never be asked' });
+    await session.settled();
+    fake.clearLog();
+
+    session.runCheck();
+    await session.settled();
+    assert.deepEqual(pick(fake, 'core'), [], 'the check reached for the core with no reference to compare against');
+    const checked = lastView(fake)?.writeNote ?? '';
+    assert.ok(checked.includes(NOT_BUILT_HERE), `Check my work did not say why: ${JSON.stringify(checked)}`);
+
+    session.ask('why is it like this?');
+    await session.settled();
+    assert.deepEqual(pick(fake, 'runLlm'), [], 'a question was sent with a reference nobody built');
+    const asked = lastView(fake)?.tutor?.note ?? '';
+    assert.ok(asked.includes(NOT_BUILT_HERE), `Ask did not say why: ${JSON.stringify(asked)}`);
+    session.dispose();
+  });
+
+  test('the reproduce offer is not made with nothing to copy from, and a stale press says why', async () => {
+    const { target, storage } = shipped();
+    const plan = { ...planTargeting(FILE), reproduce: ['package-lock.json'] };
+    const { session, fake } = openOn(target, storage, plan);
+    await session.settled();
+    assert.equal(lastView(fake)?.reproduce, undefined, 'an offer to copy files from a reference that is not read');
+    session.reproduce();
+    await session.settled();
+    const said = lastView(fake)?.writeNote ?? '';
+    assert.doesNotMatch(said, /already been copied/, 'a press that copied nothing claimed the files were copied');
+    assert.ok(said.includes(NOT_BUILT_HERE), `the press did not say why: ${JSON.stringify(said)}`);
+    session.dispose();
+  });
+
+  test('a tutorial built here still refuses a withheld step file: the check says why, the tutor is sent neither copy', async () => {
+    const { target, home, storage } = shipped();
+    fs.writeFileSync(path.join(home, '.env'), `TOKEN=${MARKER}\n`);
+    fs.writeFileSync(path.join(target, '.env'), `TOKEN=LEARNER-${MARKER}\n`);
+    recordBuiltReference(storage, target, home);
+    const { session, fake } = openOn(target, storage, planTargeting('.env'), { tutorReply: 'Tell me about it in your own words.' });
+    await session.settled();
+    fake.clearLog();
+
+    session.runCheck();
+    await session.settled();
+    assert.match(lastView(fake)?.writeNote ?? '', /^Nothing was checked: \.env is shaped like a credentials file/);
+    assert.deepEqual(pick(fake, 'core'), [], 'the check reached for the core about a file it refuses to read');
+
+    session.ask('what goes in here?');
+    await session.settled();
+    const sent = pick(fake, 'runLlm');
+    assert.equal(sent.length, 1, 'the question itself is still asked');
+    assert.ok(!(sent[0]?.prompt ?? '').includes(MARKER), 'a withheld file reached the prompt');
+    assert.ok((sent[0]?.prompt ?? '').includes(WITHHELD_FROM_TUTOR), 'the tutor was not told why it has no diff');
+    assert.match(lastView(fake)?.tutor?.note ?? '', /^Your question was sent without \.env/);
+    session.dispose();
+  });
+
+  test('the control: the same folder, built here, walks exactly as before', async () => {
+    const { target, home, storage, plan } = shipped();
+    recordBuiltReference(storage, target, home);
+    const { session, fake } = openOn(target, storage, plan);
+    await session.settled();
+    assert.equal(lastView(fake)?.referenceNote, undefined, 'a tutorial built here carries the note');
+    assert.equal(fs.readFileSync(path.join(target, FILE), 'utf8'), `export const diary = '${MARKER}';\n`, 'automated did not write the built reference\'s file');
     session.dispose();
   });
 });

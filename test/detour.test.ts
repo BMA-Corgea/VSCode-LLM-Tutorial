@@ -53,6 +53,7 @@ import { detourDir, detoursRoot, tutorialId, type DetourKey } from '../src/detou
 import type { WalkSession } from '../src/walk/session.js';
 import { loadPlan, loadProgress } from '../src/walk/store.js';
 import { writeFixtureTarget } from './unit/walk-fixtures.js';
+import { recordBuiltHere } from './support/built-here.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
 
@@ -119,7 +120,7 @@ function tmpDir(prefix: string): string {
  * the tree hash below is a fact about the fixture rather than about whatever the entry pass did
  * on its way past.
  */
-function newTutorial(): string {
+async function newTutorial(): Promise<string> {
   const target = tmpDir('detour-test-target-');
   writeFixtureTarget(target);
 
@@ -134,6 +135,8 @@ function newTutorial(): string {
     path.join(target, '.repo-tour', 'build', 'request.json'),
     `${JSON.stringify({ idea: '', recreate: true, repo: refRoot, referenceRoot: refRoot, target, dial: 'manual' }, null, 2)}\n`,
   );
+  // T-92: what the Start build records, or the walk rightly reads no reference for this request.
+  await recordBuiltHere(target, refRoot);
   return target;
 }
 
@@ -300,7 +303,7 @@ suite('AC2 — the example opens as real editor tabs, and the workspace is UNCHA
   teardown(teardownDetour);
 
   test('files under globalStorage/detours, three tabs, a narrator, and the tree hash unmoved', async () => {
-    const target = newTutorial();
+    const target = await newTutorial();
     const before = treeHash(target);
     const storage = await storageRoot();
 
@@ -351,7 +354,7 @@ suite('AC2 — the example opens as real editor tabs, and the workspace is UNCHA
   });
 
   test('the tabs are NOT previews — three files means three tabs, not one that changed thrice', async () => {
-    const target = newTutorial();
+    const target = await newTutorial();
     const storage = await storageRoot();
     const { session, panel } = await openWalk(target);
     const { core } = await countingCore(CANNED_JSON);
@@ -369,7 +372,7 @@ suite('AC2 — the example opens as real editor tabs, and the workspace is UNCHA
   });
 
   test('the spend guard is armed — a request that answers for nothing FAILS, it does not dial out', async () => {
-    const target = newTutorial();
+    const target = await newTutorial();
     const { session, panel } = await openWalk(target);
     const { core, sent } = await countingCore(); // poisoned: rejects
     await useCore(core);
@@ -392,7 +395,7 @@ suite('AC3 — Back to my build closes, deletes, restores; AC4 — and writes th
 
   /** Open a walk, take a detour, and hand back everything the assertions need. */
   async function inADetour() {
-    const target = newTutorial();
+    const target = await newTutorial();
     const hashBefore = treeHash(target);
     const storage = await storageRoot();
     const { session, panel } = await openWalk(target);
@@ -505,7 +508,7 @@ suite('AC5 — a second detour on the same step makes NO model call', () => {
   teardown(teardownDetour);
 
   test('the retake opens the same example and the runner is never called again', async () => {
-    const target = newTutorial();
+    const target = await newTutorial();
     const hashBefore = treeHash(target);
     const storage = await storageRoot();
     const { session, panel } = await openWalk(target);
@@ -541,7 +544,7 @@ suite('AC5 — a second detour on the same step makes NO model call', () => {
   });
 
   test('a DIFFERENT step is a miss and pays for its own answer — the cache is per step', async () => {
-    const target = newTutorial();
+    const target = await newTutorial();
     const storage = await storageRoot();
     const { session, panel } = await openWalk(target);
     const { core, sent } = await countingCore(CANNED_JSON);
@@ -585,7 +588,7 @@ suite('two tutorials in ONE global storage do not serve each other’s examples'
     const storage = await storageRoot();
 
     // Tutorial A: generate and cache an example.
-    const a = newTutorial();
+    const a = await newTutorial();
     const walkA = await openWalk(a);
     const first = await countingCore(CANNED_JSON);
     await useCore(first.core);
@@ -599,7 +602,7 @@ suite('two tutorials in ONE global storage do not serve each other’s examples'
     await waitFor('A’s detour to close', () => detourTabPaths(storage).length === 0);
 
     // Tutorial B: a different folder, the same step id, the same extension storage.
-    const b = newTutorial();
+    const b = await newTutorial();
     assert.notEqual(a, b, 'the two tutorials must be different folders');
     const walkB = await openWalk(b);
     const second = await countingCore(CANNED_JSON);
@@ -637,7 +640,7 @@ suite('Write a new example — the learner can force a fresh one (code review fi
   teardown(teardownDetour);
 
   test('it pays for a new answer while the ordinary retake stays free', async () => {
-    const target = newTutorial();
+    const target = await newTutorial();
     const hashBefore = treeHash(target);
     const storage = await storageRoot();
     const { session, panel } = await openWalk(target);

@@ -560,7 +560,10 @@ suite('containment — a destination that leaves the target is refused, never cl
     // Reached through `fileShape`, which only ever reads: `planWrite` checks the destination
     // first, and with one relative path and two roots the two checks always agree.
     const escape = step({ id: 'st-x-escape', ordinal: 9, kind: 'file', target: { file: '../../etc/passwd' } });
-    assert.deepEqual(fileShape(refRoot, escape), { signatures: [], imports: [] });
+    // Empty, and since T-92 carrying why: an empty shape alone is drawn as "declares nothing".
+    assert.deepEqual(fileShape(refRoot, escape), {
+      signatures: [], imports: [], refused: '../../etc/passwd points outside the reference repository, so there is nothing to copy from',
+    });
   });
 });
 
@@ -691,8 +694,10 @@ suite('containment — a symlinked DIRECTORY, where the lexical check ends and t
     const util = stepOf(plan, 'st-2-file-util');
 
     assert.match(refusalOf(planWrite(util, 'automated', refRoot, target, plan, core)), /reference repository/);
-    assert.deepEqual(fileShape(refRoot, util), { signatures: [], imports: [] },
-      'the panel is a place to read the answer out of, so a refused read must not reach it either');
+    // Empty, and since T-92 carrying why: no line of the secret reaches the panel, the reason does.
+    assert.deepEqual(fileShape(refRoot, util), {
+      signatures: [], imports: [], refused: 'src/util.ts leaves the reference repository through a symlink, so there is nothing to copy from',
+    }, 'the panel is a place to read the answer out of, so a refused read must not reach it either');
     assert.deepEqual(fs.readdirSync(target), [], 'nothing was written for a file we would not read');
   });
 
@@ -828,7 +833,10 @@ suite('fileShape — enough to know what to write, never the answer (AC2)', () =
   test('an unreadable reference is an empty shape, not a throw — the panel is on screen', () => {
     const refRoot = referenceTree();
     const missing = step({ id: 'st-x-missing', ordinal: 9, kind: 'file', target: { file: 'src/nowhere.ts' } });
-    assert.deepEqual(fileShape(refRoot, missing), { signatures: [], imports: [] });
+    // Empty, and since T-92 carrying why, so the panel does not say the file "declares nothing".
+    const shape = fileShape(refRoot, missing);
+    assert.deepEqual([shape.signatures, shape.imports], [[], []]);
+    assert.match(shape.refused ?? '', /^the reference file src\/nowhere\.ts could not be read — ENOENT/);
   });
 });
 

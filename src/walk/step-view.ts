@@ -793,6 +793,10 @@ main, section, .option { min-width:0; }
    beside it (VS Code's testing colours under System, the skin's own under a named skin). */
 .check-summary.check-pass .codicon { color:var(--status-ok); }
 .check-summary.check-fail .codicon { color:var(--status-bad); }
+/* T-92: why no reference file is read here. News, like the write note, with the news marker: it is
+   the reason every control below it does less than it says. */
+.reference-note { color:var(--kw); font-size:12px; margin:0 0 14px; overflow-wrap:anywhere; border-left:2px solid var(--status-news); padding-left:8px; }
+.shape-refused { overflow-wrap:anywhere; }
 `;
 
 /**
@@ -1051,9 +1055,14 @@ function shapeListHtml(heading: string, lines: unknown, noun: string): string {
 function shapeHtml(shape: NonNullable<StepViewState['shape']>): string {
   const imports = shapeListHtml(IMPORTS_HEADING, shape.imports, 'import');
   const signatures = shapeListHtml(EXPORTS_HEADING, shape.signatures, 'signature');
-  const body = imports === '' && signatures === ''
-    ? `<p class="check-aside">${escapeHtml(SHAPE_EMPTY_MESSAGE)}</p>`
-    : `<p class="shape-note">${escapeHtml(SHAPE_NOTE_MESSAGE)}</p>${imports}${signatures}`;
+  // T-92: a reference file that was not read has no shape, and saying "declares nothing" of it
+  // would be false. Its reason is the session's sentence, drawn where the outline would be.
+  const refused = typeof shape.refused === 'string' && shape.refused !== '' ? shape.refused : undefined;
+  const body = refused !== undefined
+    ? `<p class="check-aside shape-refused">${escapeHtml(planText(refused))}</p>`
+    : imports === '' && signatures === ''
+      ? `<p class="check-aside">${escapeHtml(SHAPE_EMPTY_MESSAGE)}</p>`
+      : `<p class="shape-note">${escapeHtml(SHAPE_NOTE_MESSAGE)}</p>${imports}${signatures}`;
   return `<section class="shape"><h2>${escapeHtml(SHAPE_HEADING)}</h2>${body}</section>`;
 }
 
@@ -1068,6 +1077,17 @@ function shapeHtml(shape: NonNullable<StepViewState['shape']>): string {
  * by the client script, so an always-present empty one would serve nobody and would put an
  * empty paragraph's margin under the dial on every ordinary step.
  */
+/**
+ * T-92: why none of this tutorial's reference files are read, under the step's question, on
+ * every step: it is the reason the dial writes nothing, the outline is empty, and Check my work
+ * and Ask refuse, so it belongs above all of them rather than beside one. Drawn only when there
+ * is a sentence; a tutorial built in this editor has none.
+ */
+function referenceNoteHtml(note: unknown): string {
+  if (typeof note !== 'string' || note === '') return '';
+  return `<p class="reference-note" id="reference-note" role="note">${escapeHtml(planText(note))}</p>`;
+}
+
 function writeNoteHtml(note: unknown): string {
   if (typeof note !== 'string' || note === '') return '';
   return `<p class="write-note" id="write-note">${escapeHtml(planText(note))}</p>`;
@@ -1528,6 +1548,7 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
   <div class="step-head">
     <h1>${escapeHtml(planText(step.decision.question))}</h1>
   </div>
+  ${referenceNoteHtml(state.referenceNote)}
 
   <section>
     <h2>Options</h2>
@@ -2152,6 +2173,8 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
       : null,
     state.fileExists,
     keyOf(state.writeNote ?? null),
+    keyOf(state.referenceNote ?? null), // T-92: the standing reason nothing is read
+    keyOf(state.shape?.refused ?? null), // T-92: why the outline is empty
     state.check
       ? [
           keyOf(state.check.summary, MAX_PLAN_TEXT),

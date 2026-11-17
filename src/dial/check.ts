@@ -65,6 +65,7 @@ import fs from 'node:fs';
 import type { StepLike } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
 import { languageOf, type CheckReport, type DialCore, type FileExtract, type FileRecord } from './core.js';
+import { taughtReadRefusal } from './writer.js';
 
 /** A report plus the one line the panel puts above it — see `summarize`. */
 export interface CheckOutcome {
@@ -81,6 +82,26 @@ export interface CheckOutcome {
 const MAX_NAMES_LISTED = 6;
 
 /**
+ * Why *Check my work* will not read this step's reference file, a sentence for the page, or
+ * `null` when it may (T-92).
+ *
+ * `runCheck` answers `null` for every way a comparison comes to nothing, and the session draws
+ * `null` as "has not been created". That is true of manual mode's ordinary state and false of a
+ * file that IS there but was refused, so the session asks this first and says the true thing.
+ * The refusal itself is enforced in `referenceExtract`, which reads nothing it refuses here.
+ */
+export function checkRefusal(refRoot: string, step: StepLike): string | null {
+  const file: unknown = step.target.file;
+  if (typeof file !== 'string') return null;
+  // Whatever the language: `.env` has no grammar, so it is never parsed, and without this the
+  // page would say it "has not been created" when the learner's copy is right there.
+  const refused = taughtReadRefusal(refRoot, file);
+  if (refused === null) return null;
+  const shown = file.length <= 120 ? file : `${file.slice(0, 119)}…`;
+  return `Nothing was checked: ${shown} ${refused}, so the reference's copy of it is not read.`;
+}
+
+/**
  * The reference file's `FileExtract` — the thing `check()` compares against.
  *
  * Built the way repo-tour's own `test/build.test.ts` builds one (`extractOf`): an
@@ -93,8 +114,9 @@ const MAX_NAMES_LISTED = 6;
  * harness leaves them empty in exactly the same way.
  *
  * `null` — never a throw — for every ordinary way this can come to nothing: a language
- * `languageOf` does not recognise, a `relPath` that escapes `refRoot`, a file that is not
- * there or cannot be read, and an `extract()` that produced no entry at all.
+ * `languageOf` does not recognise, a `relPath` that escapes `refRoot` (in the string or through a
+ * link), a file the withheld-name rule refuses (T-92), a file that is not there or cannot be
+ * read, and an `extract()` that produced no entry at all.
  */
 // `FileExtract` is `unknown` today (it is an opaque handle — see `./core.ts`), so eslint is
 // right that the union adds no information to the TYPE. It adds all of it to the CONTRACT:
@@ -107,6 +129,10 @@ export async function referenceExtract(core: DialCore, refRoot: string, relPath:
 
   const abs = resolveInsideTarget(refRoot, relPath);
   if (abs === null) return null;
+  // T-92: the filesystem half of containment, which this read did without (a link out of the
+  // reference was parsed and its names drawn on the page), and the withheld-name rule every
+  // taught read now asks. `checkRefusal` says the same thing in words.
+  if (taughtReadRefusal(refRoot, relPath) !== null) return null;
 
   let source: string;
   try {
