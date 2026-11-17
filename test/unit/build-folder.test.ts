@@ -14,8 +14,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadCore, resolveCoreRoot } from '../../src/core.js';
 import {
-  buildDir, buildFromRequest, coreFor, markerPath, readFreshMarker, readMarker, resumeIfMarked,
-  type BuildContext, type BuildCore,
+  buildDir, buildFromRequest, coreFor, markerPath, readFreshMarker, readMarker, realFsWriteOps, resumeIfMarked,
+  type BuildContext, type BuildCore, type FsWriteOps,
 } from '../../src/start/build.js';
 import { emptyRequest, type BuildRequest } from '../../src/start/request.js';
 
@@ -130,6 +130,49 @@ suite('T-91: the Start build never writes, removes or reads its files through a 
     assert.deepEqual(contents(outside), before, 'the build went on writing through the link swapped in for its folder');
     assert.equal(outcome.ok, false);
     assert.equal(outcome.reason, `${buildDir(target)} became a link to somewhere else while this build was running — it stopped and wrote nothing more; pick an empty or new folder`);
+  });
+
+  test('a link swapped in as the plan is about to be written: neither the request nor the plan goes through it', async () => {
+    const target = tmp('t91-target-');
+    const outside = tmp('t91-outside-');
+    let before: string[] = [];
+    const swapAtTheWrite: FsWriteOps = {
+      ...realFsWriteOps,
+      renameSync: (from, to) => {
+        realFsWriteOps.renameSync(from, to);
+        // Right after the marker says "write": the folder moves away, and a link holding a copy takes its name.
+        if (before.length === 0 && to === markerPath(target) && (JSON.parse(fs.readFileSync(to, 'utf8')) as { phase?: string }).phase === 'write') {
+          fs.cpSync(buildDir(target), outside, { recursive: true });
+          fs.renameSync(buildDir(target), path.join(target, '.repo-tour', 'moved'));
+          fs.symlinkSync(outside, buildDir(target));
+          before = contents(outside);
+        }
+      },
+    };
+    const outcome = await buildFromRequest(requestFor(tsFixture(), target), context({ writeOps: swapAtTheWrite }));
+    assert.ok(before.length > 0, 'the fixture has to swap the link in as the write begins');
+    assert.deepEqual(contents(outside), before, 'the request or the plan was written through the link');
+    assert.equal(outcome.reason, refused(buildDir(target)));
+  });
+
+  test('a link the lstat does not see (one swapped in just after it) is caught by where the folder resolves', async () => {
+    const target = tmp('t91-target-');
+    const outside = tmp('t91-outside-');
+    fs.mkdirSync(path.join(target, '.repo-tour'));
+    fs.symlinkSync(outside, buildDir(target));
+    // The lstat of the build folder answers for the folder the link points at, as if the link came a moment later.
+    const mutable = fs as unknown as { lstatSync: typeof fs.lstatSync };
+    const realLstat = mutable.lstatSync;
+    mutable.lstatSync = ((p: fs.PathLike, opts?: fs.StatSyncOptions) => realLstat(String(p) === buildDir(target) ? outside : p, opts)) as typeof fs.lstatSync;
+    let outcome;
+    try {
+      assert.equal(fs.lstatSync(buildDir(target)).isSymbolicLink(), false, 'the fixture has to hide the link from the lstat');
+      outcome = await buildFromRequest(requestFor(tsFixture(), target), context());
+    } finally {
+      mutable.lstatSync = realLstat;
+    }
+    assert.deepEqual(contents(outside), [], 'the build wrote through a link it took for a folder');
+    assert.equal(outcome.reason, refused(buildDir(target)));
   });
 
   test('a Cancel over a linked .repo-tour removes nothing where it points: another build\'s marker, request and temp file stay', async () => {

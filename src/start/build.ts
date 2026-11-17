@@ -600,10 +600,12 @@ function realBuildDir(target: string): string | null {
 
 /**
  * The build folder, made if it is not there and proved real, or a `BuildFolderRefused` that says why. Every
- * write in this file goes through here, just before it writes. Each folder is made by a plain `mkdir`, one
- * level at a time and the outer one first: a `mkdir` fails on a link at its own name, dangling or not, and
- * makes nothing through it, where a recursive one walks through. What is left is a swap in the microseconds
- * between this and the write, which nothing in Node (no `openat`) can close.
+ * write in this file goes through here, just before it writes. The folders are made one level at a time, the
+ * outer one first, and each is proved before the next is made: a `mkdir` at a link's own name, dangling or
+ * not, makes nothing, so nothing is ever made through one. (The recursive `mkdir` of the whole path that
+ * `writeJsonAtomic` does walks straight through a link at `.repo-tour`.) What is left is a swap in the
+ * microseconds between this and the write, which nothing in Node (no `openat`) can close; the `realpath`
+ * in `buildFolderProblem` catches one that comes before it.
  */
 export function provenBuildDir(target: string): string {
   fs.mkdirSync(target, { recursive: true }); // the learner's own folder, a link included: theirs to choose
