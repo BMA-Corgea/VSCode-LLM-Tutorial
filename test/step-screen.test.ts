@@ -18,7 +18,7 @@ import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import type { PlanLike, Progress } from '../src/walk/model.js';
 import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, REPLAN_NOTHING_FOLLOWS, type Replanner } from '../src/walk/session.js';
-import { CHOOSE_LABEL, CHOSEN_BADGE, NOT_REPLANNED_NOTE } from '../src/walk/step-view.js';
+import { BACK_TO_AUTHOR_LABEL, CHOOSE_LABEL, CHOSEN_BADGE, NOT_REPLANNED_NOTE, REPLAN_OWN_ROAD_LABEL } from '../src/walk/step-view.js';
 import { Screen, sleep, stale, type Frame } from './support/screen.js';
 import { repoTourShapedPlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
@@ -175,7 +175,9 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     await pressNow(`document.querySelector(${JSON.stringify(choose('stream'))}).click()`);
     const after = await until(read, (o) => (o?.on[0] ?? '') === 'stream', 'the learner\'s choice is where the author\'s was');
     assert.deepEqual(after?.yours, ['stream'], `and marked "${CHOSEN_BADGE}"`);
-    assert.deepEqual(after?.choosable, [`author:${CHOOSE_LABEL}`, `template-string:${CHOOSE_LABEL}`], 'the author\'s road is choosable again; the learner\'s own is not a control');
+    // T-22's re-review R11 and its re-check C2: this stand-in re-plans nothing, so the choice is in progress only. Its own
+    // road offers a re-plan from it, and the author's road drops it, asking nothing.
+    assert.deepEqual(after?.choosable, [`author:${BACK_TO_AUTHOR_LABEL}`, `template-string:${CHOOSE_LABEL}`, `stream:${REPLAN_OWN_ROAD_LABEL}`], 'the author\'s road is a control again, and the learner\'s own is one too, as a re-plan');
     // T-22's code review, SF4: this stand-in re-plans nothing at a symbol step, and something does stand on it,
     // so the true line is that the walk was not re-planned, not that nothing depended on it.
     assert.equal(after?.note, NOT_REPLANNED_NOTE, 'and the panel says the walk was not re-planned from it');
