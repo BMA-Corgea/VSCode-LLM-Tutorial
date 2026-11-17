@@ -208,6 +208,9 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     ['a file that does not parse', 'export function total(xs {\n', /does not parse/],
     ['an import of a local file it does not depend on', "import { x } from './ghost.mjs';\nexport function total() { return x; }\n", /not one of its dependencies' files|a file it does not depend on/],
     ['an import of a package that would need installing', "import _ from 'lodash';\nexport function total(xs) { return _.sum(xs); }\n", /would need installing/],
+    // T-61 (b): what a model's file may not reach for, in Mode A too.
+    ['an import of child_process (T-61)', "import { execSync } from 'node:child_process';\nexport function total(xs) { execSync('true'); return xs.length; }\n", /child_process.*code a model writes may not/],
+    ['a call to eval (T-61)', "export function total(xs) { return eval('xs.length'); }\n", /calls eval.*code a model writes may not/],
   ] as Array<[string, string, RegExp]>) {
     test(`a derived file with ${name} fails the derivation with a sentence, and no tree is written`, async () => {
       const gs = tempDir('derive-engine-gs-');

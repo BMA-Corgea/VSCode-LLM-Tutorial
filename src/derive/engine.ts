@@ -148,7 +148,8 @@ function shownStepOf(node: DerivedNode, answers: Readonly<Record<string, string>
  * **This is a correctness check, never a sandbox.** It keeps the plan's graph true and the app
  * able to start. It does not make the code safe: a Node built-in can run a process or open a
  * socket, and the file runs as the learner the moment they run it. What the learner is told about
- * that belongs to the tickets that show it to them (T-61).
+ * that belongs to the tickets that show it to them: T-61 tells them, and refuses by name what a model's file may not reach
+ for (`runsAsTheLearner`), which is an intent check too.
  */
 export function unsoundFileReason(
   extract: ExtractLike, allowedFiles: ReadonlySet<string>, language: CodeLanguage, plannedFiles: ReadonlySet<string> = allowedFiles, rules: ImportRules = MODE_A_IMPORTS,
@@ -328,6 +329,69 @@ export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonl
   }
 }
 
+/**
+ * T-61 (b), ruled 2026-11-17: what a file a MODEL wrote may not reach for, whatever the repository's own code imports. The
+ * author's code may use these; a model's may not, because what the model is shown of a stranger's repository can carry an
+ * instruction (T-22's security review). `http` and `https` stay allowed: a tiny web server is a legitimate idea, and Node's
+ * global `fetch` reaches the network whatever the imports say.
+ *
+ * **An intent check, never a sandbox.** It catches a model that reaches for one of these by name, innocently or on a
+ * planted instruction; it cannot catch code that hides what it does. The learner is told to read every model-written file
+ * before they run it (T-61 a), and that is the defence that holds.
+ */
+const RUNS_PROGRAMS = 'which starts other programs';
+const RUNS_TEXT = 'which runs text as code';
+const OPENS_SOCKETS = 'which opens network connections of its own';
+const REACHES_IN = 'which reaches into the runtime';
+const REFUSED_NODE_MODULES: ReadonlyMap<string, string> = new Map([
+  ['child_process', RUNS_PROGRAMS], ['cluster', RUNS_PROGRAMS], ['worker_threads', RUNS_PROGRAMS],
+  ['vm', RUNS_TEXT], ['inspector', REACHES_IN], ['dgram', OPENS_SOCKETS], ['net', OPENS_SOCKETS], ['tls', OPENS_SOCKETS],
+]);
+const REFUSED_PYTHON_MODULES: ReadonlyMap<string, string> = new Map([
+  ['subprocess', RUNS_PROGRAMS], ['multiprocessing', RUNS_PROGRAMS], ['pty', RUNS_PROGRAMS],
+  ['socket', OPENS_SOCKETS], ['ctypes', REACHES_IN],
+]);
+/** The calls that do the same with no import at all, read on `codeOnly`'s text (so a comment or a string is not one). */
+const REFUSED_JS_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }> = [
+  { re: /(?<![.\w$])process\s*\.\s*binding\s*\(/, name: 'process.binding', what: REACHES_IN },
+  { re: /(?<![.\w$])process\s*\.\s*dlopen\s*\(/, name: 'process.dlopen', what: REACHES_IN },
+  { re: /(?<![.\w$])eval\s*\(/, name: 'eval', what: RUNS_TEXT },
+  { re: /(?<![.\w$])Function\s*\(/, name: 'Function', what: RUNS_TEXT },
+];
+const REFUSED_PY_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }> = [
+  { re: /(?<![.\w])eval\s*\(/, name: 'eval', what: RUNS_TEXT },
+  { re: /(?<![.\w])exec\s*\(/, name: 'exec', what: RUNS_TEXT },
+  { re: /(?<![.\w])compile\s*\(/, name: 'compile', what: RUNS_TEXT },
+  { re: /(?<![.\w])os\s*\.\s*system\s*\(|\bfrom\s+os\s+import\b[^\n]*\bsystem\b/, name: 'os.system', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])os\s*\.\s*popen\s*\(|\bfrom\s+os\s+import\b[^\n]*\bpopen\b/, name: 'os.popen', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])os\s*\.\s*exec\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bexec\w*\b/, name: 'os.exec', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])os\s*\.\s*spawn\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bspawn\w*\b/, name: 'os.spawn', what: RUNS_PROGRAMS },
+];
+/** A CommonJS `require` of one of the refused modules, read on the file's own text (`codeOnly` blanks the name). */
+const JS_REQUIRE_OF = /(?<![.\w$])require\s*\(\s*(['"`])((?:node:)?([\w/]+))\1\s*\)/g;
+const REFUSED_TAIL = 'code a model writes may not, so this step keeps the author\u2019s road';
+
+function runsAsTheLearner(extract: ExtractLike, content: string, code: string, language: CodeLanguage): string | null {
+  const refused = language === 'python' ? REFUSED_PYTHON_MODULES : REFUSED_NODE_MODULES;
+  for (const imp of extract.imports) {
+    if (imp.resolved !== null || imp.raw.startsWith('.')) continue;
+    const name = language === 'python' ? (imp.raw.split('.')[0] ?? '') : (imp.raw.replace(/^node:/, '').split('/')[0] ?? '');
+    const what = refused.get(name);
+    if (what !== undefined) return `imports ${quote(imp.raw)}, ${what}: ${REFUSED_TAIL}`;
+  }
+  if (language !== 'python') {
+    for (const m of content.matchAll(JS_REQUIRE_OF)) {
+      const what = REFUSED_NODE_MODULES.get((m[3] ?? '').split('/')[0] ?? '');
+      // Only where the code itself has a require there: a comment or a string that quotes one is not one.
+      if (what !== undefined && /(?<![.\w$])require\s*\(/.test(code.slice(m.index, m.index + m[0].length))) return `requires ${quote(m[2] ?? '')}, ${what}: ${REFUSED_TAIL}`;
+    }
+  }
+  for (const { re, name, what } of language === 'python' ? REFUSED_PY_CALLS : REFUSED_JS_CALLS) {
+    if (re.test(code)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
+  }
+  return null;
+}
+
 /** Why `node`'s file may not stand, from repo-tour's reading of it and its own text, or `null`. */
 export function refusalForFile(
   node: Pick<DerivedNode, 'path'>, content: string, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, plannedFiles: ReadonlySet<string>, language: CodeLanguage, rules: ImportRules = MODE_A_IMPORTS,
@@ -336,7 +400,8 @@ export function refusalForFile(
   const code = codeOnly(content, language);
   const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles, rules)
     ?? computedImportReason(code, language, rules)
-    ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null);
+    ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null)
+    ?? runsAsTheLearner(extract, content, code, language);
   return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
 }
 
