@@ -27,7 +27,7 @@ import path from 'node:path';
 import type { DialCore } from '../dial/core.js';
 import { languageOf } from '../dial/core.js';
 import { readReference, withheldReason } from '../dial/writer.js';
-import { treeNamedBy, type ChapterLike, type PlanDivergence, type PlanLike, type StepLike } from '../walk/model.js';
+import { fileWriters, takenOverIn, treeNamedBy, type ChapterLike, type PlanDivergence, type PlanLike, type StepLike } from '../walk/model.js';
 import { askOnce, newTally, type DeriveAskDeps } from './ask.js';
 import { boilerplateRanges, lineCountOf, loadBearingRanges, stepIdFor, type DeriveCost, type ExtractLike } from './assemble.js';
 import { costOf, extractAll, REPO_IMPORTS, refusalForFile, thrownSentence, type ImportRules } from './engine.js';
@@ -63,14 +63,15 @@ export interface DivergeDeps extends DeriveAskDeps {
 
 export type DivergeOutcome =
   /** Nothing follows from this decision and it owns no file: there is nothing to re-derive. */
-  | { ok: true; changed: false; staleDependents: string[]; cost: DeriveCost }
+  | { ok: true; changed: false; staleDependents: string[]; keptOnOldRoad?: string[]; cost: DeriveCost }
   /**
    * `derivedRoot` is `null` only when no divergence has ever written a tree (a record that re-planned nothing).
    * `replaced`: the plan's steps this press replaced, D never among them. `written`: the steps it wrote. A step
    * it writes can carry the id of one it replaced (an id is a hash of kind, path, question and labels, T-17's
-   * F9), so an id that is in the new plan is not proof that its step's code is the one it had.
+   * F9), so an id that is in the new plan is not proof that its step's code is the one it had. `keptOnOldRoad`: steps
+   * that stood on the old road and stay on it, not walked, because a walked step stands on them (NF3); absent means none.
    */
-  | { ok: true; changed: true; plan: PlanLike; derivedRoot: string | null; staleDependents: string[]; replaced: string[]; written: string[]; cost: DeriveCost }
+  | { ok: true; changed: true; plan: PlanLike; derivedRoot: string | null; staleDependents: string[]; keptOnOldRoad?: string[]; replaced: string[]; written: string[]; cost: DeriveCost }
   | { ok: false; reason: string; cost: DeriveCost };
 
 /** How many files all of a plan's divergences together may have written. */
@@ -113,18 +114,34 @@ function inDependencyOrder<T extends { id: string; dependsOn: readonly string[] 
   return out;
 }
 
-/** The step that owns a decision's file: itself, unless it is a symbol inside one. */
-function fileStepOf(d: StepLike, steps: readonly StepLike[]): StepLike {
+/** The step that writes a decision's file (`fileWriters`): itself, unless it is a symbol inside one. */
+function fileStepOf(d: StepLike, writers: ReadonlyMap<string, StepLike>): StepLike {
   if (d.kind !== 'symbol') return d;
-  return steps.find((s) => s.kind === 'file' && s.target.file === d.target.file) ?? d;
+  return writers.get(d.target.file) ?? d;
 }
 
-/** The plan as a graph over step ids, with the edge from each file to its chapter's shape step. */
-function graphOf(steps: readonly StepLike[]): GraphNode[] {
+/**
+ * The plan as a graph over step ids, with the edge from each file to its chapter's shape step.
+ *
+ * One writer per file (the re-review of the fixes, R3, ruled 2026-11-11): a step that stands on a step whose file has
+ * been taken over stands on that file, which its writer holds now, so the edge goes to the writer. The writer does not
+ * stand on the steps it took over: it replaced their code. The taken-over steps keep their own edges, which is what
+ * they stood on when the learner walked them.
+ */
+function graphOf(steps: readonly StepLike[], writers: ReadonlyMap<string, StepLike>): GraphNode[] {
   const shapeOf = new Map(steps.filter((s) => s.kind === 'shape').map((s) => [s.chapter, s.id] as const));
+  const byId = new Map(steps.map((s) => [s.id, s] as const));
+  const edgeTo = (from: StepLike, id: string): string[] => {
+    const to = byId.get(id);
+    const writer = to === undefined ? undefined : takenOverIn(writers, to);
+    if (to === undefined || writer === undefined) return [id];
+    if (from.kind !== 'shape' && from.target.file === to.target.file) return from.id === writer.id ? [] : [id];
+    return writer.id === from.id ? [] : [writer.id];
+  };
   return steps.map((s) => {
     const shape = s.kind === 'file' ? shapeOf.get(s.chapter) : undefined;
-    return { path: s.id, dependsOn: shape === undefined || s.dependsOn.includes(shape) ? [...s.dependsOn] : [shape, ...s.dependsOn] };
+    const edges = [...new Set(s.dependsOn.flatMap((id) => edgeTo(s, id)))];
+    return { path: s.id, dependsOn: shape === undefined || edges.includes(shape) ? edges : [shape, ...edges] };
   });
 }
 
@@ -165,34 +182,44 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     if (d === undefined) return fail('that step is not in this plan');
     if (!d.decision.options.some((o) => o.id === answer)) return fail(`${JSON.stringify(answer.slice(0, 40))} is not one of the options at this step`);
 
-    const owner = fileStepOf(d, steps);
+    // One writer per file (the re-review of the fixes, R3, ruled 2026-11-11): a step whose file another step writes now
+    // has been taken over, and its roads are chosen where the file is written. The walk offers no press there.
+    const writers = fileWriters(plan);
+    const writerOf = (s: StepLike): StepLike | undefined => (s.kind === 'shape' ? undefined : writers.get(s.target.file));
+    const writes = (s: StepLike): boolean => s.kind === 'shape' || writerOf(s)?.id === s.id;
+    const over = takenOverIn(writers, d);
+    if (over !== undefined) return fail(`the code for ${d.target.file} is written at step ${over.ordinal} (${over.target.file}) now, so its roads are chosen there`);
+
+    const owner = fileStepOf(d, writers);
     const ownFile = d.kind === 'shape' ? null : owner.target.file;
-    const graph = graphOf(steps);
+    const graph = graphOf(steps, writers);
     const { replaced: reached } = keptBy(graph, owner.id, walked);
     const downstream = downstreamOf(graph, owner.id);
     // What a walked step stands on stays where it is (`keptBy`'s own rule).
     const anchored = ancestorsOf(graph, walked);
-    // At a symbol step D owns its file from now on, so the file's own step goes with the file, unless
-    // something walked stands on it (T-22's code review, MF3): one file step per file.
-    const ownerGoes = d.kind === 'symbol' && owner.id !== d.id && !anchored.has(owner.id);
-    // The files being rewritten: D's own, and every reached file step's.
+    // The file is the unit. The files being rewritten: D's own, and every file whose writer the decision reaches.
     const rewritten = new Set<string>(ownFile === null ? [] : [ownFile]);
-    for (const s of steps) if (reached.has(s.id) && s.kind === 'file') rewritten.add(s.target.file);
-    // A symbol step describes lines of its file, so it goes only with a file that is being rewritten: the
-    // symbol steps of a file the plan keeps describe it still (T-22's code review, SF2).
-    const replaced = new Set([...reached].filter((id) => {
-      if (id === d.id || id === owner.id) return false;
-      const s = byId.get(id);
-      return s !== undefined && (s.kind !== 'symbol' || rewritten.has(s.target.file));
-    }));
-    if (ownerGoes) replaced.add(owner.id);
+    for (const s of steps) if (reached.has(s.id) && s.kind === 'file' && writes(s)) rewritten.add(s.target.file);
+    // Every step at a rewritten file goes with it unless something walked stands on it: the file's own step at a symbol
+    // press (T-22's code review, MF3), its symbol steps, and the steps an earlier re-plan took the file over from (R3).
+    // A step at a file the plan keeps still describes it, so it stays (SF2), and a chapter step goes when it is reached.
+    const replaced = new Set(steps
+      .filter((s) => s.id !== d.id && (s.kind === 'shape' ? reached.has(s.id) : rewritten.has(s.target.file) && !anchored.has(s.id)))
+      .map((s) => s.id));
     const staleDependents = steps
       .filter((s) => s.id !== d.id && walked.has(s.id) && (downstream.has(s.id) || s.id === owner.id))
       .map((s) => s.id);
+    // Kept on the old road, though not walked, because a walked step stands on it (the stopped re-review's NF3). Named by
+    // the step that writes it, or by its chapter step: a symbol step goes where its file goes, and a step that has been
+    // taken over writes nothing. D's own file is D's.
+    const keptOnOldRoad = steps
+      .filter((s) => s.id !== d.id && downstream.has(s.id) && !walked.has(s.id) && !replaced.has(s.id) && writes(s) && (s.kind === 'shape' || s.target.file !== ownFile))
+      .map((s) => s.id);
+    const named = { staleDependents, ...(keptOnOldRoad.length === 0 ? {} : { keptOnOldRoad }) };
     if (ownFile === null && replaced.size === 0) {
-      if (staleDependents.length === 0) return { ok: true, changed: false, staleDependents, cost: costOf(tally, deps) };
-      // Something does follow, and all of it is walked (T-22's code review, MF1): there is nothing to
-      // re-derive and nothing is asked, but the choice is recorded on a version that names those steps.
+      if (staleDependents.length === 0 && keptOnOldRoad.length === 0) return { ok: true, changed: false, staleDependents, keptOnOldRoad, cost: costOf(tally, deps) };
+      // Something does follow, and all of it is kept (T-22's code review, MF1; NF3): there is nothing to re-derive and
+      // nothing is asked, but the choice is recorded on a version that names those steps.
       const at = (deps.now?.() ?? new Date()).toISOString();
       const priorTree = treeNamedBy(plan);
       const prior = (plan as { divergences?: PlanDivergence[] }).divergences ?? [];
@@ -201,13 +228,14 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
         steps: plan.steps.map((s) => (s.id === d.id ? { ...s, decision: { ...s.decision, chosen: answer } } : s)),
         generatedAt: at,
         cost: costOf(tally, deps),
-        divergences: [...prior, { stepId: d.id, answer, staleDependents, at, replanned: false, ...(priorTree === undefined ? {} : { tree: priorTree }) }],
+        divergences: [...prior, { stepId: d.id, answer, ...named, at, replanned: false, ...(priorTree === undefined ? {} : { tree: priorTree }) }],
       };
-      return { ok: true, changed: true, plan: recorded, derivedRoot, staleDependents, replaced: [], written: [], cost: costOf(tally, deps) };
+      return { ok: true, changed: true, plan: recorded, derivedRoot, staleDependents, keptOnOldRoad, replaced: [], written: [], cost: costOf(tally, deps) };
     }
 
-    // The file D owns is D's to write, so its old file step is not one the model is asked to re-plan.
-    const reachedUnits = steps.filter((s) => replaced.has(s.id) && s.kind !== 'symbol' && s.id !== owner.id);
+    // Each rewritten file is asked about once, through the step that writes it (R3: it was asked once per file step, and a
+    // reply with one step per entry was refused). D's own file is D's to write, so it is not one the model is asked to re-plan.
+    const reachedUnits = steps.filter((s) => replaced.has(s.id) && (s.kind === 'shape' || (s.kind === 'file' && writes(s) && s.target.file !== ownFile)));
     if (reachedUnits.length > DERIVE_LIMITS.maxSteps) {
       return fail(`this decision reaches ${reachedUnits.length} later steps, more than the ${DERIVE_LIMITS.maxSteps} one press can re-plan`);
     }
@@ -295,14 +323,14 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
         entry: '',
         chapters: plan.chapters.map((c) => ({ key: aliases.get(c.key) ?? c.key, title: c.title, subtitle: c.subtitle })),
         decision: { ...shown(decisionStep, answer), recommended: d.decision.authorChoice },
-        shown: steps.filter((s) => showIds.has(s.id) && s.kind !== 'symbol').map((s) => shown(s, roadOf(s))),
+        shown: steps.filter((s) => showIds.has(s.id) && s.kind !== 'symbol' && writes(s)).map((s) => shown(s, roadOf(s))),
         replacing: asked.map((s) => shown(s, roadOf(s))),
       });
       const owedKeys = [keyOf(owner), ...externals.flatMap((id) => { const e = byId.get(id); return e === undefined ? [] : [keyOf(e)]; })];
       const reply = await askOnce(deps, `derive:diverge:${d.id}`, prompt, (t) => {
         const parsed = parseReplanReply(t, language, pathRules);
         return ofTheAnswer(isDeriveRefusal(parsed) ? parsed : mergeReply(parsed, {
-          steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId: d.id, replacedPaths, newFileExtensions: extensionsFor(language),
+          steps, replaced, writes, aliases, keyOf, owedKeys, ownFile, decisionId: d.id, replacedPaths, newFileExtensions: extensionsFor(language),
         }));
       }, tally);
       if (isDeriveRefusal(reply)) return fail(reply.refused);
@@ -394,9 +422,15 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     // D is never replaced, so in a cycle through D it can stand on a step the press did replace: that edge now names
     // the new step at the same file, or goes (the re-review of the fixes, R6; MF2's "nothing depends on a removed step").
     const freshAtFile = new Map(merged.fresh.filter((f) => f.node.kind === 'file').map((f) => [f.node.path, f.id] as const));
-    const dEdges = [...new Set((ownerGoes ? owner.dependsOn : d.dependsOn).flatMap((id) => {
-      if (!replaced.has(id)) return [id];
-      const gone = byId.get(id);
+    // At a symbol press D writes its file from now on, so it stands on what the file's step stood on, whether that step
+    // went with the file (MF3) or stays, walked, taken over (R3). It never stands on a step at its own file: it replaced
+    // their code. An edge to a step whose file was taken over names the step that writes the file now.
+    const dEdges = [...new Set((owner.id === d.id ? d.dependsOn : owner.dependsOn).flatMap((id) => {
+      const dep = byId.get(id);
+      if (dep !== undefined && dep.kind !== 'shape' && dep.target.file === ownFile) return [];
+      const live = dep === undefined ? id : takenOverIn(writers, dep)?.id ?? id;
+      if (!replaced.has(live)) return live === d.id ? [] : [live];
+      const gone = byId.get(live);
       const now = gone === undefined || gone.kind === 'shape' ? undefined : freshAtFile.get(gone.target.file);
       return now === undefined || now === d.id ? [] : [now];
     }))];
@@ -405,7 +439,6 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
       decision: { ...d.decision, chosen: answer },
       // Its code is the model's now. A step the model wrote in the first place keeps saying where it came from.
       ...(ownFile === null ? {} : { kind: 'file' as const, target: { file: ownFile }, scaffold: scaffoldOf(ownFile, derivedFiles, extracts), derivedFrom: d.derivedFrom ?? d.id }),
-      // The file step it took over is gone, so D stands on what that step stood on.
       dependsOn: dEdges,
     };
     stepsById.set(d.id, answered);
@@ -421,9 +454,9 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
     const prior = (plan as { divergences?: PlanDivergence[] }).divergences ?? [];
     const next: PlanLike & { divergences: PlanDivergence[] } = {
       ...plan, chapters, steps: nextSteps, generatedAt: at, cost: costOf(tally, deps),
-      divergences: [...prior, { stepId: d.id, answer, staleDependents, at, tree: tree.storeKey }],
+      divergences: [...prior, { stepId: d.id, answer, ...named, at, tree: tree.storeKey }],
     };
-    return { ok: true, changed: true, plan: next, derivedRoot: tree.root, staleDependents, replaced: [...replaced], written: merged.fresh.map((f) => f.id), cost: costOf(tally, deps) };
+    return { ok: true, changed: true, plan: next, derivedRoot: tree.root, staleDependents, keptOnOldRoad, replaced: [...replaced], written: merged.fresh.map((f) => f.id), cost: costOf(tally, deps) };
   } catch (err) {
     return fail(`the re-plan stopped unexpectedly: ${thrownSentence(err)}`);
   }
@@ -495,6 +528,8 @@ function freshStep(f: FreshNode, decisionId: string, realKey: ReadonlyMap<string
 interface MergeContext {
   steps: readonly StepLike[];
   replaced: ReadonlySet<string>;
+  /** whether a step writes its own file (or is a chapter step): a step whose file was taken over holds no key (R3) */
+  writes: (s: StepLike) => boolean;
   aliases: ReadonlyMap<string, string>;
   keyOf: (s: StepLike) => string;
   owedKeys: readonly string[];
@@ -512,19 +547,21 @@ interface MergeContext {
  * (`askOnce`'s `parse`), so a reply this refuses is never cached.
  */
 function mergeReply(reply: ReplanReply, ctx: MergeContext): Merged | DeriveRefusal {
-  const { steps, replaced, aliases, keyOf, owedKeys, ownFile, decisionId, replacedPaths, newFileExtensions } = ctx;
+  const { steps, replaced, writes, aliases, keyOf, owedKeys, ownFile, decisionId, replacedPaths, newFileExtensions } = ctx;
   const known = new Set([...aliases.values(), ...aliases.keys()]);
   const newKeys = new Set<string>();
   for (const c of reply.chapters) {
     if (known.has(c.key)) return refuse(`the replan lists a new chapter "${c.key}" that the plan already has`);
     newKeys.add(c.key);
   }
-  const kept = steps.filter((s) => !replaced.has(s.id));
-  const keptKeys = new Map(kept.filter((s) => s.kind !== 'symbol').map((s) => [keyOf(s).toLowerCase(), s.id] as const));
+  // A key is what a step stands for: a chapter, or a file the step writes. A step whose file a re-plan took over writes
+  // nothing, so the file is not "a step this plan keeps" when it is being rewritten (the re-review of the fixes, R3).
+  const kept = steps.filter((s) => !replaced.has(s.id) && s.kind !== 'symbol' && writes(s));
+  const keptKeys = new Map(kept.map((s) => [keyOf(s).toLowerCase(), s.id] as const));
   // What a new step names is a file or a chapter, and what stands for it is that file's own step: a
   // symbol step shares its file's key, and Mode B's edges run file to file (T-22's live run found a
   // new lookup.js standing on one of lookup-data.js's variables). The re-derived file is D's now.
-  const allKeys = new Map(kept.filter((s) => s.kind !== 'symbol').map((s) => [keyOf(s), s.id] as const));
+  const allKeys = new Map(kept.map((s) => [keyOf(s), s.id] as const));
   if (ownFile !== null) {
     keptKeys.set(ownFile.toLowerCase(), 'decision');
     allKeys.set(ownFile, decisionId);

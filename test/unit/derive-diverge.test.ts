@@ -15,7 +15,7 @@ import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
 import { divergePlan, type DivergeDeps, type DivergeInput } from '../../src/derive/diverge.js';
 import { AskLedger } from '../../src/tutor/ask.js';
 import { tutorCoreFor, type TutorCore } from '../../src/tutor/core.js';
-import type { PlanLike, StepLike } from '../../src/walk/model.js';
+import { emptyProgress, fileWriters, markDone, setCurrent, takenOverBy, walkedSteps, type PlanLike, type StepLike } from '../../src/walk/model.js';
 
 let realCore: TutorCore;
 let dialCore: DialCore;
@@ -493,6 +493,107 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.deepEqual(stepNamed(out.plan, 's-handle')?.dependsOn, ['s-parse'], 'D stands on what routes.ts\'s step stood on');
     const ids = new Set(out.plan.steps.map((s) => s.id));
     assert.deepEqual(out.plan.steps.flatMap((s) => s.dependsOn.filter((dep) => !ids.has(dep))), [], 'and nothing is left depending on the step that went');
+  });
+
+  // The re-review of the fixes, R3 (must-fix), with R1, ruled 2026-11-11: one writer per file. A press on a symbol step is
+  // made from that step's page, and its file's own step comes first in plan order, so the walk counts it as walked and it
+  // stays. D writes the file from the press on; the file step, kept exactly as the learner left it, has been taken over,
+  // and writes, outlines and checks nothing for the file any more. Each walked set below is the walk's own (`walkedSteps`).
+  const walkedAt = (plan: PlanLike, id: string, done: string[] = []): string[] => {
+    let progress = setCurrent(emptyProgress(plan), id);
+    for (const d of done) progress = markDone(progress, d);
+    return [...walkedSteps(plan, progress)];
+  };
+  const symbolPress = async (plan = repoPlan(), done: string[] = []) => {
+    const { root, gs, target } = setup();
+    const walked = walkedAt(plan, 's-handle', done);
+    const first = await divergePlan(input(plan, root, 's-handle', 'alt-1', walked), depsFor(model().run, gs, target));
+    if (!first.ok || !first.changed) assert.fail(first.ok ? 'nothing changed' : first.reason);
+    return { plan, root, gs, target, walked, first };
+  };
+
+  test('after a symbol press from the walk, D writes its file: the walked file step is kept as it was, taken over, and D stands on what it stood on', async () => {
+    const { plan, walked, first } = await symbolPress();
+    assert.ok(walked.includes('s-routes'), 'discriminates: the walk counts the file step as walked when D is pressed');
+    assert.equal(content(stepNamed(first.plan, 's-routes')), content(stepNamed(plan, 's-routes')), 'the walked file step is kept exactly');
+    assert.equal(fileWriters(first.plan).get('src/api/routes.ts')?.id, 's-handle', 'D writes routes.ts');
+    assert.equal(takenOverBy(first.plan, stepNamed(first.plan, 's-routes')!)?.id, 's-handle', 'it has taken the file over from the file step');
+    assert.deepEqual(stepNamed(first.plan, 's-handle')?.dependsOn, ['s-parse'], 'D stands on what routes.ts\'s step stood on, not on the step it took over');
+  });
+
+  test('a press at a step whose file another step writes now is refused in words, with nothing asked', async () => {
+    const { root, gs, target, first } = await symbolPress();
+    const m = model();
+    const out = await divergePlan(input(first.plan, root, 's-routes', 'alt-1', walkedAt(first.plan, 's-routes'), treeOf(first)), depsFor(m.run, gs, target));
+    assert.ok(!out.ok, 'refused');
+    assert.match(out.reason, /step 6 \(src\/api\/routes\.ts\)/, 'it names the step that writes the file now');
+    assert.equal(m.asked.length, 0, 'before anything is asked or billed');
+  });
+
+  test('after a symbol press, a press upstream asks about the file once, through the step that writes it, and lands with one step for the file', async () => {
+    const { root, gs, target, first } = await symbolPress();
+    const m = model();
+    const out = await divergePlan(input(first.plan, root, 's-parse', 'alt-1', walkedAt(first.plan, 's-parse'), treeOf(first)), depsFor(m.run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    const replacing = ((m.asked.find((a) => a.task === 'replan')?.input['replacing'] as Array<{ path: string }> | undefined) ?? []).map((r) => r.path);
+    assert.deepEqual(replacing.filter((p) => p === 'src/api/routes.ts'), ['src/api/routes.ts'], `routes.ts is asked about once: ${JSON.stringify(replacing)}`);
+    const onRoutes = out.plan.steps.filter((s) => s.target.file === 'src/api/routes.ts');
+    assert.deepEqual(onRoutes.map((s) => `${s.kind}:${s.derivedFrom ?? 'the author'}`), ['file:s-parse'], 'one step for routes.ts, the new one: the file step and D, neither walked, went with their file');
+  });
+
+  test('after a symbol press, with the file step walked, a press upstream lands: the file step stays as it was, taken over by the new step', async () => {
+    const { root, gs, target, first } = await symbolPress();
+    const out = await divergePlan(input(first.plan, root, 's-parse', 'alt-1', walkedAt(first.plan, 's-parse', ['s-routes']), treeOf(first)), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(content(stepNamed(out.plan, 's-routes')), content(stepNamed(first.plan, 's-routes')), 'walked, it is kept exactly');
+    const writer = fileWriters(out.plan).get('src/api/routes.ts');
+    assert.equal(writer?.derivedFrom, 's-parse', 'the new routes.ts step writes the file');
+    assert.equal(takenOverBy(out.plan, stepNamed(out.plan, 's-routes')!)?.id, writer?.id, 'and the walked file step is taken over by it');
+    assert.equal(stepNamed(out.plan, 's-handle'), undefined, 'D, not walked, went with its file');
+    assert.equal(out.plan.steps.filter((s) => s.target.file === 'src/api/routes.ts' && s.derivedFrom !== undefined).length, 1, 'one re-derived step for the file');
+  });
+
+  test('a second press at D names a walked step that imports its file: that step stood on the file D writes now', async () => {
+    const plan = repoPlan();
+    plan.steps = plan.steps.map((s) => (s.id === 's-render' ? { ...s, dependsOn: ['s-routes'] } : s));
+    const { root, gs, target, first } = await symbolPress(plan, ['s-render']);
+    assert.ok(first.staleDependents.includes('s-render'), 'discriminates: the first press names it');
+    const second = await divergePlan(input(first.plan, root, 's-handle', 'author', walkedAt(first.plan, 's-handle', ['s-render']), treeOf(first)), depsFor(model().run, gs, target));
+    if (!second.ok || !second.changed) assert.fail(second.ok ? 'nothing changed' : second.reason);
+    assert.deepEqual(second.staleDependents, ['s-render'], 'render.ts imports routes.ts, and D writes routes.ts now');
+  });
+
+  // The stopped re-review's NF3: a step downstream of D that a walked step stands on is kept, on the old road, and it was
+  // named nowhere: the landing said "No later step needed re-planning".
+  test('a step kept on the old road only because a walked step stands on it is recorded beside the walked ones', async () => {
+    const { root, gs, target } = setup();
+    const plan = repoPlan();
+    plan.steps = plan.steps.map((s) => (s.id === 's-render' ? { ...s, dependsOn: ['s-routes'] } : s));
+    const out = await divergePlan(input(plan, root, 's-parse', 'alt-1', walkedAt(plan, 's-parse', ['s-render'])), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(content(stepNamed(out.plan, 's-routes')), content(stepNamed(plan, 's-routes')), 'discriminates: routes.ts is kept, because render.ts, walked, stands on it');
+    assert.deepEqual(out.staleDependents, ['s-render']);
+    assert.deepEqual((out as { keptOnOldRoad?: string[] }).keptOnOldRoad, ['s-routes'], 'kept and not walked: named, and its symbol steps are not named apart from their file');
+    const record = (out.plan['divergences'] as Array<{ keptOnOldRoad?: string[] }>).at(-1);
+    assert.deepEqual(record?.keptOnOldRoad, ['s-routes'], 'and the version records it');
+  });
+
+  test('a chapter decision whose only follower is kept for a walked step is recorded, never "nothing follows" (NF3)', async () => {
+    const root = tempDir('diverge-kept-');
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/a.ts'), 'export const A = 1;\n');
+    // A chapter step that stands on a file in its own chapter, walked: that file is downstream of it, and anchored by it.
+    const plan: PlanLike = { ...repoPlan(), chapters: [{ key: 'src', title: 'src', subtitle: 's', tierPath: 'src' }], steps: [
+      step('s-c', 1, 'src', 'shape', 'src', ['s-a']), step('s-a', 2, 'src', 'file', 'src/a.ts'),
+    ] };
+    const m = model();
+    const out = await divergePlan(input(plan, root, 's-c', 'alt-1', ['s-c']), depsFor(m.run, tempDir('diverge-gs-'), tempDir('diverge-target-')));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'reported "nothing follows", and a.ts stood on this chapter' : out.reason);
+    assert.deepEqual(out.staleDependents, [], 'discriminates: no walked step stood on the old road');
+    assert.deepEqual(out.keptOnOldRoad, ['s-a']);
+    assert.equal(m.asked.length, 0, 'nothing to re-derive, so nothing is asked');
+    const record = (out.plan['divergences'] as Array<{ keptOnOldRoad?: string[]; replanned?: boolean }>).at(-1);
+    assert.deepEqual(record && { keptOnOldRoad: record.keptOnOldRoad, replanned: record.replanned }, { keptOnOldRoad: ['s-a'], replanned: false });
   });
 
   // T-22's code review, MF1: "nothing follows" is about what is downstream, not about what is left to re-derive.

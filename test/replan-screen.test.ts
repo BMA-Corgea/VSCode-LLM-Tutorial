@@ -133,7 +133,7 @@ function scriptedModel(): {
   };
 }
 
-function aStep(id: string, ordinal: number, chapter: string, kind: StepLike['kind'], file: string, dependsOn: string[], tag: string): StepLike {
+function aStep(id: string, ordinal: number, chapter: string, kind: StepLike['kind'], file: string, dependsOn: string[], tag: string, extra: Partial<StepLike> = {}): StepLike {
   return {
     id, ordinal, chapter, kind,
     decision: {
@@ -148,6 +148,7 @@ function aStep(id: string, ordinal: number, chapter: string, kind: StepLike['kin
     scaffold: { loadBearing: [], boilerplate: [] },
     dependsOn,
     witness: { sha: null, date: null, subject: null },
+    ...extra,
   };
 }
 
@@ -170,6 +171,28 @@ function thePlan(repo: string, tag: string): PlanLike {
       aStep('s-api', 3, 'src/api', 'shape', 'src/api', [], tag),
       aStep(AFTER_D, 4, 'src/api', 'file', 'src/api/routes.ts', [D], tag),
       aStep(NOTHING_AFTER, 5, 'docs', 'shape', 'docs', [], tag),
+    ],
+  };
+}
+
+/**
+ * The re-review of the fixes, R3: a symbol step after its file's own step, as repo-tour orders them, so a press on the
+ * symbol leaves the file step walked. Both files paint a load-bearing range, so the editor shows when a step paints none.
+ */
+const FILE_STEP = 's-routes-file';
+const SYMBOL = 's-handle';
+function symbolPlan(repo: string, tag: string): PlanLike {
+  const plan = thePlan(repo, tag);
+  const lines = { loadBearing: [{ startLine: 1, endLine: 2 }], boilerplate: [] };
+  return {
+    ...plan,
+    steps: [
+      aStep('s-src', 1, 'src', 'shape', 'src', [], tag),
+      aStep(D, 2, 'src', 'file', 'src/parse.ts', [], tag, { scaffold: lines }),
+      aStep('s-api', 3, 'src/api', 'shape', 'src/api', [], tag),
+      aStep(FILE_STEP, 4, 'src/api', 'file', 'src/api/routes.ts', [D], tag, { scaffold: { loadBearing: [{ startLine: 3, endLine: 5 }], boilerplate: [] } }),
+      aStep(SYMBOL, 5, 'src/api', 'symbol', 'src/api/routes.ts', [FILE_STEP], tag, { target: { file: 'src/api/routes.ts', startLine: 3, endLine: 5 } }),
+      aStep(NOTHING_AFTER, 6, 'docs', 'shape', 'docs', [], tag),
     ],
   };
 }
@@ -211,7 +234,7 @@ interface Drive {
 suite('a different road, re-planned, read off the screen (T-22)', function () {
   this.timeout(180_000);
 
-  async function drive(body: (d: Drive) => Promise<void>): Promise<void> {
+  async function drive(body: (d: Drive) => Promise<void>, planOf: (repo: string, tag: string) => PlanLike = thePlan): Promise<void> {
     const ext = vscode.extensions.getExtension<ExtensionApi>('bma-corgea.build-tutorials');
     assert.ok(ext);
     const api = await ext.activate();
@@ -228,7 +251,7 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     write(repo, 'src/api/routes.ts', "import { tokenize } from '../parse';\n\nexport function handle(body: string): number {\n  return tokenize(body).length;\n}\n");
     write(target, 'src/parse.ts', 'the learner wrote this\n');
     fs.mkdirSync(build, { recursive: true });
-    fs.writeFileSync(path.join(build, 'plan.json'), `${JSON.stringify(thePlan(repo, randomBytes(6).toString('hex')), null, 3)}\n`);
+    fs.writeFileSync(path.join(build, 'plan.json'), `${JSON.stringify(planOf(repo, randomBytes(6).toString('hex')), null, 3)}\n`);
     fs.writeFileSync(path.join(build, 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial: 'manual', referenceRoot: repo }));
     try {
       await api._walk.openAt(target);
@@ -397,6 +420,28 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     const reloaded = await d.onStep(D);
     assert.match(reloaded.stale, /step 4 \(src\/api\/routes\.ts\)/, 'the plan itself remembers it');
   }));
+
+  // The re-review of the fixes, R3 (must-fix), ruled 2026-11-11: one writer per file. From a symbol press on, D writes its
+  // file; the file's own step, walked, offers no road and paints none of the author's lines over the learner's file.
+  test('a symbol press: the file step D took over offers no road and paints no lines, and D names it (R3)', () => drive(async (d) => {
+    const decorator = d.api._walk.decorator();
+    assert.ok(decorator);
+    write(d.target, 'src/api/routes.ts', "import { tokenize } from '../parse';\n\nexport function handle(body: string): number {\n  return tokenize(body).length;\n}\n");
+    const before = await d.onStep(FILE_STEP);
+    assert.deepEqual(before.choosable, [ROAD], 'discriminates: before the press the file step offers a road');
+    await until(() => Promise.resolve(decorator.getLastRangeCountForTest()), (n) => n === 1, 'the file step paints its load-bearing lines');
+    await d.onStep(SYMBOL);
+    await d.press(choose(ROAD));
+    const done = await until(d.read, (p) => p.note.startsWith('Re-planned'), 'it landed');
+    assert.match(done.stale, /step 4 \(src\/api\/routes\.ts\)/, `D names the file step: ${JSON.stringify(done.stale)}`);
+    assert.match(done.stale, /author.s version of this file/);
+    await d.onStep(D);
+    await until(() => Promise.resolve(decorator.getLastRangeCountForTest()), (n) => n === 1, 'discriminates: another step still paints its line');
+    const taken = await d.onStep(FILE_STEP);
+    assert.deepEqual(taken.choosable, [], 'the file step offers no road');
+    assert.ok(taken.notes.some((n) => /step 5 \(src\/api\/routes\.ts\)/.test(n)), `and says which step writes the file now: ${JSON.stringify(taken.notes)}`);
+    await until(() => Promise.resolve(decorator.getLastRangeCountForTest()), (n) => n === 0, 'the file step paints none of the author\'s lines');
+  }, symbolPlan));
 
   // T-22's code review N6, through the real replanner: the store refuses to replace a plan that changed on
   // disk since the press, but only when the replanner hands it the plan the press was made from. No unit

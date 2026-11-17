@@ -28,7 +28,7 @@ import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
 import { readSkin } from './skins.js';
 import { StepDecorator } from './walk/editor.js';
 import { resolveInsideTarget } from './walk/paths.js';
-import { planEnds } from './walk/model.js';
+import { planEnds, takenOverBy } from './walk/model.js';
 import { WalkSession, type Replanner, type WalkAdapters, type WalkView } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
@@ -399,10 +399,11 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     setTree: (view) => walkTree?.setView(view),
     setPanel: (view) => { walkPanel?.setView(view); setEndsContext(view); },
     setStatus: (text) => walkStatus?.setText(text),
-    revealEditor: (view) => { void walkDecorator?.revealStep(target, view.step); },
+    // A step whose file a re-plan has taken over paints none of its lines (T-22, the re-review's R3): they are the author's.
+    revealEditor: (view) => { void walkDecorator?.revealStep(target, view.step, { decorate: takenOverBy(view.plan, view.step) === undefined }); },
     clearEditor: () => walkDecorator?.clear(),
     // The one place focus is taken: the learner pressed *Open the file* and asked to go there.
-    openFile: (view) => { void walkDecorator?.revealStep(target, view.step, { preserveFocus: false }); },
+    openFile: (view) => { void walkDecorator?.revealStep(target, view.step, { preserveFocus: false, decorate: takenOverBy(view.plan, view.step) === undefined }); },
     // Closed over `target`, which is the only reason this adapter can answer the containment
     // half at all — `WalkAdapters.fileExists` is handed an absolute path and nothing else.
     fileExists: (absPath) => isOpenableFile(target, absPath),

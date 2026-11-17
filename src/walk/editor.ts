@@ -215,7 +215,12 @@ export class StepDecorator {
    * `preserveFocus: false`, because being sent to a file you asked for and left unable to type
    * in it is its own small insult.
    */
-  async revealStep(target: string, step: StepLike, opts: { preserveFocus?: boolean } = {}): Promise<void> {
+  /**
+   * `decorate: false` opens the file and paints none of the step's lines. T-22 (the re-review's R3 and R1, ruled
+   * 2026-11-11): a step whose file a re-plan has taken over outlines nothing for it, and its ranges describe the
+   * author's version of a file the learner may since have replaced; the top of the file is shown instead of their line.
+   */
+  async revealStep(target: string, step: StepLike, opts: { preserveFocus?: boolean; decorate?: boolean } = {}): Promise<void> {
     // Claimed before anything can await, so every check below is asking one question: has the
     // learner navigated past this reveal while it was waiting on the disk? If they have, this
     // call must touch nothing — not the front-most editor, not the decorations, not the
@@ -262,7 +267,8 @@ export class StepDecorator {
     // Everything from here down is synchronous, which is why there is no third check: this
     // call cannot be overtaken mid-paint. Anything added below that AWAITS needs one.
     const doc = editor.document;
-    const line = toZeroBased(revealLine(step), doc.lineCount);
+    const decorate = opts.decorate !== false;
+    const line = decorate ? toZeroBased(revealLine(step), doc.lineCount) : 0;
     editor.revealRange(
       new vscode.Range(line, 0, line, 0),
       // InCenter, not InCenterIfOutsideViewport: the step's line should land in a predictable
@@ -271,7 +277,7 @@ export class StepDecorator {
       vscode.TextEditorRevealType.InCenter,
     );
 
-    const ranges = DECORATED_KINDS.has(step.kind)
+    const ranges = decorate && DECORATED_KINDS.has(step.kind)
       ? step.scaffold.loadBearing.map((range) => toRange(range, doc))
       : [];
 

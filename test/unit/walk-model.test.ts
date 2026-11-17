@@ -161,9 +161,19 @@ suite('divergenceAt — the plan\'s own record of a re-plan decided at a step (T
         { stepId: D, answer: 'c', staleDependents: [], at: 't3', tree: 'k/3' },
       ],
     };
-    assert.deepEqual(divergenceAt(plan, D), { staleDependents: [], replanned: true }, 'not the first press\'s list, which named a step the second one did not stand on');
-    assert.deepEqual(divergenceAt(plan, 'st-4-symbol-render'), { staleDependents: ['st-3-symbol-handle'], replanned: true }, 'and a record at another step is that step\'s alone');
+    assert.deepEqual(divergenceAt(plan, D), { staleDependents: [], keptOnOldRoad: [], replanned: true }, 'not the first press\'s list, which named a step the second one did not stand on');
+    assert.deepEqual(divergenceAt(plan, 'st-4-symbol-render'), { staleDependents: ['st-3-symbol-handle'], keptOnOldRoad: [], replanned: true }, 'and a record at another step is that step\'s alone');
     assert.equal(divergenceAt(plan, 'st-3-symbol-handle'), undefined, 'a step nothing was decided at has none');
+  });
+
+  // The stopped re-review's NF3: the steps kept on the old road because a walked step stands on them are on the record.
+  test('a record names the steps kept on the old road for a walked step, and only ids are read from it', () => {
+    const D = 'st-2-file-parse';
+    const plan: PlanLike = {
+      ...fixturePlan(),
+      divergences: [{ stepId: D, answer: 'a', staleDependents: ['st-4-symbol-render'], keptOnOldRoad: ['st-3-symbol-handle', 7, null], at: 't1', tree: 'k/1' }],
+    };
+    assert.deepEqual(divergenceAt(plan, D), { staleDependents: ['st-4-symbol-render'], keptOnOldRoad: ['st-3-symbol-handle'], replanned: true });
   });
 });
 

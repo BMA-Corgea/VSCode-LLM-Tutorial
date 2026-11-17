@@ -107,6 +107,9 @@ export interface PlanDivergence {
   answer: string;
   /** walked steps that stood on the old road, by id, in plan order (the M1 warning) */
   staleDependents: string[];
+  /** steps that stood on the old road and were kept on it, not walked, because a walked step stands on them, by id, in
+   *  plan order (the stopped re-review's NF3). Absent when there are none. */
+  keptOnOldRoad?: string[];
   at: string;
   /** which tree in the `derived/` store holds this plan's re-derived files; absent while none was ever written */
   tree?: string;
@@ -164,21 +167,69 @@ export function whyOfStep(step: StepLike): string {
  * step, a file in that chapter (the edge the engine adds, `graphOf` in `../derive/diverge.ts`).
  */
 export function stepHasDependents(plan: PlanLike, stepId: string): boolean {
-  const step = plan.steps.find((s) => s.id === stepId);
+  // Total over a hand-edited plan: the page asks this of every chapter step it draws (`pressRules`).
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  const step = steps.find((s) => s?.id === stepId);
   if (step === undefined) return false;
-  return plan.steps.some((s) => s.id !== stepId && (s.dependsOn.includes(stepId) || (step.kind === 'shape' && s.kind === 'file' && s.chapter === step.chapter)));
+  return steps.some((s) => s?.id !== stepId && ((Array.isArray(s?.dependsOn) && s.dependsOn.includes(stepId)) || (step.kind === 'shape' && s?.kind === 'file' && s.chapter === step.chapter)));
+}
+
+/**
+ * T-22 (the re-review's R3 and R1, ruled 2026-11-11: one writer per file). The step that writes each file of this
+ * plan: the re-derived `file` step at it, else the author's `file` step.
+ *
+ * A re-plan that rewrites a file takes it over from the steps the author had at it. At a press on a symbol step the
+ * file's own step comes first in plan order, so it is walked and stays (T-23: a walked step is never removed or
+ * rewritten), and so do the file's walked symbol steps. Each keeps its own record exactly as the learner left it
+ * (walked, its verdict, its commit), and from the press on it writes, outlines and checks nothing for the file: the
+ * step that writes it now does, and its roads are chosen there. Total over a hand-edited plan: of two re-derived file
+ * steps at one file, the later in plan order writes it.
+ */
+export function fileWriters(plan: PlanLike): Map<string, StepLike> {
+  const steps = Array.isArray(plan.steps) ? [...plan.steps].sort((a, b) => a.ordinal - b.ordinal) : [];
+  const authors = new Map<string, StepLike>();
+  const derived = new Map<string, StepLike>();
+  for (const s of steps) {
+    const file: unknown = s?.target?.file;
+    if (s?.kind !== 'file' || typeof file !== 'string') continue;
+    if (s.derivedFrom !== undefined) derived.set(file, s);
+    else if (!authors.has(file)) authors.set(file, s);
+  }
+  for (const [file, s] of derived) authors.set(file, s);
+  return authors;
+}
+
+/** The re-derived step that writes this step's file now, when that is another step (see `fileWriters`). */
+export function takenOverBy(plan: PlanLike, step: StepLike): StepLike | undefined {
+  return takenOverIn(fileWriters(plan), step);
+}
+
+/** `takenOverBy`, with the writers worked out once by a caller that asks about many steps. */
+export function takenOverIn(writers: ReadonlyMap<string, StepLike>, step: StepLike): StepLike | undefined {
+  if (step.kind === 'shape' || typeof step.target?.file !== 'string') return undefined;
+  const writer = writers.get(step.target.file);
+  return writer !== undefined && writer.id !== step.id && writer.derivedFrom !== undefined ? writer : undefined;
+}
+
+/** The steps whose file `writer` has taken over (see `fileWriters`), in plan order. */
+export function stepsTakenOverBy(plan: PlanLike, writer: StepLike): StepLike[] {
+  const writers = fileWriters(plan);
+  const steps = Array.isArray(plan.steps) ? [...plan.steps].sort((a, b) => a.ordinal - b.ordinal) : [];
+  return steps.filter((s) => takenOverIn(writers, s)?.id === writer.id);
 }
 
 /** T-22: the plan's own record of the last re-plan decided at this step, if it has one. */
-export function divergenceAt(plan: PlanLike, stepId: string): { staleDependents: string[]; replanned: boolean } | undefined {
+export function divergenceAt(plan: PlanLike, stepId: string): { staleDependents: string[]; keptOnOldRoad: string[]; replanned: boolean } | undefined {
   const all: unknown = plan['divergences'];
   if (!Array.isArray(all)) return undefined;
   for (let i = all.length - 1; i >= 0; i -= 1) {
     const entry: unknown = all[i];
     if (typeof entry !== 'object' || entry === null || (entry as { stepId?: unknown }).stepId !== stepId) continue;
     const stale: unknown = (entry as { staleDependents?: unknown }).staleDependents;
+    const kept: unknown = (entry as { keptOnOldRoad?: unknown }).keptOnOldRoad;
     return {
       staleDependents: Array.isArray(stale) ? stale.filter((id): id is string => typeof id === 'string') : [],
+      keptOnOldRoad: Array.isArray(kept) ? kept.filter((id): id is string => typeof id === 'string') : [],
       replanned: (entry as { replanned?: unknown }).replanned !== false,
     };
   }
@@ -340,6 +391,29 @@ export interface OptionsTable {
   diverged: boolean;
   /** One per row: a press there can be taken, so the page draws a control and the session accepts it. */
   choosable: boolean[];
+  /** The road this step is on can itself be pressed: it is a choice no re-plan followed (`PressRules`, the re-review's R11). */
+  replansOn: boolean;
+}
+
+/**
+ * T-22: what a press on a step's roads may do beyond T-21's table, read from the plan the step is in. Decided once,
+ * here, for the page that draws the controls and the session that takes the press, so the two cannot disagree.
+ */
+export interface PressRules {
+  /** The step that writes this step's file now (`takenOverBy`): no road of this step is pressed (the re-review's R3). */
+  takenOverBy?: StepLike;
+  /**
+   * A choice no re-plan followed, at a step something stands on, re-plans when its own road is pressed (the re-review's
+   * R11). The page says such a choice "was not re-planned" (SF4), and every folder walked before T-22 can hold one in
+   * `progress.json`. A choice at a chapter step nothing stands on has nothing to re-plan: it stays recorded.
+   */
+  replansOwnRoad: boolean;
+}
+
+export function pressRules(plan: PlanLike, step: StepLike): PressRules {
+  const writer = takenOverBy(plan, step);
+  const replansOwnRoad = divergenceAt(plan, step.id) === undefined && !(step.kind === 'shape' && !stepHasDependents(plan, step.id));
+  return { ...(writer === undefined ? {} : { takenOverBy: writer }), replansOwnRoad };
 }
 
 /**
@@ -359,7 +433,7 @@ export interface OptionsTable {
  * Total over whatever `plan.json` said: every field is read defensively, because the types above
  * are a cast over `JSON.parse`.
  */
-export function optionsTable(step: Pick<StepLike, 'id' | 'decision'>): OptionsTable {
+export function optionsTable(step: Pick<StepLike, 'id' | 'decision'>, rules?: PressRules): OptionsTable {
   const decision = step.decision as Partial<StepLike['decision']> | undefined;
   const all = Array.isArray(decision?.options) ? decision.options : [];
 
@@ -384,15 +458,19 @@ export function optionsTable(step: Pick<StepLike, 'id' | 'decision'>): OptionsTa
   const chosen = decision?.chosen;
   const learners = isOptionKey(chosen) ? keys.indexOf(chosen) : -1;
   const on = learners !== -1 ? learners : author;
-  const canPress = rows.length >= 2 && typeof step.id === 'string' && step.id !== '';
+  const diverged = learners !== -1 && learners !== author;
+  // T-22: a step whose file another step writes now offers no road (R3); a choice no re-plan followed offers its own (R11).
+  const canPress = rows.length >= 2 && typeof step.id === 'string' && step.id !== '' && rules?.takenOverBy === undefined;
+  const replansOn = canPress && diverged && rules?.replansOwnRoad === true && keys[on] !== null;
   return {
     rows,
     omitted: all.length - rows.length,
     keys,
     author,
     on,
-    diverged: learners !== -1 && learners !== author,
-    choosable: keys.map((key, row) => canPress && key !== null && row !== on),
+    diverged,
+    choosable: keys.map((key, row) => canPress && key !== null && (row !== on || replansOn)),
+    replansOn,
   };
 }
 

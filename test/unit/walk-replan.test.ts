@@ -349,6 +349,18 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     assert.doesNotMatch(replanDoneText(0, true, COST), /depended/);
   });
 
+  // The stopped re-review's NF3: a later step kept on the old road because a walked step stands on it is said, on D's own
+  // page and on another, and the line never says no later step needed re-planning.
+  test('a later step kept on the old road for a walked step is said, never "no later step needed re-planning" (NF3)', () => {
+    assert.match(replanDoneText(0, true, COST, null, false, 1), /This step.s code now follows your choice\. A later step stays on the old road, because a step you have walked stands on it\./);
+    assert.match(replanDoneText(2, true, COST, null, false, 3), /and 2 later steps now follow your choice\. 3 later steps stay on the old road, because steps you have walked stand on them\./);
+    assert.match(replanDoneText(0, true, COST, 'step 2 (src/parse.ts)', false, 1), /stays on the old road, because a step you have walked stands on it; that step's page names it\./);
+    for (const kept of [1, 2]) assert.doesNotMatch(replanDoneText(0, true, COST, null, false, kept), /No later step needed re-planning/);
+    // The record path (MF1): nothing re-derived, and what stood on the old road was walked, or a walked step stands on it.
+    assert.match(replanDoneText(0, false, COST, 'step 1 (src)', false, 1), /Nothing was re-planned: every later step that stood on the old road is one you have walked, or one a step you have walked stands on/);
+    assert.doesNotMatch(replanDoneText(0, false, COST, 'step 1 (src)', false, 1), /is one you have already walked, so/);
+  });
+
   test('the learner\'s folder is not touched: no file, no dial', async () => {
     const h = harness({ progress: (p) => setDial(setCurrent(fixtureProgress(p), D), D, 'automated') });
     fs.mkdirSync(path.join(h.target, 'src'), { recursive: true });

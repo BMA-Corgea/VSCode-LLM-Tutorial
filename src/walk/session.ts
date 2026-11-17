@@ -224,6 +224,8 @@ import {
   setDial as setDialIn,
   setChosen as setChosenIn,
   optionsTable,
+  pressRules,
+  takenOverBy,
   walkedSteps,
   withChosen,
   type PlanLike,
@@ -276,6 +278,16 @@ export function replanNothingFollowsText(at: string | null): string {
   return at === null ? REPLAN_NOTHING_FOLLOWS : `Your choice at ${at} is recorded. Nothing later depended on it, so the rest of the walk stands.`;
 }
 
+/** T-22 (the re-review's R3, ruled 2026-11-11: one writer per file): a press at a step whose file another step writes now. */
+export function choiceTakenOverText(writer: StepLike): string {
+  return `The roads for this file are chosen at ${stepLabel(writer)} now, where the model rewrote it. Nothing was recorded.`;
+}
+
+/** T-22 (R3): *Check my work* at a step whose file another step writes now. Nothing is checked, and its record stands. */
+export function checkTakenOverText(writer: StepLike): string {
+  return `There is nothing to check at this step any more: ${stepLabel(writer)} writes and checks this file now.`;
+}
+
 /** T-22: why a re-plan did not land. It always says the state is as it was, and that the press still works. */
 export function replanRefusedText(reason: string): string {
   return `Nothing was changed, and the road is still there to press. Why: ${reason}.`;
@@ -294,18 +306,23 @@ function replanCostText(cost: DeriveCost): string {
  * `fileAsItWas`: the learner's own file is the one from before, and arriving at the step again is how
  * the new code is written (a landing is not an arrival; code review N9).
  */
-export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost, at: string | null = null, fileAsItWas = false): string {
-  // Every later step that stood on a chapter decision was walked: nothing re-derived, nothing asked (code review MF1).
+export function replanDoneText(fresh: number, ownCode: boolean, cost: DeriveCost, at: string | null = null, fileAsItWas = false, kept = 0): string {
+  // Every later step that stood on a chapter decision was kept: nothing re-derived, nothing asked (code review MF1, NF3).
   if (fresh === 0 && !ownCode) {
     // On D's own page the page's note (`RECORDED_NOTE`) says why nothing was re-planned; said here too, it is said twice.
-    return at === null
-      ? REPLAN_NOTHING_FOLLOWS
-      : `Your choice at ${at} is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned; that step's page names them.`;
+    if (at === null) return REPLAN_NOTHING_FOLLOWS;
+    return kept === 0
+      ? `Your choice at ${at} is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned; that step's page names them.`
+      : `Your choice at ${at} is recorded. Nothing was re-planned: every later step that stood on the old road is one you have walked, or one a step you have walked stands on; that step's page names them.`;
   }
   const its = at === null ? 'This step\u2019s code' : 'Its code';
+  // A step kept on the old road because a walked step stands on it is said, never "no later step needed re-planning" (NF3).
+  const stays = kept === 0
+    ? ''
+    : ` ${kept === 1 ? 'A later step stays' : `${kept} later steps stay`} on the old road, because ${kept === 1 ? 'a step you have walked stands on it' : 'steps you have walked stand on them'}${at === null ? '' : `; that step's page names ${kept === 1 ? 'it' : 'them'}`}.`;
   const what = fresh > 0
-    ? `${ownCode ? `${its} and ` : ''}${fresh} later step${fresh === 1 ? '' : 's'} now follow${fresh === 1 && !ownCode ? 's' : ''} your choice.`
-    : `${its} now follows your choice. No later step needed re-planning.`;
+    ? `${ownCode ? `${its} and ` : ''}${fresh} later step${fresh === 1 ? '' : 's'} now follow${fresh === 1 && !ownCode ? 's' : ''} your choice.${stays}`
+    : `${its} now follows your choice.${kept === 0 ? ' No later step needed re-planning.' : stays}`;
   const file = fileAsItWas && at === null ? ' Your file is as you left it: come back to this step to have the new code written.' : '';
   return `${at === null ? 'Re-planned.' : `Re-planned from your choice at ${at}.`} ${what}${file} ${replanCostText(cost)}`;
 }
@@ -959,9 +976,16 @@ export class WalkSession {
     if (this.disposed || !this.hasStep(stepId)) return;
     const step = withChosen(this.plan, this.progress).steps.find((s) => s.id === stepId);
     if (!step) return;
-    const table = optionsTable(step);
+    // T-22: the same rules the page drew its controls from (`pressRules`). A step whose file another step writes now
+    // offers no road (the re-review's R3), and a choice no re-plan followed re-plans from its own road (R11).
+    const rules = pressRules(this.plan, step);
+    if (rules.takenOverBy !== undefined) {
+      this.refuseChoice(stepId, choiceTakenOverText(rules.takenOverBy));
+      return;
+    }
+    const table = optionsTable(step, rules);
     const row = table.keys.indexOf(optionId);
-    if (row !== -1 && row === table.on) {
+    if (row !== -1 && row === table.on && !table.replansOn) {
       this.refuseChoice(stepId, CHOICE_ALREADY_TAKEN);
       return;
     }
@@ -1112,7 +1136,7 @@ export class WalkSession {
     // wrote and this one kept (the stopped re-review's NF5).
     const followed = outcome.written.filter((id) => id !== job.stepId).length;
     const fileAsItWas = ownCode && stepDial(this.progress, job.stepId, request.dial) !== 'manual';
-    this.sayChoice(job, replanDoneText(followed, ownCode, outcome.cost, atD || decided === undefined ? null : stepLabel(decided), fileAsItWas));
+    this.sayChoice(job, replanDoneText(followed, ownCode, outcome.cost, atD || decided === undefined ? null : stepLabel(decided), fileAsItWas, outcome.keptOnOldRoad?.length ?? 0));
     this.commit(false);
   }
 
@@ -2115,6 +2139,11 @@ export class WalkSession {
   private async applyDial(stepId: string): Promise<void> {
     const step = this.plan.steps.find((s) => s.id === stepId);
     if (!step) return;
+    // One writer per file (the re-review's R3 and R1, ruled 2026-11-11): a step whose file a re-plan has taken over writes
+    // and outlines nothing for it, in any position, and its record stays as the learner left it. The step that writes
+    // the file now does both, and the page says which step that is. Before this, arriving here wrote the author's file
+    // back over the one the learner had just accepted at D.
+    if (takenOverBy(this.plan, step) !== undefined) return;
 
     // No `request.json` means no reference root: there is nothing to copy FROM, so no position
     // can write and none pretends to. Deliberately quiet — the plan is on disk without the
@@ -2341,6 +2370,12 @@ export class WalkSession {
   private async applyCheck(stepId: string): Promise<void> {
     const step = this.plan.steps.find((s) => s.id === stepId);
     if (!step) return;
+    // R3: the file is checked where it is written now. No verdict here: the step's own record stands as it was.
+    const writer = takenOverBy(this.plan, step);
+    if (writer !== undefined) {
+      this.noteFor(stepId, checkTakenOverText(writer));
+      return;
+    }
 
     const refRoot = this.referenceRootOf(step);
     if (refRoot === undefined) {

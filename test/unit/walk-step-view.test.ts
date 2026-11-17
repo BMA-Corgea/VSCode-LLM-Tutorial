@@ -58,7 +58,7 @@ import {
   MAX_CHECK_TEXT, MAX_LIST_ROWS, MAX_OPTIONS_RENDERED, MAX_PLAN_TEXT, MAX_REPLY_TEXT,
   MAX_TURNS_RENDERED, NOT_TEXT_MESSAGE,
   NO_HISTORY_MESSAGE, REPLY_TRUNCATION_MARKER, REPRODUCE_BUTTON_LABEL, SHAPE_EMPTY_MESSAGE,
-  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, NOT_REPLANNED_NOTE, RECORDED_NOTE, MAX_STALE_NAMED, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_DERIVED_MESSAGE, TUTOR_EMPTY_MESSAGE,
+  SHAPE_NOTE_MESSAGE, CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE, NOT_REPLANNED_NOTE, RECORDED_KEPT_NOTE, RECORDED_NOTE, MAX_STALE_NAMED, keptOnOldRoadNote, REPLANNED_NOTE, REPLAN_CANCEL_LABEL, SUGGESTED_BADGE, WRITTEN_BY_THE_MODEL_NOTE, staleStepsNote, THINKING_MESSAGE, TRUNCATION_MARKER, TUTOR_EMPTY_DERIVED_MESSAGE, TUTOR_EMPTY_MESSAGE,
   TUTOR_HEADING, TUTOR_TURN_LABEL, UNKNOWN_CHECK_STATUS_MESSAGE, UNKNOWN_WHY_SOURCE_MESSAGE,
   USER_TURN_LABEL, listOmittedMessage,
   CLEAR_BUTTON_LABEL, CLEAR_CONFIRM_LABEL, PREPARING_MESSAGE,
@@ -2491,7 +2491,43 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
       }, {
         transcript: [{ role: 'assistant', content: 'detour taken: A vending machine', kind: 'note' }],
       }),
+
+      // ── T-22, the re-review of the fixes. Each of these is drawn from the plan, not from a field of the state, which
+      // is how a drawn line goes missing from a key. R3: a step whose file a re-plan took over says so and offers no
+      // road, and the step that writes the file names the steps it took it over from. R11: a choice no re-plan
+      // followed offers its own road. NF3: a step kept on the old road for a walked step is named. ──
+      ['R3: a step whose file a re-plan took over', onPlan('st-2-file-parse', withWriterAt('src/elsewhere.ts')), onPlan('st-2-file-parse', withWriterAt('src/parse.ts'))],
+      ['R3: the steps the writer of a file took it over from', onPlan('st-9-file-again', (p) => movedAside(withWriterAt('src/parse.ts')(p))), onPlan('st-9-file-again', withWriterAt('src/parse.ts'))],
+      ['R11: a choice no re-plan followed, offered for a re-plan', onPlan('st-2-file-parse', chosenThere(true)), onPlan('st-2-file-parse', chosenThere(false))],
+      ['NF3: a step kept on the old road for a walked step', onPlan('st-2-file-parse', recordThere([])), onPlan('st-2-file-parse', recordThere(['st-4-symbol-render']))],
     ];
+  }
+
+  /** The fixture's plan changed by `change`, shown at `id`: one field of the state apart, the plan. */
+  function onPlan(id: string, change: (plan: PlanLike) => PlanLike): StepViewState {
+    const base = stateAt('st-2-file-parse');
+    const plan = change(base.plan);
+    return { ...base, plan, step: planStep(plan, id) };
+  }
+  /** A step a re-plan wrote at `file`, after the fixture's four. */
+  function withWriterAt(file: string): (plan: PlanLike) => PlanLike {
+    return (plan) => ({ ...plan, steps: [...plan.steps, { ...planStep(plan, 'st-2-file-parse'), id: 'st-9-file-again', ordinal: 9, target: { file }, derivedFrom: 'st-9-file-again' }] });
+  }
+  /** The author's step at parse.ts moved to another file, so the step a re-plan wrote there took nothing over. */
+  function movedAside(plan: PlanLike): PlanLike {
+    return { ...plan, steps: plan.steps.map((s) => (s.id === 'st-2-file-parse' ? { ...s, target: { file: 'src/parse-before.ts' } } : s)) };
+  }
+  /** A choice at parse.ts's step, with a re-plan on record or without one. */
+  function chosenThere(recorded: boolean): (plan: PlanLike) => PlanLike {
+    return (plan) => ({
+      ...plan,
+      steps: plan.steps.map((s) => (s.id === 'st-2-file-parse' ? { ...s, decision: { ...s.decision, chosen: 'inline-in-routes' } } : s)),
+      ...(recorded ? { divergences: [{ stepId: 'st-2-file-parse', answer: 'inline-in-routes', staleDependents: [], at: 't', tree: 'k/t' }] } : {}),
+    });
+  }
+  /** A re-plan on record at parse.ts's step, naming `kept` as kept on the old road. */
+  function recordThere(kept: string[]): (plan: PlanLike) => PlanLike {
+    return (plan) => ({ ...plan, divergences: [{ stepId: 'st-2-file-parse', answer: 'inline-in-routes', staleDependents: [], ...(kept.length > 0 ? { keptOnOldRoad: kept } : {}), at: 't', tree: 'k/t' }] });
   }
 
   /** A whole `AskSpend`, so a mutation can name the ONE number it is changing. */
@@ -3280,6 +3316,17 @@ suite('T-22 — what a re-planned step says, and the re-plan while it runs', () 
     assert.ok(page.includes(escapeForHtml(RECORDED_NOTE)), 'it says the choice is recorded and why nothing was re-planned');
     assert.ok(!page.includes(escapeForHtml(REPLANNED_NOTE)), 'not that the model re-planned anything');
     assert.ok(page.includes(escapeForHtml(staleStepsNote(['step 1 (src)'], 0))), 'and the walked step that stood on the old road is named');
+  });
+
+  // The stopped re-review's NF3: a record that kept a step on the old road for a walked step does not say every step that
+  // stood on the old road was walked, and it names the step it kept.
+  test('a record that kept a step on the old road for a walked step names it, and does not say everything was walked (NF3)', () => {
+    const base = replannedHere(['st-1-shape-src']);
+    const plan = { ...base.plan, divergences: [{ stepId: ON, answer: 'stream', staleDependents: [], keptOnOldRoad: ['st-1-shape-src'], at: 't', replanned: false }] };
+    const page = html({ ...base, plan });
+    assert.ok(page.includes(escapeForHtml(RECORDED_KEPT_NOTE)), 'it says why nothing was re-planned, truly');
+    assert.ok(!page.includes(escapeForHtml(RECORDED_NOTE)), 'not that every step that stood on the old road was walked');
+    assert.ok(page.includes(escapeForHtml(keptOnOldRoadNote(['step 1 (src)'], 0))), 'and it names the step it kept');
   });
 
   // The stopped re-review's NF6: on D's own page, the landing's line and the page's note said one fact twice.
