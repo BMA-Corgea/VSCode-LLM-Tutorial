@@ -577,6 +577,17 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.equal(content(stepNamed(out.plan, 's-handle')), content(stepNamed(first.plan, 's-handle')), 'and, walked, it is kept as it was');
   });
 
+  test('a press upstream that keeps D, because a walked step imports its file, leaves the file and its taken-over step as they were', async () => {
+    const plan = repoPlan();
+    plan.steps = plan.steps.map((s) => (s.id === 's-render' ? { ...s, dependsOn: ['s-routes'] } : s));
+    const { root, gs, target, first } = await symbolPress(plan, ['s-render']);
+    const out = await divergePlan(input(first.plan, root, 's-parse', 'alt-1', walkedAt(first.plan, 's-parse', ['s-render']), treeOf(first)), depsFor(model().run, gs, target));
+    if (!out.ok || !out.changed) assert.fail(out.ok ? 'nothing changed' : out.reason);
+    assert.equal(content(stepNamed(out.plan, 's-handle')), content(stepNamed(first.plan, 's-handle')), 'discriminates: D is kept, because render.ts, walked, imports the file it writes');
+    assert.equal(content(stepNamed(out.plan, 's-routes')), content(stepNamed(first.plan, 's-routes')), 'the file is not rewritten, so the step it took over, though not walked, stays with it');
+    assert.ok(out.keptOnOldRoad?.includes('s-handle'), `and D is named as kept on the old road: ${JSON.stringify(out.keptOnOldRoad)}`);
+  });
+
   test('D never stands on a step at its own file, even in a plan that had it standing on the file step it took over', async () => {
     const { root, gs, target, first } = await symbolPress();
     const old = { ...first.plan, steps: first.plan.steps.map((s) => (s.id === 's-handle' ? { ...s, dependsOn: ['s-routes'] } : s)) };
