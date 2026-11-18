@@ -606,7 +606,7 @@ export const REQUIRED_GRAMMARS = EXPECTED_GRAMMARS;
 export const REQUIRED_CONTENT: readonly ContentRequirement[] = [
   {
     id: 'build-worker',
-    why: `${BUILD_WORKER_RELATIVE} is the thread the build reads a repository on (T-30); without it every build stops at once and says the build worker is missing`,
+    why: `${BUILD_WORKER_RELATIVE} is the thread the build reads a repository on; without it every build stops at once and says the build worker is missing`,
     matches: (rel) => rel === BUILD_WORKER_RELATIVE,
     atLeast: 1,
   },
