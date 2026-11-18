@@ -12,12 +12,13 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { resolveCoreRoot, loadCore, type CoreLoadResult } from '../src/core.js';
 import { runDoctor } from '../src/doctor.js';
-import { resumeOnActivate, type ExtensionApi, type ResumeDeps } from '../src/extension.js';
+import { resumeOnActivate, runBuild, type ExtensionApi, type ResumeDeps } from '../src/extension.js';
 import { buildDir, markerPath, readMarker, type BuildMarker } from '../src/start/build.js';
 import { emptyRequest } from '../src/start/request.js';
 
 const EXTENSION_ID = 'bma-corgea.build-tutorials';
 const CURRENT_BUILD_KEY = 'buildTutorials.currentBuild';
+const PRESSED_REQUEST_KEY = 'buildTutorials.pressedRequest';
 
 function getExtension(): vscode.Extension<unknown> {
   const ext = vscode.extensions.getExtension(EXTENSION_ID);
@@ -170,7 +171,10 @@ suite('resumeOnActivate (T-3 rework, review finding 1)', () => {
   let context: vscode.ExtensionContext;
 
   suiteSetup(async () => { context = await getContext(); });
-  teardown(async () => { await context.workspaceState.update(CURRENT_BUILD_KEY, undefined); });
+  teardown(async () => {
+    await context.workspaceState.update(CURRENT_BUILD_KEY, undefined);
+    await context.workspaceState.update(PRESSED_REQUEST_KEY, undefined);
+  });
 
   test('a remembered target with NO marker: clears the key, loads no core, opens no progress UI', async () => {
     const target = tmpDir('resume-no-marker-');
@@ -245,6 +249,114 @@ suite('resumeOnActivate (T-3 rework, review finding 1)', () => {
     assert.deepEqual(deps.told, [`Build Tutorials: a build in ${target} is running elsewhere (in another window, or on another machine), so it is not offered here`], 'the reload declined in silence');
     assert.equal(readMarker(target)?.id, 'elsewhere', 'its marker was touched');
     assert.equal(context.workspaceState.get<string>(CURRENT_BUILD_KEY), target, 'and the bookmark stays, as the marker does');
+  });
+
+  test('T-122: a reload whose folder holds an older build than the one pressed offers nothing, and says the build in the folder is not the one pressed', async () => {
+    const target = tmpDir('resume-pressed-other-');
+    const old = writeMarkerAt(target, 60 * 1000); // the previous build's marker: the press never wrote its own
+    const pressedNow = { ...old.request, repo: tmpDir('resume-pressed-repo-'), dial: 'automated' as const };
+    await context.workspaceState.update(CURRENT_BUILD_KEY, target);
+    await context.workspaceState.update(PRESSED_REQUEST_KEY, pressedNow);
+    const deps = countingDeps('Resume');
+
+    await resumeOnActivate(context, deps);
+
+    assert.equal(deps.confirmed.length, 0, 'the reload offered the build the learner had changed away from');
+    assert.deepEqual(deps.told, [`Build Tutorials: the build in ${target} is not the one you last pressed in this window, so nothing was resumed: press Build the plan to start yours again`]);
+    assert.equal(deps.loadCoreCalls, 0, 'the core was loaded to resume nothing');
+    assert.equal(readMarker(target)?.startedAt, old.startedAt, 'the older marker was touched');
+    assert.equal(context.workspaceState.get(CURRENT_BUILD_KEY), undefined, 'the bookmark stays, so every reload says it again');
+    assert.equal(context.workspaceState.get(PRESSED_REQUEST_KEY), undefined);
+  });
+
+  test('T-122: a marker for the very request pressed is offered as before (the press wrote it, then stopped)', async () => {
+    const target = tmpDir('resume-pressed-same-');
+    const marker = writeMarkerAt(target, 60 * 1000);
+    await context.workspaceState.update(CURRENT_BUILD_KEY, target);
+    await context.workspaceState.update(PRESSED_REQUEST_KEY, marker.request);
+    const deps = countingDeps(undefined);
+
+    await resumeOnActivate(context, deps);
+
+    assert.equal(deps.confirmed.length, 1, 'the build the learner pressed was not offered');
+    assert.deepEqual(deps.told, []);
+  });
+
+  test('T-122: a press records the request it pressed beside the bookmark before its build begins', async () => {
+    const target = tmpDir('resume-press-records-');
+    const request = { ...emptyRequest(), recreate: true, repo: tmpDir('resume-press-repo-'), target, dial: 'scaffolded' as const };
+    let seen: unknown;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const pressed = runBuild(context, fakeCore(), request, async () => {
+      seen = context.workspaceState.get(PRESSED_REQUEST_KEY);
+      await held;
+      return { ok: false, cancelled: true, reason: 'build cancelled before reading the repository' };
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    release();
+    await pressed;
+    assert.deepEqual(seen, request, 'the press did not record what it pressed before its build began');
+    assert.equal(context.workspaceState.get(PRESSED_REQUEST_KEY), undefined, 'a build that ended with nothing to resume left its record behind');
+  });
+
+  test('T-122: a press whose build stopped after its own first write keeps its record with the bookmark, and a reload offers that build', async () => {
+    const target = tmpDir('resume-press-own-');
+    const request = { ...emptyRequest(), recreate: true, repo: tmpDir('resume-press-own-repo-'), target, dial: 'scaffolded' as const };
+    await runBuild(context, fakeCore(), request, () => {
+      // The press's own first write, then it stops.
+      fs.writeFileSync(markerPath(target), JSON.stringify({ ...writeMarkerAt(target, 1000), request }, null, 2));
+      return Promise.resolve({ ok: false, reason: 'the build stopped after its first write' });
+    });
+    assert.equal(context.workspaceState.get<string>(CURRENT_BUILD_KEY), target, 'the bookmark went though the press\'s own marker is there');
+    assert.deepEqual(context.workspaceState.get(PRESSED_REQUEST_KEY), request, 'the record went, so a reload would take the window for one with none');
+    const deps = countingDeps(undefined);
+
+    await resumeOnActivate(context, deps);
+
+    assert.equal(deps.confirmed.length, 1, 'the build the learner pressed was not offered');
+    assert.deepEqual(deps.told, []);
+  });
+
+  test('T-122: a press that ended before its own first write keeps neither the bookmark nor the record, and the older marker stays', async () => {
+    const target = tmpDir('resume-press-ended-');
+    const old = writeMarkerAt(target, 60 * 1000); // an older build's, not running
+    const request = { ...old.request, repo: tmpDir('resume-press-ended-repo-'), dial: 'automated' as const };
+    await runBuild(context, fakeCore(), request, () => Promise.resolve({ ok: false, reason: 'could not clone the reference repo' }));
+    assert.equal(readMarker(target)?.startedAt, old.startedAt, 'the older build\'s marker was touched');
+    assert.equal(context.workspaceState.get(CURRENT_BUILD_KEY), undefined, 'the bookmark outlived a press that never wrote its own marker');
+    assert.equal(context.workspaceState.get(PRESSED_REQUEST_KEY), undefined, 'the record outlived the press, so a later reload would say something false');
+    const deps = countingDeps('Resume');
+
+    await resumeOnActivate(context, deps);
+
+    assert.equal(deps.confirmed.length, 0, 'the older build was offered after the press that replaced it had ended');
+    assert.deepEqual(deps.told, [], 'a reload after the press had ended, and been told, said more');
+  });
+
+  test('T-122: a reload during a real press\'s held fetch compares the record that press wrote, and offers the older build to nobody', async () => {
+    const target = tmpDir('resume-press-joined-');
+    const old = writeMarkerAt(target, 60 * 1000);
+    const request = { ...old.request, repo: tmpDir('resume-press-joined-repo-'), dial: 'automated' as const };
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let fetching: () => void = () => undefined;
+    const inFetch = new Promise<void>((resolve) => { fetching = resolve; });
+    const pressed = runBuild(context, fakeCore(), request, async () => {
+      fetching();
+      await held; // the fetch: nothing written in the folder yet
+      return { ok: false, cancelled: true, reason: 'build cancelled before reading the repository' };
+    });
+    await inFetch;
+    const deps = countingDeps('Resume');
+
+    await resumeOnActivate(context, deps);
+    release();
+    await pressed;
+
+    assert.equal(deps.confirmed.length, 0, 'a reload in the press\'s fetch offered the older build as the one pressed');
+    assert.deepEqual(deps.told, [`Build Tutorials: the build in ${target} is not the one you last pressed in this window, so nothing was resumed: press Build the plan to start yours again`]);
+    assert.equal(readMarker(target)?.startedAt, old.startedAt, 'the older marker was touched');
   });
 
   test('Discard removes the marker AND clears the key', async () => {

@@ -40,6 +40,7 @@ export const SUBMIT_NOTES = {
   building: 'Building the plan — its progress and a Cancel button are in the notification in the corner.',
   busy: 'Already building — one build at a time. Its progress and Cancel are in the corner.',
   built: 'Done — the plan is built.',
+  partial: 'Done, but some of its questions to the model failed — how many, and why, is under Reference repo.',
   failed: 'The build failed — the reason is under Reference repo.',
   cancelled: 'Build cancelled.',
 } as const;
@@ -294,7 +295,7 @@ const CLIENT_SCRIPT = `
       // like one that was never pressed.
       setBuilding(false);
       var ended = msg.payload && msg.payload.ended;
-      var said = (ended === 'built' || ended === 'failed' || ended === 'cancelled') ? NOTES[ended] : '';
+      var said = (ended === 'built' || ended === 'partial' || ended === 'failed' || ended === 'cancelled') ? NOTES[ended] : '';
       // T-71: a failure that repeats itself still changes the words.
       var inARow = msg.payload && typeof msg.payload.inARow === 'number' ? msg.payload.inARow : 0;
       if (ended === 'failed' && inARow > 1) { said = FAILED_AGAIN.replace('{n}', String(inARow)); }
