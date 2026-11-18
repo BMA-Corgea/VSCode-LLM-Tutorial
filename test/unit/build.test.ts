@@ -1535,6 +1535,15 @@ suite('T-13 — no git subprocess is unbounded', () => {
     const SPAWNERS = /\b(?:execFile|execFileSync|execSync|spawnSync|spawn|fork)\s*\(|\bchild_process\b/;
 
     /**
+     * Files that NAME a spawner only as data, and start nothing (T-61's code review, MF2). `engine.ts` names
+     * `child_process` in the modules a model-written file may not import. These are exempt from the raw scan below
+     * and held to more by the test after it: each still names it, imports no `child_process`, and calls no spawner.
+     */
+    const NAMES_ONLY: Array<[string, string]> = [
+      ['src/derive/engine.ts', 'names `child_process` among the modules a model-written file may not import (T-61 b); it imports none and starts nothing'],
+    ];
+
+    /**
      * Every extension esbuild will resolve and bundle, not just `.ts` (T-13 review finding 4).
      * Driven, `src/telemetry.js` holding `require('node:child_process')` and imported by the
      * real `src/doctor.ts` was bundled into `dist/doctor.js` and the scan stayed GREEN — a
@@ -1590,7 +1599,8 @@ suite('T-13 — no git subprocess is unbounded', () => {
 
       const offenders = spawnersUnder(root)
         .filter((rel) => rel.startsWith('src/'))
-        .filter((rel) => !ALLOWED.some(([allowed]) => allowed === rel));
+        .filter((rel) => !ALLOWED.some(([allowed]) => allowed === rel))
+        .filter((rel) => !NAMES_ONLY.some(([named]) => named === rel));
 
       assert.deepEqual(
         offenders, [],
@@ -1668,6 +1678,19 @@ suite('T-13 — no git subprocess is unbounded', () => {
      * test at the top of this suite, over the space of inputs rather than over this file's
      * text. This one only says the allow-list is not describing a file that has moved on.
      */
+    test('and a file that only names a spawner imports none and calls none (T-61)', () => {
+      for (const [rel, why] of NAMES_ONLY) {
+        const abs = path.join(process.cwd(), rel);
+        assert.ok(fs.existsSync(abs), `${rel} is on the names-only list and is not there any more (${why})`);
+        const code = fs.readFileSync(abs, 'utf8');
+        assert.match(code, /\bchild_process\b/, `${rel} no longer names child_process: drop it from the names-only list`);
+        assert.doesNotMatch(code, /\bfrom\s*['"](?:node:)?child_process['"]|\b(?:require|import)\s*\(\s*['"](?:node:)?child_process['"]/,
+          `${rel} imports child_process: it is a spawner now, and belongs on ALLOWED with its bound, or nowhere`);
+        assert.doesNotMatch(code, /\b(?:execFile|execFileSync|execSync|spawnSync|spawn|fork)\s*\(/,
+          `${rel} calls a spawner: it is a spawner now, and belongs on ALLOWED with its bound, or nowhere`);
+      }
+    });
+
     test('and the allow-list is not stale — the file on it still spawns, and still passes the option (smoke)', () => {
       for (const [rel, why] of ALLOWED) {
         const abs = path.join(process.cwd(), rel);
