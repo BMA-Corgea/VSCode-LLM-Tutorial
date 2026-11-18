@@ -316,6 +316,8 @@ export interface ResumeDeps {
   ) => Promise<T>;
   /** The Resume/Discard prompt. `undefined` = dismissed, which leaves the marker for next time. */
   confirm: (message: string) => Promise<'Resume' | 'Discard' | undefined>;
+  /** Says, as information, why the reload resumed or discarded nothing (T-120). */
+  tell: (message: string) => void;
 }
 
 const REAL_RESUME_DEPS: ResumeDeps = {
@@ -324,7 +326,9 @@ const REAL_RESUME_DEPS: ResumeDeps = {
     { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
     (progress, token) => task(progress, token),
   )),
-  confirm: (message) => Promise.resolve(vscode.window.showInformationMessage(message, 'Resume', 'Discard')),
+  // Both through `neutraliseLinks`, as every notification is (T-72 security review, finding 1; T-120 review F2).
+  confirm: (message) => Promise.resolve(vscode.window.showInformationMessage(neutraliseLinks(message), 'Resume', 'Discard')),
+  tell: (message) => { void vscode.window.showInformationMessage(neutraliseLinks(message)); },
 };
 
 /**
@@ -368,10 +372,13 @@ export async function resumeOnActivate(
     const resumeCtx: ResumeContext = {
       ...buildContextFor(context, core, progress, token),
       confirm: deps.confirm,
+      markerSeen: true, // this function read a fresh marker just above, before it opened the progress
     };
     return resumeIfMarked(target, resumeCtx);
   });
-  reportOutcome(outcome, false);
+  // T-120: a reload that looked and did nothing says why; every other ending is reported as before.
+  if (outcome?.declined) deps.tell(`Build Tutorials: ${outcome.reason ?? 'nothing was resumed'}`);
+  else reportOutcome(outcome, false);
   // Settled before anything that can wait: the note's ask of git, and the walk's offer, which waits on a person.
   await forgetUnlessResumable(context, target);
   if (outcome?.ok) await tellIfNoIdentity(target);
