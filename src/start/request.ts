@@ -81,6 +81,18 @@ export function emptyRequest(): BuildRequest {
   return { idea: '', recreate: false, repo: '', target: '', dial: DEFAULT_DIAL };
 }
 
+/**
+ * Whether `other` is the request `pressed` names: the same idea, recreate, reference repo, folder and dial (T-122).
+ * `referenceRoot` is the build's own (where it resolved the reference), never the press's, so it is not compared.
+ * A reload uses it to tell the marker of the build pressed from one an older build left in the same folder.
+ */
+export function sameRequest(pressed: BuildRequest, other: unknown): boolean {
+  if (typeof other !== 'object' || other === null) return false;
+  const o = other as Partial<Record<keyof BuildRequest, unknown>>;
+  return o.idea === pressed.idea && o.recreate === pressed.recreate && o.repo === pressed.repo
+    && o.target === pressed.target && o.dial === pressed.dial;
+}
+
 export type RequestField = 'idea' | 'repo' | 'target';
 
 export interface ValidationResult {
