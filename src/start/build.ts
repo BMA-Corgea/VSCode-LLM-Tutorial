@@ -1137,6 +1137,85 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
 /** What a failure that leaves its marker says after its reason (T-71): the next press builds again. */
 export const TRY_AGAIN = 'nothing is lost: press Build the plan to try again.';
 
+// ── what the build's questions to the model came to (T-171) ────────────────────────────────
+
+/**
+ * repo-tour's own sentence for a reply that came back but was not the JSON asked for (`interpret.ts`). Such a
+ * reply is counted in `calls` AND in `failures`, so it is subtracted once to count it as one question. If repo-tour
+ * ever words it differently, such a question is counted twice in `asked`: the sentence over-counts, never hides.
+ */
+const UNPARSED_REPLY = 'the reply was not the JSON that was asked for';
+
+function numberIn(cost: InterpretCostLike, key: string): number {
+  const value = cost[key];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * How many questions the build put to the model and how many failed, read off repo-tour's own `cost`: one question
+ * per file, a runner error recorded only in `failures`, a reply recorded in `calls` (and in `failures` too when it
+ * was not the JSON asked for). A cost that is not shaped that way reads as nothing failed.
+ */
+export function questionTally(cost: InterpretCostLike): { asked: number; failed: number; first?: string } {
+  const raw = cost['failures'];
+  const failures = Array.isArray(raw) ? raw.filter((f): f is string => typeof f === 'string' && f.length > 0) : [];
+  const unparsed = failures.filter((f) => f.endsWith(UNPARSED_REPLY)).length;
+  const asked = Math.max(failures.length, numberIn(cost, 'calls') + failures.length - unparsed);
+  return { asked, failed: failures.length, ...(failures[0] !== undefined ? { first: failures[0] } : {}) };
+}
+
+/** True when questions were asked, every one failed, and no answer came from the cache either: no step has a why. */
+export function everyQuestionFailed(cost: InterpretCostLike): boolean {
+  const { asked, failed } = questionTally(cost);
+  return failed > 0 && failed >= asked && numberIn(cost, 'interpretedStops') + numberIn(cost, 'cachedStops') === 0;
+}
+
+/**
+ * The first failure, as a clause: repo-tour writes `<file>: <the provider's own words>`. The file is named by its base
+ * name, so a long path cannot crowd out the words, which are cut at 160 characters and end with one full stop however
+ * they ended (T-171 review S4).
+ */
+function reasonClause(first: string | undefined, failed: number): string {
+  if (first === undefined) return '';
+  const at = first.indexOf(': ');
+  const file = at > 0 ? first.slice(0, at) : '';
+  const words = (at > 0 ? first.slice(at + 2) : first).replace(/\s+/g, ' ').trim().replace(/[\s.:;,…]+$/, '');
+  const said = words.length <= 160 ? words : `${words.slice(0, 159)}…`;
+  const named = file === '' ? '' : ` (${path.basename(file)})`;
+  return ` ${failed === 1 ? 'Why' : 'The first reason'}${named}: ${said}.`;
+}
+
+/**
+ * What the learner can do about it, said only as far as it is true (T-171 review M1). The Doctor checks whether the
+ * `claude` CLI is FOUND, not whether it is logged in, so the sentence names both and says which one the Doctor shows.
+ */
+function providerAdvice(cost: InterpretCostLike): string {
+  const raw = cost['provider'];
+  const provider = typeof raw === 'string' ? raw : '';
+  if (provider === '' || provider === 'claude') {
+    return 'Check that the claude CLI is installed and logged in (Build Tutorials: Doctor shows whether it is found)';
+  }
+  return `Check that ${provider} is installed and can be reached`;
+}
+
+/**
+ * What the build's ending says about its failed questions (T-171), or `undefined` when none failed. Before this, a
+ * build whose `claude` was missing or logged out ended "N chapters · M steps — $0.00, 0 tokens" and nothing else:
+ * nothing in this extension read `cost.failures`. The likeliest first-run failure for a stranger is exactly that one,
+ * so the sentence names the first reason in the provider's own words and the one command that explains it.
+ */
+export function failedQuestionsSentence(cost: InterpretCostLike): string | undefined {
+  const { asked, failed, first } = questionTally(cost);
+  if (failed === 0) return undefined;
+  const why = reasonClause(first, failed);
+  const advice = providerAdvice(cost);
+  if (everyQuestionFailed(cost)) {
+    // Worded as the failure the form's note calls it (review S1): the plan exists, the build's purpose did not happen.
+    return `The build got no answer from the model: every one of its ${asked} question${asked === 1 ? '' : 's'} failed, so the plan it wrote has no why from the model.${why} ${advice}, then build again into an empty folder. You can still walk the plan it wrote: its steps and their order are there.`;
+  }
+  return `${failed} of ${asked} question${asked === 1 ? '' : 's'} to the model failed, so the steps of ${failed === 1 ? 'one file have' : `${failed} files have`} no why from the model.${why} ${advice}, then build again into an empty folder to get them.`;
+}
+
 /** The human-readable line spec §5.2's "cost is shown on completion" asks for. */
 export function costLine(cost: InterpretCostLike): string {
   return cost.metered
