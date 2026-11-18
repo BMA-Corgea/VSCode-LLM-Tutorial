@@ -21,7 +21,7 @@
  *
  * Each test reads the panel before the press and again after it (T-15's rule: compare consecutive
  * frames). What must have changed is stated by the reading before and the condition waited for after.
- * That is the FIRST press of each control. A second identical check changes nothing on screen: T-73.
+ * That is the FIRST press of each control. The SECOND identical check is T-73's test, below.
  */
 
 import * as assert from 'node:assert/strict';
@@ -264,6 +264,27 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
     assert.ok(after.outcome?.fullyInView, `the check's verdict slid out of the panel when the refused commit was drawn above it: ${JSON.stringify(after)}`);
     }, { refuseTheCommit: true });
   });
+
+  // T-73 (MVP item 9): the SECOND press, with nothing changed. The check finds the same answer; before T-73 the host
+  // pushed the same page, the panel skipped the repaint, and the panel was exactly as it was: a control that looks
+  // dead. T-15's rule: a press says something new where the eye is. So the verdict's own WORDS change on each press
+  // (an attribute nobody sees would not do), and the verdict is fully in view after each, from the button, as a
+  // person presses it.
+  test('T-73: a second and a third Check my work with nothing changed each say so inside the verdict, and the verdict stays fully in view', () => drive(async ({ atButton, click, whenShown }) => {
+    const verdict = (r: Reading): boolean => r.outcome?.words.toLowerCase().startsWith(CHECK_HEADING.toLowerCase()) === true;
+    assertTallPage(await atButton('btn-check', 'outcome-check'));
+    await click('btn-check');
+    await whenShown('outcome-check', verdict, 'the verdict');
+
+    for (const press of [2, 3]) {
+      const was = await atButton('btn-check', 'outcome-check');
+      await click('btn-check');
+      const now = await whenShown('outcome-check', (r) => verdict(r) && r.outcome?.words !== was.outcome?.words, `press ${press}'s answer, changed`);
+      assert.ok(now.outcome?.words.includes(`(${press} in a row on this step)`), `press ${press} did not say how many times the same answer has come back: ${JSON.stringify(now)}`);
+      assertTheOutcomeCanFit(now);
+      assert.ok(now.outcome?.fullyInView, `press ${press}'s verdict is not fully in the panel: ${JSON.stringify(now)}`);
+    }
+  }));
 
   // The answer is held back on purpose. A real ask paints at least twice — waiting, then the answer —
   // and the reveal is one-shot, so the first paint spends it; a stand-in that answered at once

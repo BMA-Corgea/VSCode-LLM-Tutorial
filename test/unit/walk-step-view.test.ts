@@ -2334,6 +2334,34 @@ suite('stepRenderKey is BOUNDED, and still tells apart anything the page can sho
   });
 });
 
+suite('T-73: a repeated answer to Check my work is drawn inside the verdict, where the press\'s reveal brings the eye', () => {
+  test('the line is in #outcome-check, under its summary, escaped', () => {
+    const check = { summary: 'every part is there: 1 export present', report: report({ symbols: [{ name: 'tokenize', kind: 'function', status: 'present' }] }) };
+    const again = 'Checked again: the same answer as before (2 in a row on this step).';
+    const html = renderStepHtml(stateAt('st-2-file-parse', { check, checkAgain: again }), FAKE_SKINS);
+    const at = html.indexOf('id="outcome-check"');
+    assert.ok(at >= 0, 'no verdict was drawn');
+    const verdict = html.slice(at, html.indexOf('</section>', at));
+    const summaryAt = verdict.indexOf('check-summary');
+    const againAt = verdict.indexOf(again);
+    assert.ok(againAt >= 0, `the repeat is not drawn inside the verdict: ${verdict}`);
+    assert.ok(summaryAt >= 0 && summaryAt < againAt, 'the repeat is drawn above the summary it repeats');
+    const hostile = renderStepHtml(stateAt('st-2-file-parse', { check, checkAgain: '<img src=x onerror=alert(1)>' }), FAKE_SKINS);
+    assert.ok(!hostile.includes('<img src=x'), 'the line reached the markup unescaped');
+  });
+
+  test('the review\'s F6: a repeat with no verdict moves neither the page nor the key', () => {
+    const none = stateAt('st-2-file-parse');
+    const stray = stateAt('st-2-file-parse', { checkAgain: 'Checked again: the same answer as before (2 in a row on this step).' });
+    assert.equal(stepRenderKey(stray, FAKE_SKINS), stepRenderKey(none, FAKE_SKINS), 'a line the page does not draw moved the key');
+  });
+
+  test('no line without a verdict, and none when the answer was not a repeat', () => {
+    const plain = renderStepHtml(stateAt('st-2-file-parse', { checkAgain: 'Checked again: the same answer as before (2 in a row on this step).' }), FAKE_SKINS);
+    assert.ok(!plain.includes('Checked again'), 'a repeat was drawn with no verdict to repeat');
+  });
+});
+
 suite('stepRenderKey — every field the page draws moves the repaint key', () => {
   /** `[what changed, the page before, the page after]` — one field apart, never two. */
   function mutations(): Array<[string, StepViewState, StepViewState]> {
@@ -2363,6 +2391,8 @@ suite('stepRenderKey — every field the page draws moves the repaint key', () =
       pair('state.writeNote changing', { writeNote: 'your version was kept' }, { writeNote: 'the reference file was written' }),
       pair('state.choiceNote appearing (T-21: a refusal must repaint, or the press is silent)', {}, { choiceNote: 'That press was refused.' }),
       pair('state.choiceNote changing (T-21, T-15: the second identical refusal must repaint too)', { choiceNote: 'That press was refused.' }, { choiceNote: 'That press was refused. Tried 2 times.' }),
+      pair('state.checkAgain appearing (T-73: a second identical check must repaint, or the press looks ignored)', { check }, { check, checkAgain: 'Checked again: the same answer as before (2 in a row on this step).' }),
+      pair('state.checkAgain changing (T-73: and so must every press after it)', { check, checkAgain: 'Checked again: the same answer as before (2 in a row on this step).' }, { check, checkAgain: 'Checked again: the same answer as before (3 in a row on this step).' }),
       pair('state.reproduce appearing', {}, { reproduce: { count: 12, done: false } }),
       pair('state.reproduce count', { reproduce: { count: 12, done: false } }, { reproduce: { count: 3, done: false } }),
       pair('state.reproduce done', { reproduce: { count: 12, done: false } }, { reproduce: { count: 12, done: true } }),

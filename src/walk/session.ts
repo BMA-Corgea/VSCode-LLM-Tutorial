@@ -387,6 +387,15 @@ export function choiceRefusalText(reason: string, inARow: number): string {
   return inARow > 1 ? `${reason} Tried ${inARow} times.` : reason;
 }
 
+/**
+ * T-73: what a press of *Check my work* says when it found the same answer as the step's last one. Without it the
+ * session pushed the same page, the panel skipped the repaint, and a second press with nothing changed left the panel
+ * exactly as it was: a press that looks ignored (T-15). The count is what makes each further press change the words.
+ */
+export function checkAgainText(inARow: number): string {
+  return `Checked again: the same answer as before (${inARow} in a row on this step).`;
+}
+
 /** T-22: a re-plan under way. It is the whole walk's state, so it is shown on whichever step is on screen. */
 export interface ReplanView {
   /** the step the press was made on */
@@ -438,6 +447,12 @@ export interface WalkView {
    * Cleared by moving; held in memory only, because it describes a press and not the walk.
    */
   choiceNote?: string;
+  /**
+   * T-73: present when this step's verdict is the same answer its last check gave, `checkAgainText` of how many in a
+   * row. Drawn inside the verdict, which the press's reveal brings into view; a note given again carries the same
+   * sentence after its own words instead. Held in memory only, like `check`.
+   */
+  checkAgain?: string;
   /** T-22: present while a press of *Choose this instead* is being re-planned. */
   replanning?: ReplanView;
   /** T-22 (code review SF5): this step's code was re-derived and cannot be found; nothing is read in its place. */
@@ -814,6 +829,11 @@ export class WalkSession {
   private note: { stepId: string; text: string } | undefined;
   /** T-21: the last refused press of *Choose this instead* and how many times in a row it has happened (`WalkView.choiceNote`). */
   private choiceRefusal: { stepId: string; reason: string; inARow: number } | undefined;
+  /**
+   * T-73: the last answer *Check my work* gave on each step (a verdict or a note), and how many times in a row it has
+   * given it. Per step, so a press after walking away and back still finds its step's last answer and says so.
+   */
+  private readonly checkRepeats = new Map<string, { answer: string; inARow: number; verdict: boolean; shown?: string }>();
   /**
    * T-6: the ask in flight, and the step it belongs to. `undefined` means nothing is waiting
    * on a model, which is exactly what `TutorView.thinking` reports — so there is ONE answer to
@@ -1211,6 +1231,7 @@ export class WalkSession {
   private forgetOldCode(stepId: string, rewritten: readonly string[] = []): void {
     const stale = (id: string): boolean => id === stepId || rewritten.includes(id) || !this.hasStep(id);
     for (const id of [...this.checks.keys()]) if (stale(id)) this.checks.delete(id);
+    for (const id of [...this.checkRepeats.keys()]) if (stale(id)) this.checkRepeats.delete(id); // T-73 (the review's F2)
     for (const id of [...this.prompted.keys()]) if (stale(id)) this.prompted.delete(id);
   }
 
@@ -2092,6 +2113,7 @@ export class WalkSession {
     this.shape = undefined;
     this.note = undefined;
     this.checks.clear();
+    this.checkRepeats.clear();
     this.prompted.clear();
     // T-6: the ask in flight is DETACHED rather than merely forgotten, and the difference is
     // the point. Forgetting it would leave a live request whose answer resolves into a
@@ -2449,13 +2471,13 @@ export class WalkSession {
     // R3: the file is checked where it is written now. No verdict here: the step's own record stands as it was.
     const writer = takenOverBy(this.plan, step);
     if (writer !== undefined) {
-      this.noteFor(stepId, checkTakenOverText(writer));
+      this.checkNote(stepId, checkTakenOverText(writer));
       return;
     }
 
     const refRoot = this.referenceRootOf(step);
     if (refRoot === undefined) {
-      this.noteFor(stepId, this.codeMissing(step)
+      this.checkNote(stepId, this.codeMissing(step)
         ? DERIVED_CODE_MISSING_MESSAGE
         : this.referenceWithheld !== undefined
           ? `Nothing was checked. ${this.referenceWithheld}`
@@ -2468,7 +2490,7 @@ export class WalkSession {
     // own (the repository, or the derived tree for a step a re-plan wrote).
     const refused = checkRefusal(refRoot, this.target, step);
     if (refused !== null) {
-      this.noteFor(stepId, refused);
+      this.checkNote(stepId, refused);
       return;
     }
 
@@ -2494,10 +2516,16 @@ export class WalkSession {
     // comfortably long time for a folder to be closed or a walk to be re-opened in.
     if (this.disposed) return;
     if (outcome === null) {
-      this.noteFor(stepId, `There is nothing to check here yet — ${step.target.file} has not been created, so there is no shape to compare.`);
+      this.checkNote(stepId, `There is nothing to check here yet — ${step.target.file} has not been created, so there is no shape to compare.`);
       return;
     }
 
+    // T-73: a verdict supersedes the note an earlier press of Check my work left on this step. That note is stale by
+    // definition ("has not been created" under a verdict about the file), and clearing it is what changes the page when
+    // the verdict is the one already drawn (the review's F1). Then the count, before the verdict is stored.
+    const lastCheck = this.checkRepeats.get(stepId);
+    if (lastCheck?.shown !== undefined && this.note?.stepId === stepId && this.note.text === lastCheck.shown) this.note = undefined;
+    this.countCheck(stepId, `verdict:${JSON.stringify([outcome.summary, outcome.report])}`, true);
     this.checks.set(stepId, outcome);
     const wasDone = this.progress.steps[stepId]?.status === 'done';
     this.progress = setCheck(this.progress, stepId, outcome.report.ok, new Date().toISOString());
@@ -2769,6 +2797,31 @@ export class WalkSession {
   }
 
   /**
+   * T-73: counts an answer to a press of *Check my work* on `stepId`. It is a repeat when it is the step's last answer
+   * and what it repeats is still on screen: a verdict stays drawn while the walk moves (`checks`, until a re-plan
+   * forgets it), a note does not (`clearStepNotes`), so a note counts on only while it is the one shown (the
+   * review's F3). Called before the verdict is stored, so `checks` says whether one was drawn.
+   */
+  private countCheck(stepId: string, answer: string, verdict: boolean): number {
+    const last = this.checkRepeats.get(stepId);
+    const shown = verdict
+      ? this.checks.has(stepId)
+      : last?.shown !== undefined && this.note?.stepId === stepId && this.note.text === last.shown;
+    const inARow = last !== undefined && last.answer === answer && shown ? last.inARow + 1 : 1;
+    this.checkRepeats.set(stepId, { answer, inARow, verdict });
+    return inARow;
+  }
+
+  /** T-73: a note answering a press of *Check my work*, which says so when it is the same note as the last answer. */
+  private checkNote(stepId: string, text: string): void {
+    const inARow = this.countCheck(stepId, `note:${text}`, false);
+    const shown = inARow > 1 ? `${text} ${checkAgainText(inARow)}` : text;
+    const counted = this.checkRepeats.get(stepId);
+    if (counted !== undefined) counted.shown = shown;
+    this.noteFor(stepId, shown);
+  }
+
+  /**
    * The same sentence, recorded WITHOUT a push, and joined when there is more than one — the
    * form an entry pass needs, since `concludePass` owns that pass's single push.
    *
@@ -2928,6 +2981,7 @@ export class WalkSession {
     // "3 files" and delivered 2.
     const reproducible = deliverableEntries(this.plan).length;
     const check = this.checks.get(step.id);
+    const repeat = this.checkRepeats.get(step.id);
     return {
       plan: shown,
       progress: this.progress,
@@ -2936,6 +2990,7 @@ export class WalkSession {
       dial: stepDial(this.progress, step.id, this.request?.dial),
       ...(this.shape?.stepId === step.id ? { shape: this.shape.shape } : {}),
       ...(check ? { check } : {}),
+      ...(check && repeat?.verdict === true && repeat.inARow > 1 ? { checkAgain: checkAgainText(repeat.inARow) } : {}),
       ...(this.note?.stepId === step.id ? { writeNote: this.note.text } : {}),
       ...(this.choiceRefusal?.stepId === step.id
         ? { choiceNote: choiceRefusalText(this.choiceRefusal.reason, this.choiceRefusal.inARow) }
