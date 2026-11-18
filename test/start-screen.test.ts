@@ -983,4 +983,45 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     assert.equal(twice.note, FAILED_AGAIN.replace('{n}', '2'));
     assert.equal(builds, 2);
   });
+
+  // T-171: repo-tour records each failed question in cost.failures and goes on; the ending used to say "Done" whatever.
+  const withFailures = (over: Record<string, unknown>): BuildOutcome => ({
+    ok: true, plan: { chapters: [], steps: [] },
+    cost: { metered: false, usd: 0, inputTokens: 0, outputTokens: 0, calls: 0, cachedStops: 0, interpretedStops: 0, failures: [], ...over },
+  });
+
+  test('T-171: a build where every question to the model failed is not "Done": the form says it failed, and why, under Reference repo', async () => {
+    const allFailed = withFailures({ failures: ['index.js: claude was not found on PATH', 'lookup.js: claude was not found on PATH'] });
+    const held = heldBuild();
+    const { page, read } = await open((r) => { void runBuild(context, core, r, held.build); });
+    await fill(page, validRequest());
+    await until(read, filled, 'valid form');
+    await press(page);
+    await until(read, (s) => s.button === 'Building… [disabled]' && s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
+    held.end(allFailed);
+    const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== SUBMIT_NOTES.building, 'the build gives the button back');
+    assert.equal(ended.note, SUBMIT_NOTES.failed, 'a plan with no answer from the model in it was reported as Done');
+    assert.match(ended.problems[1] ?? '', /every one of its 2 questions failed/);
+    assert.match(ended.problems[1] ?? '', /\(index\.js\): claude was not found on PATH/);
+    assert.match(ended.problems[1] ?? '', /Build Tutorials: Doctor/);
+    // Review S3: the notification says it too, as a warning, not the information a clean build gets.
+    const said = (await centre()).join('\n');
+    assert.match(said, /every one of its 2 questions failed/, `the notification did not say it: ${said}`);
+  });
+
+  test('T-171: a build where some questions failed is built, and the form says how many, under Reference repo', async () => {
+    const someFailed = withFailures({ calls: 2, interpretedStops: 5, failures: ['lookup.js: claude exited with code 1'] });
+    const held = heldBuild();
+    const { page, read } = await open((r) => { void runBuild(context, core, r, held.build); });
+    await fill(page, validRequest());
+    await until(read, filled, 'valid form');
+    await press(page);
+    await until(read, (s) => s.button === 'Building… [disabled]' && s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
+    held.end(someFailed);
+    const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== SUBMIT_NOTES.building, 'the build gives the button back');
+    assert.equal(ended.note, SUBMIT_NOTES.partial, 'the note under the button must point at the line that says how many (review S2)');
+    assert.match(ended.problems[1] ?? '', /^1 of 3 questions to the model failed/, 'the form said nothing about the failed question');
+    const said = (await centre()).join('\n');
+    assert.match(said, /1 of 3 questions to the model failed/, `the notification did not say it: ${said}`);
+  });
 });
