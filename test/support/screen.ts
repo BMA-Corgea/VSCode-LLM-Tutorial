@@ -255,12 +255,13 @@ export class Screen {
     const list = where === 'toast' ? '.notification-toast-container' : '.notifications-center';
     return this.evaluate<boolean>(bench, `(() => {
       const items = Array.from(document.querySelectorAll('${list} .notification-list-item'));
-      const item = items.find((el) => el.innerText.includes(${JSON.stringify(containing)}));
-      if (!item) return false;
-      const button = Array.from(item.querySelectorAll('.monaco-button, a.action-label, [role=button]'))
+      const buttonIn = (item) => Array.from(item.querySelectorAll('.monaco-button, a.action-label, [role=button]'))
         .find((el) => (el.textContent || '').trim() === ${JSON.stringify(label)} || el.getAttribute('aria-label') === ${JSON.stringify(label)});
-      if (!button) return false;
-      button.click();
+      // The notification that carries the button, not merely the first with the words (T-152): another notification
+      // of this extension (an earlier ending's toast) can come first and has none.
+      const item = items.find((el) => el.innerText.includes(${JSON.stringify(containing)}) && buttonIn(el));
+      if (!item) return false;
+      buttonIn(item).click();
       return true;
     })()`);
   }

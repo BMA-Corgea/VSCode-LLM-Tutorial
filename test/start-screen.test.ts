@@ -32,6 +32,8 @@ import { Screen, nextFrame, sleep, type Frame } from './support/screen.js';
 import { STALL_BOUND_MS } from './support/stall-bound.js';
 
 const TITLE = 'Build Tutorials: Start';
+/** How many times a test's Cancel is pressed before it gives up on the button coming back (T-152). */
+const CANCEL_PRESSES = 6;
 const BOOKMARK = 'buildTutorials.currentBuild';
 
 /** What a person could see: the button, the note, the problem lines — and, separately, focus. */
@@ -193,6 +195,26 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     const deadline = Date.now() + ms;
     while (!said.some((s) => s.line === line) && Date.now() < deadline) await sleep(20);
     assert.ok(said.some((s) => s.line === line), `the build never said "${line}": it said ${JSON.stringify(said.map((s) => s.line))}`);
+  }
+
+  /**
+   * Presses the real Cancel until the build's button comes back, at most `CANCEL_PRESSES` times (T-152). A press can
+   * reach another notification's own Cancel, or be lost as a toast re-renders, and one unchecked press failed AC4
+   * ten seconds later, far from the cause (GitHub CI, run 44217317883). T-30's measured Cancel keeps its single press:
+   * its bound is the point there.
+   */
+  async function cancelUntilBack(read: () => Promise<Snap>, what: string): Promise<Snap> {
+    for (let pressNo = 1; pressNo <= CANCEL_PRESSES; pressNo++) {
+      await pressCancel();
+      const deadline = Date.now() + 2_000;
+      let now = await read();
+      while (now.button !== 'Build the plan' && Date.now() < deadline) {
+        await sleep(50);
+        now = await read();
+      }
+      if (now.button === 'Build the plan') return now;
+    }
+    return until(read, (s) => s.button === 'Build the plan', `${what} (after ${CANCEL_PRESSES} presses)`, 1_000);
   }
 
   async function until(read: () => Promise<Snap>, ok: (s: Snap) => boolean, what: string, ms = 10_000): Promise<Snap> {
@@ -514,6 +536,31 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     }
   });
 
+  test('T-152: a Cancel pressed the AC4 way reaches the build\'s own progress while other Build Tutorials notifications are up, and the button comes back', async () => {
+    /** Two notifications of this extension an earlier ending left up: one with no button, one with a Cancel of its own. */
+    const leaveStale = (when: string): void => {
+      void vscode.window.showErrorMessage(`Build Tutorials: an earlier build failed (left up on purpose, ${when})`);
+      void vscode.window.showInformationMessage(`Build Tutorials: an earlier question (left up on purpose, ${when})`, 'Cancel');
+    };
+    const cancelling = heldBuild();
+    const { page, read } = await open((r) => { void runBuild(context, core, r, cancelling.build); });
+    leaveStale('before the build');
+    await fill(page, validRequest());
+    await until(read, filled, 'valid form');
+    await press(page);
+    await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
+    // The build's own progress is listed before the next two, so whichever order the list keeps, a stale one is first.
+    const listedBy = Date.now() + 10_000;
+    let listed = await centre();
+    while (!listed.some((n) => n.includes('Build Tutorials') && n.includes('Cancel') && !n.includes('left up on purpose')) && Date.now() < listedBy) {
+      await sleep(100);
+      listed = await centre();
+    }
+    leaveStale('after the build');
+    const cancelled = await cancelUntilBack(read, 'a cancelled build gives the button back with stale notifications of this extension up');
+    assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
+  });
+
   test('AC4: each way a build can END gives the button back and says how — through the real runBuild', async () => {
     // failed
     const failing = heldBuild();
@@ -537,8 +584,8 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await until(second.read, filled, 'valid form');
     await press(second.page);
     await until(second.read, (s) => s.note === SUBMIT_NOTES.building, 'building');
-    await pressCancel();
-    const cancelled = await until(second.read, (s) => s.button === 'Build the plan', 'a cancelled build gives the button back');
+    // The failed sub-case's error toast is still up here: pressed until the button returns (T-152).
+    const cancelled = await cancelUntilBack(second.read, 'a cancelled build gives the button back');
     assert.equal(cancelled.note, SUBMIT_NOTES.cancelled);
 
     // built
