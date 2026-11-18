@@ -134,6 +134,8 @@ export interface StepViewState {
   writeNote?: string;
   /** T-21: why the last press of *Choose this instead* was refused — the session's, server-rendered beside the options list (`WalkView.choiceNote`). */
   choiceNote?: string;
+  /** T-73: what a repeated answer to *Check my work* adds inside the verdict (`WalkView.checkAgain`). */
+  checkAgain?: string;
   /** T-92: why none of this tutorial's reference files are read — the session's standing line (`WalkView.referenceNote`). */
   referenceNote?: string;
   /**

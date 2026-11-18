@@ -1962,6 +1962,65 @@ suite('the dial, the check and the commit (T-5)', () => {
 
   // ── AC5: Check my work ─────────────────────────────────────────────────────────────────────
 
+  // ── T-73: a second press with nothing changed says so (T-15: a press says something new where the eye is) ──
+
+  suite('T-73: a repeated answer to Check my work says so, and how many times', () => {
+    const AGAIN = (n: number): string => `Checked again: the same answer as before (${n} checks in a row).`;
+
+    test('a verdict given again carries the count into the view, and each further press moves it', async () => {
+      const { session } = await walking({ dial: 'automated', commitPerStep: false });
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, undefined, 'a first check was called a repeat');
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, AGAIN(2), 'a second check with the same answer left the page as it was');
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, AGAIN(3), 'a third press said what the second did, so the page did not change');
+    });
+
+    test('a different answer is not a repeat', async () => {
+      const report = okReport();
+      const { session } = await walking({ dial: 'automated', commitPerStep: false, report });
+      session.runCheck();
+      await session.settled();
+      report.ok = false; // the learner's file changed, and the verdict with it
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, undefined, 'a changed verdict was called the same answer');
+    });
+
+    test('a note given again says so after its own words, beside the button', async () => {
+      const { session } = await walking({ dial: 'manual' });
+      session.runCheck();
+      await session.settled();
+      const first = session.getView()?.writeNote ?? '';
+      assert.match(first, /nothing to check here yet/, 'the premise: the file is not there, so the answer is a note');
+      assert.ok(!first.includes('Checked again'), 'a first check was called a repeat');
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.writeNote, `${first} ${AGAIN(2)}`, 'a second press with the same note left the page as it was');
+      assert.equal(session.getView()?.checkAgain, undefined, 'a note was counted as a verdict');
+    });
+
+    test('the count is the step\'s own: a step walked away from and back to still says so on its next press', async () => {
+      const { session, plan } = await walking({ dial: 'automated', commitPerStep: false });
+      session.runCheck();
+      await session.settled();
+      const other = plan.steps.find((s) => s.id !== 'st-2-file-parse');
+      assert.ok(other, 'the fixture plan has another step');
+      session.goTo(other.id);
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, undefined, 'another step showed this step\'s count');
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, AGAIN(2), 'a press after walking back found the same answer and said nothing new');
+    });
+  });
+
   suite('runCheck — the verdict, and what a pass earns (AC5, AC7)', () => {
     test('a pass stores the verdict, marks the step done, and does both in ONE write', async () => {
       const { session, fake } = await walking({ dial: 'automated', commitPerStep: false });

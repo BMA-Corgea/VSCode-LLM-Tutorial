@@ -682,7 +682,7 @@ section h3 { font-size:11px; text-transform:uppercase; letter-spacing:.04em; col
 .check-summary { font-weight:600; margin:0 0 10px; }
 .check-pass { color:var(--str); }
 .check-fail { color:var(--kw); }
-.check-reason, .check-aside, .shape-note, .list-omitted { color:var(--muted); font-size:12px; margin:0 0 8px; }
+.check-reason, .check-aside, .check-again, .shape-note, .list-omitted { color:var(--muted); font-size:12px; margin:0 0 8px; }
 .check-status { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; padding:2px 8px; border-radius:999px; background:var(--chip); color:var(--muted); flex:none; }
 .check-missing .check-status { background:var(--accent-soft); color:var(--kw); }
 .check-kind { color:var(--muted); font-size:12px; }
@@ -759,7 +759,7 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
    right strength here: break mid-token only when there is no other option. */
 main, section, .option { min-width:0; }
 .step-head h1, .option-label, .option-consequence, .why-text, .why-source, .witness-text,
-.note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
+.note, .hint, .check-summary, .check-reason, .check-aside, .check-again, .check-name, .shape-line,
 .write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty,
 .tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint,
 .options-refused, .options-diverged, .options-replanning { overflow-wrap:anywhere; }
@@ -1126,12 +1126,15 @@ function rowField(row: unknown, field: string): unknown {
  * (`summarize` leads with it, so usually it is); this file re-derives nothing and simply
  * declines to say the same sentence twice.
  */
-function checkHtml(outcome: CheckOutcome): string {
+function checkHtml(outcome: CheckOutcome, again?: unknown): string {
   const report = outcome.report;
   const summary = planText(outcome.summary);
   const ok = report.ok === true;
   // T-40: VS Code's own marks for a passed and a failed test (the Testing view's), before the words.
-  const summaryHtml = `<p class="check-summary ${ok ? 'check-pass' : 'check-fail'}">${codicon(ok ? 'pass' : 'error', 'lead')}${escapeHtml(summary)}</p>`;
+  // T-73: under it, when this answer is the same as the last check's, the words that say so, so a press with nothing
+  // changed still changes what is on screen where the press's reveal brings the eye.
+  const summaryHtml = `<p class="check-summary ${ok ? 'check-pass' : 'check-fail'}">${codicon(ok ? 'pass' : 'error', 'lead')}${escapeHtml(summary)}</p>`
+    + (typeof again === 'string' && again !== '' ? `<p class="check-again">${escapeHtml(planText(again))}</p>` : '');
 
   // A number, checked as one: `parseErrors` crosses the same duck-typed boundary as the rows,
   // and `NaN > 0` is false while `'3' > 0` is true — neither is an answer worth acting on.
@@ -1709,7 +1712,7 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
 
   <div class="note" id="step-note">${escapeHtml(state.note ?? '')}</div>
 
-  ${state.check ? checkHtml(state.check) : ''}
+  ${state.check ? checkHtml(state.check, state.checkAgain) : ''}
 
   ${reproduceHtml(state.reproduce)}
 
@@ -1753,8 +1756,8 @@ const CLIENT_SCRIPT = `
   // by id; it never reaches markup.
   var REVEALS = ['check', 'tutor', 'detour', 'choice'];
   // A reveal is honoured only by a repaint within this long of its press. A press the host
-  // answers with no repaint and no note (a second identical check) must not leave a reveal
-  // armed for some unrelated repaint much later (code review 2).
+  // answers with no repaint and no note must not leave a reveal armed for some unrelated
+  // repaint much later (code review 2). (A second identical check was one until T-73.)
   var REVEAL_LIFETIME_MS = 20000;
   var savedY = 0;
   var revealKey = '';
@@ -2321,6 +2324,7 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
           keyOfList<{ raw?: unknown; status?: unknown }>(report?.imports, MAX_LIST_ROWS, (row) => [keyOf(row?.raw), row?.status]),
         ]
       : null,
+    keyOf(state.checkAgain ?? null), // T-73: a repeated answer must repaint, or the second press looks ignored
     state.reproduce ? [state.reproduce.count, state.reproduce.done] : null,
     // ── T-6: the tutor. Every one of these is drawn by `tutorHtml`, and every one of them is
     // a "stored on the host and never shown" bug if it is dropped from here. The thinking
