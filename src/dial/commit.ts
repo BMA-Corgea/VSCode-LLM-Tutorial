@@ -332,6 +332,16 @@ async function configValue(target: string, key: string, git: GitRunner): Promise
 }
 
 /**
+ * What the build's ending says when steps are to be committed and git lacks a name, an email or both for
+ * the tutorial folder (T-141); worded so it is true whichever is missing (review F4). Before it, a learner first heard of it at their first passing check, as a
+ * step that was not committed. It names the two commands and runs neither (this file's header). They
+ * are `--global` ones because the folder is not a repository yet when the build ends (`ensureRepo`
+ * `git init`s it at the first commit), and outside one `git config user.name "…"` fails.
+ */
+export const NO_IDENTITY_NOTE = 'git needs your name and email to commit each step you finish, and until both are set none will be: '
+  + 'git config --global user.name "Your Name" and git config --global user.email "you@example.com" (the tutorial works either way)';
+
+/**
  * True only when BOTH `user.name` and `user.email` resolve to something non-empty in this
  * repository. Half an identity is not an identity `git commit` can actually use — it fails
  * the commit the same way "neither" does — so `commitStep` treats the two cases identically

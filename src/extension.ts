@@ -38,6 +38,7 @@ import { DERIVED_TREES_DIR } from './derive/storage.js';
 import { hasPlan, loadPlan, loadProgress, loadRequest, saveDivergedPlan, saveProgress } from './walk/store.js';
 import { believeRequest } from './walk/provenance.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
+import { identityConfigured, NO_IDENTITY_NOTE } from './dial/commit.js';
 import { tutorCoreFor, type TutorCore } from './tutor/core.js';
 import { DecisionsTreeProvider } from './walk/tree.js';
 
@@ -233,7 +234,46 @@ export async function runBuild(
   // nothing waits on the person to dismiss anything.
   reportOutcome(outcome, true);
   await forgetUnlessResumable(context, request.target);
+  if (outcome.ok) await tellIfNoIdentity(request.target);
   if (outcome.ok) await openOrOfferWalk(context, request.target);
+}
+
+/**
+ * T-141: a learner whose git lacks a name or an email hears of it as the build ends, before the walk, rather
+ * than first at a passing check whose step was not committed. Only while steps are to be committed. It asks
+ * git as the walk's commit will (`identityConfigured`, in the tutorial folder) and sets nothing. Told after
+ * the ending and after the bookmark is settled, so neither waits on git; and the walk's offer waits at most
+ * `IDENTITY_ASK_MS` (review F2). It never throws. When git cannot be asked, or might give this folder an
+ * identity this ask cannot see, it says nothing (review F1, F3): the walk's commit says what happened then.
+ */
+async function tellIfNoIdentity(target: string): Promise<void> {
+  if (!vscode.workspace.getConfiguration('buildTutorials').get<boolean>('commitPerStep', true)) return;
+  const asked = await Promise.race([
+    askIdentity(target),
+    new Promise<'unknown'>((resolve) => { setTimeout(() => { resolve('unknown'); }, IDENTITY_ASK_MS); }),
+  ]);
+  if (asked === 'missing') void vscode.window.showWarningMessage(`Build Tutorials: ${NO_IDENTITY_NOTE}`);
+}
+
+/** How long the build's ending waits for git to say whether it has a name and email. Past it, nothing is said. */
+const IDENTITY_ASK_MS = 3_000;
+
+/**
+ * `'missing'` only when git runs, has no name and email for this folder, and gives no folder an identity of its
+ * own through `includeIf`. Such an identity is matched by where the repository is (`gitdir:`), its branch, or
+ * its remotes, and the tutorial folder is not a repository yet when its build ends, so this ask cannot see it,
+ * though the walk's commit, after `git init`, would. Telling that learner to set a global identity would be
+ * false, and would give them one they chose not to have (review F3).
+ */
+async function askIdentity(target: string): Promise<'set' | 'missing' | 'unknown'> {
+  try {
+    await realGit(['--version'], target); // no git at all: nothing to tell (review F1)
+    if (await identityConfigured(target, realGit)) return 'set';
+    const conditional = await realGit(['config', '--get-regexp', '^includeif\\.'], target).catch(() => '');
+    return conditional.trim() === '' ? 'missing' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 async function runStartCommand(context: vscode.ExtensionContext): Promise<void> {
@@ -332,11 +372,13 @@ export async function resumeOnActivate(
     return resumeIfMarked(target, resumeCtx);
   });
   reportOutcome(outcome, false);
-  if (outcome?.ok) await openOrOfferWalk(context, target);
-  // Resumed to completion, or Discarded (`resumeIfMarked` removes the marker either way):
-  // nothing is left to resume, so the bookmark goes too. A dismissed prompt or a failed
-  // resume leaves the marker — and so keeps the bookmark — for next time.
+  // Settled before anything that can wait: the note's ask of git, and the walk's offer, which waits on a person.
   await forgetUnlessResumable(context, target);
+  if (outcome?.ok) await tellIfNoIdentity(target);
+  if (outcome?.ok) await openOrOfferWalk(context, target);
+  // (Above: resumed to completion, or Discarded, `resumeIfMarked` removes the marker either way, so nothing is
+  // left to resume and the bookmark goes too. A dismissed prompt or a failed resume leaves the marker, and so
+  // keeps the bookmark, for next time.)
 }
 
 // ── the walk (T-4) ────────────────────────────────────────────────────────────────────────
