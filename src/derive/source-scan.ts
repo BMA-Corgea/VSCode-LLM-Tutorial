@@ -11,7 +11,7 @@
  * No `vscode` import — see `./types.ts`.
  */
 
-import type { DeriveLanguage } from './types.js';
+import type { CodeLanguage } from './types.js';
 
 function javaScriptCode(s: string): string {
   let out = '';
@@ -73,6 +73,6 @@ function pythonCode(s: string): string {
   return out;
 }
 
-export function codeOnly(content: string, language: DeriveLanguage): string {
+export function codeOnly(content: string, language: CodeLanguage): string {
   return language === 'python' ? pythonCode(content) : javaScriptCode(content);
 }

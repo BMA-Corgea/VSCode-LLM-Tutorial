@@ -183,7 +183,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { gitTimedOut, type GitRunner } from '../start/build.js';
-import type { OptionLike, StepLike, WhySource } from '../walk/model.js';
+import { roadItsCodeFollows, whyOfStep, type OptionLike, type StepLike, type WhySource } from '../walk/model.js';
 import { taughtFileWithheld } from '../dial/writer.js';
 import { resolveInsideTarget } from '../walk/paths.js';
 import type { AskContext } from './core.js';
@@ -483,7 +483,8 @@ export const Outbound = {
    */
   options(step: StepLike): { options: OutboundOption[]; omitted: number } {
     const all = optionsOf(step);
-    const taken = takenIdsOf(step);
+    // T-22: the prompt marks a taken road "[author]". A step a re-plan wrote has no author there.
+    const taken = step.derivedFrom === undefined ? takenIdsOf(step) : new Set<string>();
     const shown = all.slice(0, MAX_OPTIONS_SENT);
     const authorIndex = all.findIndex((o) => taken.has(o.id));
     if (authorIndex >= MAX_OPTIONS_SENT && shown.length === MAX_OPTIONS_SENT) {
@@ -633,7 +634,11 @@ function takenIdsOf(step: StepLike): Set<string> {
 export function renderOptionsText(step: StepLike): string {
   const { options, omitted } = Outbound.options(step);
   const note = omitted > 0 ? `\n${optionsOmittedNote(omitted)}` : '';
-  const lines = options.map((o) => `[${o.taken ? 'author' : 'alternative'}] ${o.label} — ${o.consequence}`).join('\n');
+  // T-22 (code review SF1): a re-derived step has no author's road; the road its code follows is the one marked.
+  const followed = step.derivedFrom === undefined ? undefined : optionsOf(step).find((o) => o.id === roadItsCodeFollows(step))?.label;
+  const followedText = followed === undefined ? undefined : Outbound.text(followed, MAX_OPTION_TEXT);
+  const tag = (o: OutboundOption): string => (o.taken ? 'author' : followedText !== undefined && o.label === followedText ? 'the road this code follows' : 'alternative');
+  const lines = options.map((o) => `[${tag(o)}] ${o.label} — ${o.consequence}`).join('\n');
   return `${Outbound.text(lines, MAX_PAGE_TEXT - note.length)}${note}`;
 }
 
@@ -647,6 +652,9 @@ export function renderOptionsText(step: StepLike): string {
  * know that nobody actually said this.
  */
 function fileMeaningOf(step: StepLike): string {
+  // A re-derived step on a road its reason was not written for is not sent that reason, and the
+  // sentence it gets instead is not "from the author's own comment" (T-22's code review, SF1).
+  if (step.derivedFrom !== undefined && roadItsCodeFollows(step) !== step.decision.authorChoice) return Outbound.text(whyOfStep(step), MAX_PAGE_TEXT);
   const raw: unknown = step.decision.why;
   const why = typeof raw === 'string' ? raw.trim() : '';
   const source = whySourceLabel(step.decision.whySource);
@@ -832,18 +840,40 @@ async function learnerDiffFor(
  * `AskContext.build` draws in its own comment: the tutor is answering about this step, not
  * auditing the tutorial.
  */
+/**
+ * T-22: told to the tutor first on every step whose code a re-plan wrote. repo-tour's prompt says
+ * "the author" in its own words, and the file it is given here was not written by one.
+ */
+function derivedStepNote(step: StepLike): string {
+  const road = optionsOf(step).find((o) => o.id === roadItsCodeFollows(step));
+  const named = road === undefined ? '' : `, following the road "${Outbound.text(road.label, MAX_OPTION_TEXT)}",`;
+  return `There is no author for this step: its code was written by a model${named} after the learner chose a different road. Wherever this says "the author", read "the generated code".`;
+}
+
+/**
+ * T-22 (the re-check's C9): told to the tutor first on a step whose file a re-plan took over. The step is the author's,
+ * and so is everything else it is given, but the learner's file may hold the code a model wrote at another step.
+ */
+function takenOverStepNote(writer: StepLike): string {
+  return `This step's file is no longer written from here: after the learner chose a different road at step ${Outbound.text(String(writer.ordinal), 16)}, a model rewrote the file, and the learner's own copy may hold that code rather than the author's.`;
+}
+
 export async function tutorContext(
   step: StepLike,
   refRoot: string,
   target: string,
   git: GitRunner,
+  /** the repository's own folder, which names the project: a re-derived step's `refRoot` is a tree's (T-22's code review, N2) */
+  projectRoot?: string,
+  /** T-22 (the re-check's C9): the step that writes this step's file now, when a re-plan took it over */
+  takenOverBy?: StepLike,
 ): Promise<AskContext> {
   const learnerDiff = await learnerDiffFor(step, refRoot, target, git);
   // Every field, without exception, and that is the point: `question` and `why` are the two
   // the review measured at five megabytes each, `file` is the one nobody had thought about,
   // and a field added tomorrow that skips this list is the finding again.
   return {
-    repo: Outbound.text(path.basename(path.resolve(refRoot)), MAX_PAGE_TEXT),
+    repo: Outbound.text(path.basename(path.resolve(projectRoot ?? refRoot)), MAX_PAGE_TEXT),
     file: Outbound.text(step.target.file, MAX_PAGE_TEXT),
     fileMeaning: fileMeaningOf(step),
     stopTitle: Outbound.text(step.decision.question, MAX_PROMPT_TEXT),
@@ -851,7 +881,7 @@ export async function tutorContext(
     build: {
       question: Outbound.text(step.decision.question, MAX_PROMPT_TEXT),
       options: Outbound.options(step).options,
-      why: Outbound.text(step.decision.why, MAX_PROMPT_TEXT),
+      why: Outbound.text(`${takenOverBy === undefined ? '' : `${takenOverStepNote(takenOverBy)} `}${step.derivedFrom === undefined ? step.decision.why : `${derivedStepNote(step)} ${whyOfStep(step)}`}`, MAX_PROMPT_TEXT),
       ...(learnerDiff === undefined ? {} : { learnerDiff }),
     },
   };

@@ -10,9 +10,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildDir, writeJsonAtomic } from '../start/build.js';
+import { buildDir, realFsWriteOps, writeBytesAtomic, writeJsonAtomic, type FsWriteOps } from '../start/build.js';
 import { DEFAULT_DIAL, DIALS, type BuildRequest, type Dial } from '../start/request.js';
-import { emptyProgress, type PlanLike, type Progress } from './model.js';
+import { emptyProgress, treeNamedBy, type PlanLike, type Progress } from './model.js';
 
 export { buildDir };
 
@@ -160,9 +160,40 @@ function requestPath(target: string): string {
  * real state — it can be walked, it just cannot be written into — so `null` is an answer
  * callers must handle, not an error.
  */
-export type ResolvedRequest = BuildRequest & { referenceRoot: string };
+export type ResolvedRequest = BuildRequest & {
+  referenceRoot: string;
+  /** the tree this plan's re-derived files are in (`treeNamedBy`), proven; absent until a divergence */
+  derivedRoot?: string;
+};
 
-export function loadRequest(target: string): ResolvedRequest | null {
+/**
+ * `derivedRoot`, proved: a real folder strictly inside the extension's own store of derived trees,
+ * after following every link, or `undefined`. `request.json` is in the learner's folder, and a
+ * tampered one must not be able to point the walk at something it would then read and show.
+ */
+function provenDerivedRoot(tree: string | undefined, store: string): string | undefined {
+  if (tree === undefined) return undefined;
+  try {
+    const real = fs.realpathSync(path.join(store, tree));
+    if (!real.startsWith(fs.realpathSync(store) + path.sep)) return undefined;
+    return fs.statSync(real).isDirectory() ? real : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function derived(root: string | undefined): { derivedRoot?: string } {
+  return root === undefined ? {} : { derivedRoot: root };
+}
+
+/** What `loadRequest` needs to say where a plan's re-derived files are; see `treeNamedBy`. */
+export interface DerivedLookup {
+  plan: PlanLike;
+  /** the extension's `derived/` store: the only place a tree can be */
+  store: string;
+}
+
+export function loadRequest(target: string, derivedLookup?: DerivedLookup): ResolvedRequest | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(requestPath(target), 'utf8'));
@@ -199,6 +230,7 @@ export function loadRequest(target: string): ResolvedRequest | null {
     repo,
     referenceRoot,
     target: typeof parsed['target'] === 'string' ? parsed['target'] : target,
+    ...derived(derivedLookup === undefined ? undefined : provenDerivedRoot(treeNamedBy(derivedLookup.plan), derivedLookup.store)),
     // An unrecognised dial is the global default, never a guess: a value outside `DIALS`
     // means the file was hand-edited or written by a future version, and "manual" is the
     // only fallback that cannot overstate what has happened to the learner's files.
@@ -206,6 +238,99 @@ export function loadRequest(target: string): ResolvedRequest | null {
   };
 }
 
+/**
+ * Puts a re-planned walk in place (T-22, AC4): the plan as it stands is copied, byte for byte, to
+ * `versions/<n>.json`, and only then is `plan.json` replaced. Each write is atomic, and the plan
+ * names its own tree, so a crash at any point leaves one whole plan paired with its own code. The
+ * worst a crash can leave is a version identical to the current plan, which undo reads as a no-op.
+ * Returns the version number written.
+ */
+export function saveDivergedPlan(target: string, plan: PlanLike, ops: FsWriteOps = realFsWriteOps, derivedFrom?: PlanLike): number {
+  const build = provenBuildDir(target);
+  const planFile = path.join(build, 'plan.json');
+  const before = fs.readFileSync(planFile);
+  // The version must be the plan the press was derived from (code review N6): replacing a plan that
+  // changed on disk meanwhile, the folder open in a second window, would drop that change unseen.
+  if (derivedFrom !== undefined && JSON.stringify(JSON.parse(before.toString('utf8'))) !== JSON.stringify(derivedFrom)) {
+    throw new Error('the plan on disk changed while this re-planned (is this folder open in another window?), so it was not replaced');
+  }
+  const dir = provenVersionsDir(build);
+  const version = nextVersion(dir);
+  const file = path.join(dir, `${version}.json`);
+  // Never written over, and never through a link planted at the number (`lstat`, which sees a dangling one).
+  if (lstatOrNull(file) !== null) throw new Error(`version ${version} already exists, and a version is never overwritten`);
+  writeBytesAtomic(file, before, ops);
+  writeJsonAtomic(planFile, plan, ops);
+  return version;
+}
+
+function lstatOrNull(file: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(file);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `<target>/.repo-tour/build`, proved a real folder with no link in it below the learner's own folder,
+ * or a throw that says why. A repository can ship a `.repo-tour/` of its own, and git recreates a link
+ * on clone, so a write through `build` (or `.repo-tour`) as a link lands wherever it points (T-22's
+ * security review, F1; `kb/wiki/lessons.md`: "A lexical path check is not a filesystem check"). The
+ * learner's folder itself may be a link: that one is theirs.
+ */
+function provenBuildDir(target: string): string {
+  const expected = path.join(fs.realpathSync(target), '.repo-tour', 'build');
+  let real: string;
+  try {
+    real = fs.realpathSync(buildDir(target));
+  } catch {
+    throw new Error('the tutorial\'s build folder could not be found');
+  }
+  if (real !== expected) throw new Error('the tutorial\'s build folder is a link to somewhere else, so nothing is written through it');
+  if (lstatOrNull(expected)?.isDirectory() !== true) throw new Error('the tutorial\'s build folder is not a folder');
+  return expected;
+}
+
+/** `versions/` inside a proved build folder, made if it is not there, and proved the same way. */
+function provenVersionsDir(build: string): string {
+  const dir = path.join(build, 'versions');
+  try {
+    // Safe before the proof: `mkdir` over a link (dangling or not) fails, and creates nothing through it.
+    fs.mkdirSync(dir);
+  } catch {
+    /* there already, or the proof below says why not */
+  }
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    throw new Error('the versions folder is a link that leads nowhere, so no version is written');
+  }
+  if (real !== dir) throw new Error('the versions folder is a link to somewhere else, so no version is written through it');
+  if (lstatOrNull(dir)?.isDirectory() !== true) throw new Error('the versions folder is not a folder');
+  return dir;
+}
+
+/**
+ * One past the highest numbered version in `dir`, so a version is never overwritten. Only a number that
+ * names one file counts: past 2^53 `Number` rounds, and two divergences would share a name (code review N5).
+ */
+function nextVersion(dir: string): number {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 1;
+  }
+  return names.reduce((top, name) => {
+    const match = /^(\d+)\.json$/.exec(name);
+    if (match === null) return top;
+    const next = Number(match[1]) + 1;
+    return Number.isSafeInteger(next) && String(next - 1) === match[1] ? Math.max(top, next) : top;
+  }, 1);
+}
+
 export function saveProgress(target: string, progress: Progress): void {
-  writeJsonAtomic(progressPath(target), progress);
+  writeJsonAtomic(path.join(provenBuildDir(target), 'progress.json'), progress);
 }

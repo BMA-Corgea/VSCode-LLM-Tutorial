@@ -17,12 +17,22 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import type { PlanLike, Progress } from '../src/walk/model.js';
-import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE } from '../src/walk/session.js';
-import { CHOOSE_LABEL, CHOSEN_BADGE, DIVERGED_NOTE } from '../src/walk/step-view.js';
+import { CHOICE_NOT_AN_OPTION, CHOICE_STALE_PAGE, REPLAN_NOTHING_FOLLOWS, type Replanner } from '../src/walk/session.js';
+import { BACK_TO_AUTHOR_LABEL, CHOOSE_LABEL, CHOSEN_BADGE, NOT_REPLANNED_NOTE, REPLAN_OWN_ROAD_LABEL } from '../src/walk/step-view.js';
+import { recordBuiltHere } from './support/built-here.js';
 import { Screen, sleep, stale, type Frame } from './support/screen.js';
 import { repoTourShapedPlan, writeFixtureTarget } from './unit/walk-fixtures.js';
 
 const TITLE = 'Build Tutorials: Step';
+
+/** T-22: a press re-plans now. These tests are about the press and the page, so nothing follows and no model is near. */
+const NOTHING_FOLLOWS: Replanner = {
+  diverge: () => Promise.resolve({
+    ok: true, changed: false, staleDependents: [],
+    cost: { provider: 'none', model: 'none', metered: true, calls: 0, cachedStops: 0, interpretedStops: 0, inputTokens: 0, outputTokens: 0, usd: 0, failures: [] },
+  }),
+  savePlan: () => undefined,
+};
 const STEP = 'st-4-symbol-render'; // three options: the author's and two alternatives
 
 /** What a person could see in the options section: the rows, the words about the last press, and whether those words are on screen. */
@@ -105,6 +115,10 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     const screen = await Screen.open(api._context);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'step-screen-'));
     writeFixtureTarget(dir, plan);
+    fs.writeFileSync(path.join(dir, '.repo-tour', 'build', 'request.json'), JSON.stringify({ idea: '', recreate: true, repo: dir, target: dir, dial: 'manual', referenceRoot: dir }));
+    // T-92: the walk believes a request only on the build's own record; this is what a build here would have written.
+    await recordBuiltHere(dir, dir);
+    api._walk.useReplanner(NOTHING_FOLLOWS);
     const planFile = path.join(dir, '.repo-tour', 'build', 'plan.json');
     const progressFile = path.join(dir, '.repo-tour', 'build', 'progress.json');
     try {
@@ -146,6 +160,7 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
       };
       await body({ api, screen, planFile, progressFile, read, onStep, pageShowing, pressNow, progress, pressFromLeftPage });
     } finally {
+      api._walk.useReplanner(undefined);
       api._walk.session()?.dispose();
       screen.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -163,8 +178,12 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     await pressNow(`document.querySelector(${JSON.stringify(choose('stream'))}).click()`);
     const after = await until(read, (o) => (o?.on[0] ?? '') === 'stream', 'the learner\'s choice is where the author\'s was');
     assert.deepEqual(after?.yours, ['stream'], `and marked "${CHOSEN_BADGE}"`);
-    assert.deepEqual(after?.choosable, [`author:${CHOOSE_LABEL}`, `template-string:${CHOOSE_LABEL}`], 'the author\'s road is choosable again; the learner\'s own is not a control');
-    assert.equal(after?.note, DIVERGED_NOTE, 'and the panel says the rest of the walk has not changed');
+    // T-22's re-review R11 and its re-check C2: this stand-in re-plans nothing, so the choice is in progress only. Its own
+    // road offers a re-plan from it, and the author's road drops it, asking nothing.
+    assert.deepEqual(after?.choosable, [`author:${BACK_TO_AUTHOR_LABEL}`, `template-string:${CHOOSE_LABEL}`, `stream:${REPLAN_OWN_ROAD_LABEL}`], 'the author\'s road is a control again, and the learner\'s own is one too, as a re-plan');
+    // T-22's code review, SF4: this stand-in re-plans nothing at a symbol step, and something does stand on it,
+    // so the true line is that the walk was not re-planned, not that nothing depended on it.
+    assert.equal(after?.note, NOT_REPLANNED_NOTE, 'and the panel says the walk was not re-planned from it');
 
     const onDisk = JSON.parse(fs.readFileSync(progressFile, 'utf8')) as Progress;
     assert.equal(onDisk.steps[STEP]?.chosen, 'stream', 'recorded beside the plan');
@@ -177,7 +196,7 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     await vscode.commands.executeCommand('buildTutorials.step.focus');
     api._walk.session()!.goTo(STEP);
     const reloaded = await until(read, (o) => (o?.on[0] ?? '') === 'stream', 'a reload forgot the learner\'s road');
-    assert.equal(reloaded?.note, DIVERGED_NOTE);
+    assert.equal(reloaded?.note, NOT_REPLANNED_NOTE);
 
     // Latest wins: back to the author's road, and the line goes with it.
     await pressNow(`document.querySelector(${JSON.stringify(choose('author'))}).click()`);
@@ -218,7 +237,7 @@ suite('the Current Step panel, read off the screen (T-21)', function () {
     // The positive path is still there, and the refusal does not outlive it.
     await pressNow(`document.querySelector(${JSON.stringify(choose('alt-1'))}).click()`);
     const chosen = await until(read, (o) => (o?.on[0] ?? '') === 'alt-1', 'a press from the page for this step is recorded here');
-    assert.equal(chosen?.refused, '', 'the sentence that says nothing was recorded goes when something is');
+    assert.equal(chosen?.refused, REPLAN_NOTHING_FOLLOWS, 'the sentence that says nothing was recorded goes when something is, and the page says what became of the press');
     assert.equal(progress().steps[NOW]?.chosen, 'alt-1');
   }, repoTourShapedPlan()));
 

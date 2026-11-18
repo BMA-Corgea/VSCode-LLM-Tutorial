@@ -802,3 +802,70 @@ suite('MAX_CONTEXT_CHARS is the sum of the budgets — on a REFLECTIVELY hostile
       `an honest step already uses ${block.length} of ${MAX_CONTEXT_CHARS} — the ceiling is not headroom any more`);
   });
 });
+
+// The re-check of 2026-11-17, C9: at a step whose file a re-plan took over, the tutor was told the author's question and
+// reason and nothing about the file being written elsewhere now, though the learner's copy may hold the model's code.
+suite('a step whose file a re-plan took over (T-22, R3)', () => {
+  test('the tutor is told first that the file is written at another step now, and the learner\'s copy may be the model\'s', async () => {
+    const step = stepById('st-2-file-parse');
+    const writer: StepLike = { ...step, id: 'st-9-writer', ordinal: 9, derivedFrom: 'st-9-writer' };
+    const ctx = await tutorContext(step, refRoot, target, realGit, undefined, writer);
+    assert.match(ctx.build?.why ?? '', /^This step's file is no longer written from here: after the learner chose a different road at step 9, a model rewrote the file/);
+    assert.ok((ctx.build?.why ?? '').includes(step.decision.why), 'and it is still given the author\'s reason, since the step is the author\'s');
+    const plain = await tutorContext(step, refRoot, target, realGit);
+    assert.doesNotMatch(plain.build?.why ?? '', /no longer written from here/, 'discriminates: a step nobody took over is told nothing of it');
+  });
+});
+
+suite('a step a re-plan wrote has no author (T-22, AC7)', () => {
+  function rederived(chosen: string | null): StepLike {
+    const base = stepById('st-4-symbol-render');
+    return { ...base, derivedFrom: base.id, decision: { ...base.decision, chosen } };
+  }
+
+  test('no road is marked the author\'s, in either place the prompt lists them', async () => {
+    const step = rederived('stream');
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    assert.deepEqual(ctx.build?.options.map((o) => o.taken), [false, false, false]);
+    assert.doesNotMatch(renderOptionsText(step), /\[author\]/);
+    assert.doesNotMatch(core.buildContextBlock(ctx), /\[author\]/);
+  });
+
+  test('the tutor is told whose code it is, and which road the learner took', async () => {
+    const step = rederived('stream');
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    const label = step.decision.options.find((o) => o.id === 'stream')!.label;
+    assert.match(ctx.build?.why ?? '', /^There is no author for this step/);
+    assert.ok((ctx.build?.why ?? '').includes(label));
+    // T-22's code review, SF1: that reason was the recommended road's, sent beside the learner's.
+    assert.ok(!(ctx.build?.why ?? '').includes(step.decision.why), 'and not the reason for the road the learner turned down');
+  });
+
+  test('on the learner\'s road the tutor gets no reason written for another, and the road its code follows is marked (code review SF1)', async () => {
+    const step = rederived('stream');
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    assert.ok(!(ctx.fileMeaning ?? '').includes(step.decision.why), `fileMeaning: ${JSON.stringify(ctx.fileMeaning)}`);
+    assert.doesNotMatch(ctx.fileMeaning ?? '', /from the author's own comment|from the model, reading the code/, 'and the sentence in its place is not attributed to a source it did not come from');
+    assert.match(renderOptionsText(step), /\[the road this code follows\] Stream the response as it is produced/);
+    assert.equal((renderOptionsText(step).match(/\[the road this code follows\]/g) ?? []).length, 1, 'one road is marked');
+  });
+
+  test('a step the model wrote, on its own recommended road, keeps the reason it was written with', async () => {
+    const step = { ...rederived(null), derivedFrom: 'st-2-file-parse' };
+    const ctx = await tutorContext(step, refRoot, target, realGit);
+    assert.ok((ctx.fileMeaning ?? '').includes(step.decision.why), 'its reason is for the road its code follows');
+    assert.ok((ctx.build?.why ?? '').includes(step.decision.why));
+    assert.match(renderOptionsText(step), /\[the road this code follows\] What the author did/);
+  });
+
+  test('a step the model wrote, with no road chosen, still says so', async () => {
+    const ctx = await tutorContext(rederived(null), refRoot, target, realGit);
+    assert.match(ctx.build?.why ?? '', /^There is no author for this step/);
+  });
+
+  test('a step no re-plan touched is told nothing of the kind', async () => {
+    const ctx = await tutorContext(stepById('st-4-symbol-render'), refRoot, target, realGit);
+    assert.doesNotMatch(ctx.build?.why ?? '', /There is no author/);
+    assert.deepEqual(ctx.build?.options.map((o) => o.taken), [true, false, false]);
+  });
+});

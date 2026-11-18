@@ -843,6 +843,11 @@ export class AskLedger {
     for (const ticket of [...this.tickets]) ticket.abandon();
   }
 
+  /** T-22: stops only the requests whose id starts with `prefix`, so stopping a re-plan leaves a question to the tutor alone. */
+  abandonPrefixed(prefix: string): void {
+    for (const ticket of [...this.tickets]) if (ticket.stepId.startsWith(prefix)) ticket.abandon();
+  }
+
   /**
    * The session is going away. Every ask is abandoned (detached, never killed — see
    * `AskTicket.abandon`), nothing new can be opened, and the scratch directory goes.

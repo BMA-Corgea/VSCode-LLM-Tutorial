@@ -87,6 +87,8 @@ function narratorState(current = 1): NarratorViewState {
 
 const QUESTION = { role: 'user' as const, content: 'Why an array?' };
 const PASS_REPORT = { symbols: [{ name: 'tokenize', kind: 'function', status: 'present' }], imports: [], parseErrors: 0, ok: true };
+/** What the session says while a press re-plans (`src/walk/session.ts`); the page draws whatever it is given. */
+const REPLANNING_WORDS = 're-planning the steps that follow…';
 const FAIL_REPORT = { symbols: [{ name: 'Token', kind: 'interface', status: 'missing' }], imports: [], parseErrors: 0, ok: false };
 
 /** Every page these tests render with the assets handed over: one per state an icon belongs to. */
@@ -96,6 +98,7 @@ function pagesWithAssets(): Array<[string, string]> {
     ['step preparing', renderStepHtml(stateAt('st-1-shape-src', { transcript: [QUESTION], tutor: { thinking: true, stage: 'preparing' } }), FAKE_SKINS, ASSETS)],
     ['step thinking', renderStepHtml(stateAt('st-1-shape-src', { transcript: [QUESTION], tutor: { thinking: true, stage: 'sending' } }), FAKE_SKINS, ASSETS)],
     ['step writing', renderStepHtml(stateAt('st-1-shape-src', { detour: { generating: true } }), FAKE_SKINS, ASSETS)],
+    ['step replanning', renderStepHtml(stateAt('st-2-file-parse', { replanning: { stepId: 'st-2-file-parse', message: REPLANNING_WORDS } }), FAKE_SKINS, ASSETS)],
     ['step check pass', renderStepHtml(stateAt('st-2-file-parse', { check: { summary: 'every part is there', report: PASS_REPORT } } as Partial<StepViewState>), FAKE_SKINS, ASSETS)],
     ['step check fail', renderStepHtml(stateAt('st-2-file-parse', { check: { summary: '1 export missing: Token', report: FAIL_REPORT } } as Partial<StepViewState>), FAKE_SKINS, ASSETS)],
     ['notice', renderNoticeHtml('No tutorial in this folder yet.', ASSETS)],
@@ -302,6 +305,14 @@ suite('T-40: the icons, where VS Code would draw one', () => {
     const inner = innerOf(page('step writing'), 'detour-waiting', 'span');
     assert.ok(inner.includes('<span class="codicon codicon-loading codicon-modifier-spin icon-lead" aria-hidden="true"></span>'), inner);
     assert.equal(textOf(inner), DETOUR_WAITING_MESSAGE);
+  });
+
+  // T-22 met T-40 at the merge: a re-plan is a wait for the model like the other three, and was the one without the spinner.
+  test('a re-plan running shows the same spinner before its words, and its Cancel is unchanged', () => {
+    const inner = innerOf(page('step replanning'), 'replan-status', 'p');
+    assert.ok(inner.startsWith('<span class="codicon codicon-loading codicon-modifier-spin icon-lead" aria-hidden="true"></span>'), `the re-plan's running line has no spinner: ${inner}`);
+    assert.ok(textOf(inner).startsWith(REPLANNING_WORDS), 'the icon adds no words');
+    assert.ok(/<button type="button" class="btn" id="btn-replan-cancel">/.test(inner), 'Cancel still stands beside it');
   });
 
   test('nothing spins when nothing is being waited for', () => {
