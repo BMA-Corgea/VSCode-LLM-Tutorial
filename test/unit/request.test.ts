@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  BUILD_DIR, BUILDING_NOW, DEFAULT_DIAL, HEARTBEAT_STALE_MS, IDEA_FIRST_MESSAGE, MARKER_FILE, emptyRequest, parseGithubUrl, unfinishedBuildIn, validateRequest,
+  BUILD_DIR, BUILDING_NOW, DEFAULT_DIAL, HEARTBEAT_STALE_MS, IDEA_FIRST_MESSAGE, MARKER_FILE, emptyRequest, parseGithubUrl, sameRequest, unfinishedBuildIn, validateRequest,
 } from '../../src/start/request.js';
 
 function tmpEmptyDir(): string {
@@ -235,5 +235,21 @@ suite('parseGithubUrl', () => {
 
   test('a non-github https URL is not accepted', () => {
     assert.equal(parseGithubUrl('https://gitlab.com/owner/name'), null);
+  });
+});
+
+suite('T-122: the request a press made, and the one a marker carries', () => {
+  const pressed = { ...emptyRequest(), recreate: true, repo: '/work/ref', target: '/work/tutorial', dial: 'manual' as const };
+  test('the same request is the same, whatever the build later wrote beside it', () => {
+    assert.equal(sameRequest(pressed, { ...pressed }), true);
+    assert.equal(sameRequest(pressed, { ...pressed, referenceRoot: '/home/learner/.config/refs/x' }), true, 'referenceRoot is the build\'s, not the press\'s');
+  });
+  test('any field the learner chose makes another request', () => {
+    for (const [field, value] of [['repo', '/work/other'], ['target', '/work/elsewhere'], ['dial', 'automated'], ['recreate', false], ['idea', 'a chat app']] as const) {
+      assert.equal(sameRequest(pressed, { ...pressed, [field]: value }), false, `a request with another ${field} was taken for the one pressed`);
+    }
+  });
+  test('something that is not a request is not the one pressed', () => {
+    for (const bad of [undefined, null, 'a string', 42, {}]) assert.equal(sameRequest(pressed, bad), false);
   });
 });

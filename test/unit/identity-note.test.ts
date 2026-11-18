@@ -32,7 +32,7 @@ suite('T-141: the identity note in a build\'s ending', () => {
   for (const [ending, target] of [['runBuild', 'request.target'], ['resumeOnActivate', 'target']] as const) {
     test(`${ending}: the ending is told, the bookmark settled, git asked, then the walk offered`, () => {
       const text = body(ending);
-      const calls = ['reportOutcome(', `forgetUnlessResumable(context, ${target})`, `tellIfNoIdentity(${target})`, `openOrOfferWalk(context, ${target})`];
+      const calls = ['reportOutcome(', `forgetUnlessResumable(context, ${target}`, `tellIfNoIdentity(${target})`, `openOrOfferWalk(context, ${target})`];
       const at = order(text, calls);
       for (const [i, call] of calls.entries()) assert.ok(at[i]! >= 0, `${ending} no longer calls ${call}`);
       assert.deepEqual([...at].sort((a, b) => a - b), at, `${ending} makes them in another order: ${calls.map((c, i) => `${c} at ${at[i]}`).join(', ')}`);
