@@ -20,7 +20,10 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import { gitAttributesRefusal, hazardousGitAttributes } from './gitattributes.js';
-import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, PHASES, pidSpace, type BuildRequest } from './request.js';
+import {
+  ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, confirmNotRunning, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, onlyItsHeartbeatSaysDead,
+  parseGithubUrl, PHASES, pidSpace, type BuildRequest, type ReaderClock,
+} from './request.js';
 import { recordBuiltReference } from '../walk/provenance.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
@@ -838,6 +841,9 @@ export interface BuildContext {
   /** Swappable filesystem writes — a test makes `renameSync` fail exactly where a crash
    *  would hurt most and asserts what is left on disk. Defaults to `realFsWriteOps`. */
   writeOps?: FsWriteOps;
+  /** The clock a marker read as not running by its heartbeat alone is waited out by before it is read again (T-121):
+   *  this process's monotonic time. A test passes a fake one. Defaults to `READER_CLOCK`. */
+  readerClock?: ReaderClock;
 }
 
 export interface BuildOutcome {
@@ -1000,6 +1006,17 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   // one the press already weighed (`unfinishedBuildIn`) before this build began.
   if (there && there.id !== marker.id && markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) {
     return { ok: false, reason: `another build started in ${target} while this one was ${meanwhile} — wait for it to finish, or pick an empty or new folder` };
+  }
+  // T-121: a marker this reader calls dead by its heartbeat alone compares two clocks, the writer's and this one, so it is
+  // read again once, after one heartbeat of this process's own monotonic time, before this build goes over it. A live
+  // build beats in that time. The second read is the last thing before the first write, with nothing awaited after it.
+  if (there && there.id !== marker.id && onlyItsHeartbeatSaysDead(there as unknown as Record<string, unknown>)) {
+    ctx.onProgress?.(`checking whether the build that was in ${target} is still running…`);
+    const gone = await confirmNotRunning(() => readMarker(target) as unknown as Record<string, unknown> | null, there as unknown as Record<string, unknown>, ctx.readerClock, ctx.isCancelled);
+    if (gone === 'cancelled') return cancel(target, 'while checking whether the build before it was still running');
+    if (!gone) {
+      return { ok: false, reason: `the build in ${target} is still running: its heartbeat moved while this one checked, perhaps in another window or on another machine whose clock differs — wait for it to finish, or pick an empty or new folder` };
+    }
   }
   if (!planBefore && planIn(target)) {
     return { ok: false, reason: `another build finished a tutorial in ${target} while this one was ${meanwhile} — it is left as it is; pick an empty or new folder to build another` };
@@ -1292,6 +1309,13 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
     if (!marker) return ended('while this window waited for it');
   }
   if (running(marker)) return declined(`a build in ${target} is running ${runningWhere()}, so it is not offered here`);
+  // T-121: a build this reader calls interrupted by its heartbeat alone is read again once, after one heartbeat of this
+  // process's own monotonic time, before it is offered: a live build elsewhere, whose clock differs, beats in that time.
+  if (onlyItsHeartbeatSaysDead(marker as unknown as Record<string, unknown>)) {
+    const gone = await confirmNotRunning(() => readMarker(target) as unknown as Record<string, unknown> | null, marker as unknown as Record<string, unknown>, ctx.readerClock, ctx.isCancelled);
+    if (gone === 'cancelled') return undefined; // the learner's own Cancel: nothing to say
+    if (!gone) return declined(`a build in ${target} is running ${runningWhere()}, so it is not offered here`);
+  }
 
   // The phase is shown only when it is one a build writes: a marker is a file in the learner's folder, and its
   // words reach a notification, where a link is live (T-120 review; T-72's rule).

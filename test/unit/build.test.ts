@@ -24,7 +24,9 @@ import {
   type ExecFileLike, type FsWriteOps, type GitRunner, type InterpretCostLike,
 } from '../../src/start/build.js';
 import { offThreadCore } from '../../src/start/off-thread.js';
-import { emptyRequest, MARKER_FILE, pidSpace, pidSpaceFor, samePidSpace, unfinishedBuildIn, validateRequest, type BuildRequest } from '../../src/start/request.js';
+import {
+  emptyRequest, HEARTBEAT_MS, MARKER_FILE, pidSpace, pidSpaceFor, samePidSpace, unfinishedBuildIn, validateRequest, type BuildRequest, type ReaderClock,
+} from '../../src/start/request.js';
 
 const CORE_ROOT = resolveCoreRoot('../repo-tour', process.cwd());
 
@@ -76,7 +78,23 @@ function baseContext(overrides: Partial<BuildContext> = {}): BuildContext {
     provider: 'claude',
     model: defaultModel,
     cachedOnly: true,
+    readerClock: instantReaderClock(), // T-121: a planted stale beat is read again at once, not after 30 real seconds
     ...overrides,
+  };
+}
+
+/**
+ * A reader clock (T-121) on which a heartbeat passes at once: `sleep` moves its monotonic time on by what it is asked
+ * and resolves. `onSleep` runs at each sleep, with the time slept so far, so a test can have a live build beat during
+ * the reader's wait. `slept()` says how much monotonic time the reader waited.
+ */
+function instantReaderClock(onSleep?: (sleptMs: number) => void): ReaderClock & { slept(): number } {
+  let t = 5_000;
+  let slept = 0;
+  return {
+    monotonic: () => t,
+    sleep: (ms) => { t += ms; slept += ms; onSleep?.(slept); return Promise.resolve(); },
+    slept: () => slept,
   };
 }
 
@@ -612,6 +630,51 @@ suite('T-71 re-review: the marker of a build another window may be running', () 
     assert.equal(asked, 1, 'a build silent for 10 minutes on another machine should be offered');
     assert.equal(outcome?.declined, true); // T-120: a decline, said
     assert.equal(readMarker(target)?.id, 'on-a-laptop', 'Discard deleted the marker of a build that had just beaten again');
+  });
+
+  // T-121: another machine's build whose clock is behind this one's (or this reader's is ahead, or it just woke):
+  // its beats read as 10 minutes old here while it runs. Each new beat is STILL "stale" by this clock, so only a
+  // change can show it is alive: the marker is read again after one heartbeat of the reader's own monotonic time.
+  const skewed = { id: 'clock-behind', pid: 4242, host: 'another-machine', startedAt: new Date(Date.now() - 900_000).toISOString() };
+  const beatAt = (agoMs: number): Partial<BuildMarker> => ({ ...skewed, heartbeatAt: new Date(Date.now() - agoMs).toISOString() });
+
+  test('T-121: a press over a build whose beat reads stale here, but moves within one heartbeat of this reader\'s monotonic time, is refused and leaves its marker alone', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, beatAt(600_000));
+    assert.equal(unfinishedBuildIn(target), 'build-again', 'the premise: by this clock, the beat is stale');
+    const clock = instantReaderClock((sleptMs) => { if (sleptMs >= HEARTBEAT_MS / 2) markerOf(target, request, beatAt(570_000)); }); // it beats, 30 s on
+    const phases: string[] = [];
+    const outcome = await buildFromRequest(request, baseContext({ readerClock: clock, onPhase: (p) => { phases.push(p); } }));
+    assert.equal(outcome.ok, false, 'a build went over a build that beat while it checked');
+    assert.equal(outcome.reason, `the build in ${target} is still running: its heartbeat moved while this one checked, perhaps in another window or on another machine whose clock differs — wait for it to finish, or pick an empty or new folder`);
+    assert.deepEqual(phases, [], 'a second build ran there');
+    assert.equal(readMarker(target)?.id, 'clock-behind', "the other build's marker was overwritten or deleted");
+  });
+
+  test('T-121: a press over a build whose beat stood still for one heartbeat of this reader\'s monotonic time goes over it, after waiting that heartbeat', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, beatAt(600_000));
+    const clock = instantReaderClock();
+    const phases: string[] = [];
+    const outcome = await buildFromRequest(request, baseContext({ readerClock: clock, onPhase: (p) => { phases.push(p); } }));
+    assert.ok(clock.slept() >= HEARTBEAT_MS, `the build went over a stale beat after ${clock.slept()} ms of its monotonic time, not one heartbeat`);
+    assert.equal(outcome.ok, true, outcome.reason);
+    assert.ok(phases.includes('digest'), 'it did not build');
+  });
+
+  test('T-121: the reload prompt does not offer a build whose beat reads stale here but moves within one heartbeat of this reader\'s monotonic time', async () => {
+    const target = tmpDir('build-tutorials-target-');
+    const request = requestFor(makeTsFixture(), target);
+    markerOf(target, request, beatAt(600_000));
+    const clock = instantReaderClock((sleptMs) => { if (sleptMs >= HEARTBEAT_MS / 2) markerOf(target, request, beatAt(570_000)); });
+    let asked = 0;
+    const outcome = await resumeIfMarked(target, { ...baseContext({ readerClock: clock }), confirm: () => { asked += 1; return Promise.resolve('Discard'); } });
+    assert.equal(asked, 0, 'a build that beat while this window looked was offered as interrupted');
+    assert.equal(outcome?.declined, true);
+    assert.equal(outcome?.reason, `a build in ${target} is running elsewhere (in another window, or on another machine), so it is not offered here`);
+    assert.equal(readMarker(target)?.id, 'clock-behind');
   });
 
   test('R2: a tutorial another build finished while this one was fetching is left as it is', async () => {
