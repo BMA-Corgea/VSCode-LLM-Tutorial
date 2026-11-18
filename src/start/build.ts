@@ -20,7 +20,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import { gitAttributesRefusal, hazardousGitAttributes } from './gitattributes.js';
-import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, pidSpace, type BuildRequest } from './request.js';
+import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, PHASES, pidSpace, type BuildRequest } from './request.js';
 import { recordBuiltReference } from '../walk/provenance.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
@@ -834,6 +834,11 @@ export interface BuildContext {
 export interface BuildOutcome {
   ok: boolean;
   cancelled?: boolean;
+  /**
+   * The reload's Resume looked and did nothing (T-120): what it found, or the answer it was given, no longer fit
+   * the folder. `reason` says why, as information: a control that declines in silence is a broken control.
+   */
+  declined?: boolean;
   plan?: BuildPlanLike;
   cost?: InterpretCostLike;
   /** set on a refusal or an error — the same text `onProblem` (panel wiring) shows in the form. */
@@ -1138,6 +1143,11 @@ export function completionMessage(plan: BuildPlanLike, cost: InterpretCostLike):
 
 export interface ResumeContext extends BuildContext {
   now?: () => number;
+  /**
+   * The caller found a fresh marker before it opened the progress this runs under (`resumeOnActivate`). Then a
+   * marker gone by this function's own first read is told, not passed over in silence (T-120 review F3).
+   */
+  markerSeen?: boolean;
   /** Prompts Resume/Discard; `undefined` = dismissed (leaves the marker for next time). */
   confirm(message: string): Promise<'Resume' | 'Discard' | undefined>;
   /** How long to wait for a closing extension host before deciding; `HOST_EXIT_WAIT_MS` when absent. */
@@ -1161,14 +1171,25 @@ const HOST_EXIT_POLL_MS = 200;
  */
 export async function resumeIfMarked(target: string | undefined, ctx: ResumeContext): Promise<BuildOutcome | undefined> {
   if (!target) return undefined;
+  const declined = (reason: string): BuildOutcome => ({ ok: false, declined: true, reason });
+  // A build that went before it could be offered: finished (its tutorial is there, T-120 review F6) or not.
+  const ended = (when: string): BuildOutcome => declined(planIn(target)
+    ? `the build in ${target} finished ${when}, and its tutorial is there: open it with Build Tutorials: Open the walk`
+    : `the build in ${target} ended ${when}, so there is nothing to resume`);
   let marker = readFreshMarker(target, ctx.now ?? Date.now);
-  if (!marker) return undefined;
+  if (!marker) return ctx.markerSeen ? ended('before this window could offer it') : undefined;
   // T-71 re-review R1: a build that may still be running, in this window or another, is not offered.
   const running = (m: BuildMarker): boolean => BUILDING_NOW.has(path.resolve(target)) || markerSaysRunning(m as unknown as Record<string, unknown>, Date.now(), 'not-running');
   // T-71 re-check N1: the build this reload interrupted can still read as running, because its old host
   // is alive while it closes, beating as it goes. Wait for that host to go before deciding. Not for a
   // pid this process itself has, which would never go.
   const closing = (m: BuildMarker): boolean => m.pid !== process.pid && markerHostAlive(m as unknown as Record<string, unknown>);
+  /**
+   * Where a build that reads as running is, for the words (T-120): this window only when this window knows it is
+   * building there. Anything else is "elsewhere": a hostname or a pid space does not say which window or machine
+   * (two machines can share a hostname, one can change its own, an old host can outlast the wait; review F4).
+   */
+  const runningWhere = (): string => (BUILDING_NOW.has(path.resolve(target)) ? 'in this window' : 'elsewhere (in another window, or on another machine)');
   // The marker is read again at every poll: a build that ends, goes or changes hands while this waits
   // decides it at once (the check's note), and so does a Cancel of the progress this runs under.
   if (running(marker) && closing(marker)) {
@@ -1178,22 +1199,31 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
       await new Promise((resolve) => setTimeout(resolve, HOST_EXIT_POLL_MS));
       waitingOn = readFreshMarker(target, ctx.now ?? Date.now);
     }
-    if (ctx.isCancelled?.()) return undefined;
+    if (ctx.isCancelled?.()) return undefined; // the learner's own Cancel: nothing to say
     marker = readFreshMarker(target, ctx.now ?? Date.now);
-    if (!marker) return undefined;
+    if (!marker) return ended('while this window waited for it');
   }
-  if (running(marker)) return undefined;
+  if (running(marker)) return declined(`a build in ${target} is running ${runningWhere()}, so it is not offered here`);
 
-  const answer = await ctx.confirm(`A build for ${target} was interrupted (in progress: ${marker.phase}). Resume it?`);
+  // The phase is shown only when it is one a build writes: a marker is a file in the learner's folder, and its
+  // words reach a notification, where a link is live (T-120 review; T-72's rule).
+  const phase = typeof marker.phase === 'string' && PHASES.includes(marker.phase) ? ` (in progress: ${marker.phase})` : '';
+  const answer = await ctx.confirm(`A build for ${target} was interrupted${phase}. Resume it?`);
+  if (answer !== 'Resume' && answer !== 'Discard') return undefined; // dismissed — leave the marker for next time
   // The answer can come long after the question (review F1): a build may have started there since,
-  // here or in another window. Then neither resume nor discard: that build owns the folder now.
+  // here or in another window. Then neither resume nor discard: that build owns the folder now. Said, not
+  // done in silence (T-120).
+  // A build of this window there now started since the question: the prompt is shown only when this window was
+  // not building there (review F1). Every other change is said without a place this cannot know.
+  if (BUILDING_NOW.has(path.resolve(target))) return declined(`a build started in ${target} in this window since you were asked, so nothing was done`);
   const current = readMarker(target);
-  if (!current || markerKey(current) !== markerKey(marker) || running(current)) return undefined;
+  if (!current) return declined(`the build in ${target} was discarded or finished since you were asked, so nothing was done`);
+  if (markerKey(current) !== markerKey(marker)) return declined(`another build started in ${target} since you were asked, so nothing was done`);
+  if (running(current)) return declined(`the build in ${target} started running again since you were asked, so nothing was done`);
   if (answer === 'Discard') {
     deleteMarker(target, marker);
     return undefined;
   }
-  if (answer !== 'Resume') return undefined; // dismissed — leave the marker for next time
 
   // Every finished interpretation is cached by content hash, so re-running from the start —
   // simpler and more honest than trying to resume mid-phase — is cheap, not wasteful.
