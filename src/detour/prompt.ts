@@ -101,7 +101,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { unsafeRelativePathReason } from '../relative-path.js';
 import { MAX_OPTION_TEXT, MAX_PAGE_TEXT, MAX_PROMPT_TEXT, Outbound } from '../tutor/context.js';
-import type { PlanLike, StepKind, StepLike } from '../walk/model.js';
+import { roadItsCodeFollows, whyOfStep, type PlanLike, type StepKind, type StepLike } from '../walk/model.js';
 import { resolveInsideTarget } from '../walk/paths.js';
 import { DETOUR_LIMITS, type Detour, type DetourFile, type DetourRefusal, type DetourStop } from './types.js';
 
@@ -205,6 +205,12 @@ function jsonBlock(entries: Array<[string, string]>): string {
 /** The label and consequence of the road the author actually took, as one budgeted line —
  *  both halves out of `Outbound.options`, so the cap cannot fire on one and not the other. */
 function authorRoad(step: StepLike): string {
+  // T-22 (code review SF1): a re-derived step has no author, and "not recorded" would be false for it.
+  if (step.derivedFrom !== undefined) {
+    const road = step.decision.options.find((o) => o.id === roadItsCodeFollows(step));
+    const named = road === undefined ? '' : `, following "${Outbound.text(road.label, MAX_PROMPT_TEXT)} — ${Outbound.text(road.consequence, MAX_PROMPT_TEXT)}"`;
+    return `No author: a model wrote this step's code${named}.`;
+  }
   const taken = Outbound.options(step).options.find((o) => o.taken);
   return taken === undefined ? NO_AUTHOR_CHOICE : `${taken.label} — ${taken.consequence}`;
 }
@@ -232,7 +238,7 @@ export function detourPrompt(step: StepLike, plan: PlanLike, refName: unknown): 
 
   const concept = jsonBlock([
     ['theDecisionTheLearnerIsStuckOn', Outbound.text(step.decision.question, MAX_PROMPT_TEXT)],
-    ['whyItWasMadeThatWay', Outbound.text(step.decision.why, MAX_PROMPT_TEXT)],
+    ['whyItWasMadeThatWay', Outbound.text(step.derivedFrom === undefined ? step.decision.why : whyOfStep(step), MAX_PROMPT_TEXT)],
     ['whatTheAuthorChose', authorRoad(step)],
   ]);
 

@@ -13,23 +13,42 @@
 
 import type { DerivedNode } from './types.js';
 
+/** All the arithmetic needs of a node: what it is called, and what it stands on. */
+export type GraphNode = Pick<DerivedNode, 'path' | 'dependsOn'>;
+
 /**
  * Every node whose `dependsOn` chain reaches `decision` — NOT including the decision itself. A
  * decision is not "downstream of itself": its own answer changing is the input, and counting it
  * would let a derivation that changes nothing but `chosen` look as though it had responded.
  */
-export function downstreamOf(nodes: readonly DerivedNode[], decision: string): Set<string> {
-  const out = new Set<string>();
-  // Plan order is a topological order (every dependency is an earlier node), so one forward pass
-  // sees each node after everything it depends on.
+export function downstreamOf(nodes: readonly GraphNode[], decision: string): Set<string> {
+  // Along the edges backwards, from the decision, so the answer does not depend on the order the
+  // nodes come in. Mode A's plans are in topological order, but a real repository's are not: repo-tour
+  // breaks an import cycle by listing a file before a file it imports (T-22's code review, MF2), and a
+  // single forward pass then missed it. On a plan in topological order the two give the same set.
+  // Appended in place: copying the list on every edge was quadratic in fan-in, and a chapter's shape step
+  // stands under every file in its chapter (2.2 s at 20,000 files, on the extension host's thread).
+  const dependents = new Map<string, string[]>();
   for (const n of nodes) {
-    if (n.dependsOn.some((d) => d === decision || out.has(d))) out.add(n.path);
+    for (const d of n.dependsOn) {
+      const list = dependents.get(d);
+      if (list === undefined) dependents.set(d, [n.path]);
+      else list.push(n.path);
+    }
+  }
+  const out = new Set<string>();
+  const stack = [...(dependents.get(decision) ?? [])];
+  while (stack.length > 0) {
+    const p = stack.pop()!;
+    if (p === decision || out.has(p)) continue;
+    out.add(p);
+    stack.push(...(dependents.get(p) ?? []));
   }
   return out;
 }
 
 /** `paths` and everything they depend on, transitively. */
-export function ancestorsOf(nodes: readonly DerivedNode[], paths: Iterable<string>): Set<string> {
+export function ancestorsOf(nodes: readonly GraphNode[], paths: Iterable<string>): Set<string> {
   const byPath = new Map(nodes.map((n) => [n.path, n] as const));
   const out = new Set<string>();
   const stack = [...paths];
@@ -47,7 +66,7 @@ export function ancestorsOf(nodes: readonly DerivedNode[], paths: Iterable<strin
  * it, the walked `prefix` even where it IS downstream, and every ancestor of the prefix (a walked
  * step's foundations cannot be pulled out from under it). The rest of its downstream is replaced.
  */
-export function keptBy(nodes: readonly DerivedNode[], decision: string, prefix: Iterable<string>): { kept: Set<string>; replaced: Set<string> } {
+export function keptBy(nodes: readonly GraphNode[], decision: string, prefix: Iterable<string>): { kept: Set<string>; replaced: Set<string> } {
   const downstream = downstreamOf(nodes, decision);
   const anchored = ancestorsOf(nodes, prefix);
   const kept = new Set<string>();
@@ -65,7 +84,7 @@ export function keptBy(nodes: readonly DerivedNode[], decision: string, prefix: 
  * Under the honesty rule each new step is then given these as dependencies too, because it was
  * shown them.
  */
-export function externalDependencies(nodes: readonly DerivedNode[], decision: string, replaced: ReadonlySet<string>): string[] {
+export function externalDependencies(nodes: readonly GraphNode[], decision: string, replaced: ReadonlySet<string>): string[] {
   const inside = ancestorsOf(nodes, [decision]);
   const out: string[] = [];
   for (const n of nodes) {
@@ -88,7 +107,7 @@ export function externalDependencies(nodes: readonly DerivedNode[], decision: st
  * the walk's Next follows plan order, so Next can step back into an earlier chapter's group. The
  * walk still runs, in plan order. Whether that is acceptable is T-22's to rule on.
  */
-export function insertInOrder(kept: readonly DerivedNode[], fresh: readonly DerivedNode[]): DerivedNode[] {
+export function insertInOrder<T extends GraphNode>(kept: readonly T[], fresh: readonly T[]): T[] {
   const out = [...kept];
   // Where the last fresh node went: a later fresh node never jumps ahead of an earlier one, since
   // the model's own order among them is a teaching order too.

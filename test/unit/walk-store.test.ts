@@ -340,6 +340,23 @@ suite('a malformed check verdict is dropped, not drawn as a failure (T-5 code re
 });
 
 suite('saveProgress — this extension\'s one write into a learner\'s folder', () => {
+  // T-22's security review, F1, for the walk's other writer: a repository can ship `.repo-tour/build` as a link.
+  test('a build folder that is a link to somewhere else is not written through', () => {
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-store-elsewhere-'));
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-store-linked-'));
+    try {
+      writeFixtureTarget(elsewhere);
+      fs.mkdirSync(path.join(target, '.repo-tour'));
+      fs.symlinkSync(buildDir(elsewhere), buildDir(target));
+      const plan = loadPlan(target);
+      assert.throws(() => saveProgress(target, fixtureProgress(plan)), /build folder is a link to somewhere else/);
+      assert.equal(fs.existsSync(path.join(buildDir(elsewhere), 'progress.json')), false, 'nothing was written where the link points');
+    } finally {
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
   test('what was saved is what loads back', () => {
     const target = fixtureTarget();
     const plan = loadPlan(target);

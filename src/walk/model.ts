@@ -33,10 +33,10 @@ export interface ProgressStep {
    * The option the LEARNER chose at this step, when they chose one (T-21, T-10 E1) — an option id
    * of this step. Absent means the learner has not chosen, and the step stands as the plan has it.
    *
-   * It lives HERE, in progress, not in `plan.json`: the plan is repo-tour's output and the walk
-   * never writes it (one writer per file — the foreman's ruling at T-21's gate). The session
-   * overlays it onto `decision.chosen` (`withChosen`) in the plan every consumer is handed, which
-   * is where the replan (T-22) reads it. Latest wins until T-22 lands.
+   * It lives HERE so it can be overlaid (`withChosen`) on any plan the walk is handed. A replan
+   * that lands (T-22) also writes it into the new plan's `decision.chosen`, because a plan version
+   * has to say by itself what it was derived with; this field is written then too, and only then,
+   * so the two agree. A press that did not land leaves no trace here.
    */
   chosen?: string;
 }
@@ -83,6 +83,8 @@ export interface StepLike {
   scaffold: { loadBearing: RangeLike[]; boilerplate: RangeLike[] };
   dependsOn: string[];
   witness: { sha: string | null; date: string | null; subject: string | null };
+  /** T-22: the step whose decision produced this one. Set only on a step a re-plan wrote, which has no author. */
+  derivedFrom?: string;
 }
 
 export interface ChapterLike {
@@ -96,6 +98,153 @@ export interface PlanLike {
   chapters: ChapterLike[];
   steps: StepLike[];
   [key: string]: unknown;
+}
+
+/** One re-plan on the record, in the plan it produced (T-22), oldest first. */
+export interface PlanDivergence {
+  stepId: string;
+  /** the option id taken */
+  answer: string;
+  /** walked steps that stood on the old road, by id, in plan order (the M1 warning) */
+  staleDependents: string[];
+  /** steps that stood on the old road and were kept on it, not walked, because a walked step stands on them, by id, in
+   *  plan order (the stopped re-review's NF3). Absent when there are none. */
+  keptOnOldRoad?: string[];
+  at: string;
+  /** which tree in the `derived/` store holds this plan's re-derived files; absent while none was ever written */
+  tree?: string;
+  /** `false` when nothing was re-derived: every later step that stood on the old road was already walked
+   *  (T-22's code review, MF1). Absent means it was re-planned. */
+  replanned?: false;
+}
+
+/**
+ * The store path of the tree this plan's re-derived files live in, or `undefined` for a plan that
+ * has not diverged. The plan names its own tree so one atomic write of `plan.json` is the whole
+ * switch: a plan can never be paired with another plan's code, whatever a crash interrupted.
+ * `plan.json` can be edited by hand, so this reads it as `unknown`, and the caller proves the path.
+ */
+export function treeNamedBy(plan: PlanLike): string | undefined {
+  const all: unknown = plan['divergences'];
+  if (!Array.isArray(all)) return undefined;
+  const last: unknown = all[all.length - 1];
+  const tree = typeof last === 'object' && last !== null ? (last as { tree?: unknown }).tree : undefined;
+  return typeof tree === 'string' && tree.length > 0 ? tree : undefined;
+}
+
+/**
+ * The reason a plan gives at a decision is the reason for the road it RECOMMENDS: repo-tour's `why` is
+ * why the author did it their way, and a derived node's is why its `recommended` option is the one.
+ * Sent beside any other road it argues for the road not taken, and a model asked for that road's code
+ * follows the reason over the choice: T-22's live run asked for "Scan the ranges one by one" with "Binary
+ * search on a sorted flat array of [start, end] pairs." as the why, and got a binary search. So another
+ * road goes out with a sentence that says whose road it is, and the reason stays with its own road.
+ */
+export function whyForRoad(why: string, chosenId: string, recommendedId: string, recommendedLabel: string | undefined): string {
+  if (chosenId === recommendedId) return why;
+  const named = recommendedLabel === undefined ? '' : ` ("${recommendedLabel}")`;
+  return `The learner chose this road instead of the recommended one${named}. The plan's reason for the recommended road does not apply to this one.`;
+}
+
+
+/**
+ * The road a step's code follows: what a re-plan derived it with (`decision.chosen`), else the one it
+ * recommends. Only a re-derived step's code follows `chosen`; an author's step is the author's road.
+ */
+export function roadItsCodeFollows(step: StepLike): string {
+  return step.derivedFrom !== undefined && step.decision.chosen !== null ? step.decision.chosen : step.decision.authorChoice;
+}
+
+/** The step's `why`, sent only beside the road it was written for (`whyForRoad`): a re-derived step's code may follow another. */
+export function whyOfStep(step: StepLike): string {
+  const why = typeof step.decision.why === 'string' ? step.decision.why : '';
+  if (step.derivedFrom === undefined) return why;
+  return whyForRoad(why, roadItsCodeFollows(step), step.decision.authorChoice, step.decision.options.find((o) => o.id === step.decision.authorChoice)?.label);
+}
+
+/**
+ * Whether anything later stands on this step: a step whose `dependsOn` names it, or, for a chapter's shape
+ * step, a file in that chapter (the edge the engine adds, `graphOf` in `../derive/diverge.ts`).
+ */
+export function stepHasDependents(plan: PlanLike, stepId: string): boolean {
+  // Total over a hand-edited plan: the page asks this of every chapter step it draws (`pressRules`).
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  const step = steps.find((s) => s?.id === stepId);
+  if (step === undefined) return false;
+  return steps.some((s) => s?.id !== stepId && ((Array.isArray(s?.dependsOn) && s.dependsOn.includes(stepId)) || (step.kind === 'shape' && s?.kind === 'file' && s.chapter === step.chapter)));
+}
+
+/**
+ * T-22 (the re-review's R3 and R1, ruled 2026-11-11: one writer per file). The step that writes each file of this
+ * plan: the re-derived `file` step at it, else the author's `file` step.
+ *
+ * A re-plan that rewrites a file takes it over from the steps the author had at it. At a press on a symbol step the
+ * file's own step comes first in plan order, so it is walked and stays (T-23: a walked step is never removed or
+ * rewritten), and so do the file's walked symbol steps. Each keeps its own record exactly as the learner left it
+ * (walked, its verdict, its commit), and from the press on it writes, outlines and checks nothing for the file: the
+ * step that writes it now does, and its roads are chosen there. Total over a hand-edited plan: of two re-derived file
+ * steps at one file, the later in plan order writes it.
+ */
+function byOrdinal(plan: PlanLike): StepLike[] {
+  return Array.isArray(plan.steps) ? plan.steps.filter((s) => typeof s === 'object' && s !== null).sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0)) : [];
+}
+
+export function fileWriters(plan: PlanLike): Map<string, StepLike> {
+  const steps = byOrdinal(plan);
+  const authors = new Map<string, StepLike>();
+  const derived = new Map<string, StepLike>();
+  for (const s of steps) {
+    const file: unknown = s?.target?.file;
+    if (s?.kind !== 'file' || typeof file !== 'string') continue;
+    if (s.derivedFrom !== undefined) derived.set(file, s);
+    else if (!authors.has(file)) authors.set(file, s);
+  }
+  for (const [file, s] of derived) authors.set(file, s);
+  return authors;
+}
+
+/** The re-derived step that writes this step's file now, when that is another step (see `fileWriters`). */
+export function takenOverBy(plan: PlanLike, step: StepLike): StepLike | undefined {
+  return takenOverIn(fileWriters(plan), step);
+}
+
+/** `takenOverBy`, with the writers worked out once by a caller that asks about many steps. */
+export function takenOverIn(writers: ReadonlyMap<string, StepLike>, step: StepLike): StepLike | undefined {
+  if (step.kind === 'shape' || typeof step.target?.file !== 'string') return undefined;
+  const writer = writers.get(step.target.file);
+  return writer !== undefined && writer.id !== step.id && writer.derivedFrom !== undefined ? writer : undefined;
+}
+
+/** The steps whose file `writer` has taken over (see `fileWriters`), in plan order. */
+export function stepsTakenOverBy(plan: PlanLike, writer: StepLike): StepLike[] {
+  const writers = fileWriters(plan);
+  return byOrdinal(plan).filter((s) => takenOverIn(writers, s)?.id === writer.id);
+}
+
+/** T-22: the plan's own record of the last re-plan decided at this step, if it has one. */
+export function divergenceAt(plan: PlanLike, stepId: string): { answer: string | undefined; staleDependents: string[]; keptOnOldRoad: string[]; replanned: boolean } | undefined {
+  const all: unknown = plan['divergences'];
+  if (!Array.isArray(all)) return undefined;
+  for (let i = all.length - 1; i >= 0; i -= 1) {
+    const entry: unknown = all[i];
+    if (typeof entry !== 'object' || entry === null || (entry as { stepId?: unknown }).stepId !== stepId) continue;
+    const stale: unknown = (entry as { staleDependents?: unknown }).staleDependents;
+    const kept: unknown = (entry as { keptOnOldRoad?: unknown }).keptOnOldRoad;
+    const answer: unknown = (entry as { answer?: unknown }).answer;
+    return {
+      answer: typeof answer === 'string' ? answer : undefined,
+      staleDependents: Array.isArray(stale) ? stale.filter((id): id is string => typeof id === 'string') : [],
+      keptOnOldRoad: Array.isArray(kept) ? kept.filter((id): id is string => typeof id === 'string') : [],
+      replanned: (entry as { replanned?: unknown }).replanned !== false,
+    };
+  }
+  return undefined;
+}
+
+/** The steps this learner has walked: done, or before where they stand now (T-22's definition). */
+export function walkedSteps(plan: PlanLike, progress: Progress): Set<string> {
+  const here = currentStep(plan, progress)?.ordinal ?? -Infinity;
+  return new Set(plan.steps.filter((s) => s.ordinal < here || progress.steps[s.id]?.status === 'done').map((s) => s.id));
 }
 
 /** A brand-new build's progress: nothing done yet, parked on the plan's first step (by
@@ -157,6 +306,15 @@ export function markDone(progress: Progress, stepId: string): Progress {
 export function setDial(progress: Progress, stepId: string, dial: Dial): Progress {
   const existing = progress.steps[stepId];
   return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, dial } } };
+}
+
+/** The learner's choice at a step, dropped: the step stands as the plan has it (the re-check's C2). */
+export function clearChosen(progress: Progress, stepId: string): Progress {
+  const existing = progress.steps[stepId];
+  if (existing?.chosen === undefined) return progress;
+  const { chosen: _dropped, ...rest } = existing;
+  void _dropped;
+  return { ...progress, steps: { ...progress.steps, [stepId]: rest } };
 }
 
 export function setChosen(progress: Progress, stepId: string, optionId: string): Progress {
@@ -247,6 +405,38 @@ export interface OptionsTable {
   diverged: boolean;
   /** One per row: a press there can be taken, so the page draws a control and the session accepts it. */
   choosable: boolean[];
+  /** The road this step is on can itself be pressed: it is a choice no re-plan followed (`PressRules`, the re-review's R11). */
+  replansOn: boolean;
+  /**
+   * The author's row, when the road the step is on is such a choice: the walk never left the author's road, so a press
+   * there drops the choice and asks nothing (the re-check's C2: it re-planned the author's road, and replaced the
+   * author's code). -1 otherwise.
+   */
+  backTo: number;
+}
+
+/**
+ * T-22: what a press on a step's roads may do beyond T-21's table, read from the plan the step is in. Decided once,
+ * here, for the page that draws the controls and the session that takes the press, so the two cannot disagree.
+ */
+export interface PressRules {
+  /** The step that writes this step's file now (`takenOverBy`): no road of this step is pressed (the re-review's R3). */
+  takenOverBy?: StepLike;
+  /**
+   * A choice no re-plan followed, at a step something stands on, re-plans when its own road is pressed (the re-review's
+   * R11). The page says such a choice "was not re-planned" (SF4), and every folder walked before T-22 can hold one in
+   * `progress.json`. A choice at a chapter step nothing stands on has nothing to re-plan: it stays recorded.
+   */
+  replansOwnRoad: boolean;
+}
+
+export function pressRules(plan: PlanLike, step: StepLike): PressRules {
+  const writer = takenOverBy(plan, step);
+  // No re-plan on record here, or one that followed another road than the one marked as the learner's (the re-check's
+  // C8: a progress write that failed after the plan's, or a hand edit).
+  const record = divergenceAt(plan, step.id);
+  const replansOwnRoad = (record === undefined || record.answer !== step.decision.chosen) && !(step.kind === 'shape' && !stepHasDependents(plan, step.id));
+  return { ...(writer === undefined ? {} : { takenOverBy: writer }), replansOwnRoad };
 }
 
 /**
@@ -266,7 +456,7 @@ export interface OptionsTable {
  * Total over whatever `plan.json` said: every field is read defensively, because the types above
  * are a cast over `JSON.parse`.
  */
-export function optionsTable(step: Pick<StepLike, 'id' | 'decision'>): OptionsTable {
+export function optionsTable(step: Pick<StepLike, 'id' | 'decision'>, rules?: PressRules): OptionsTable {
   const decision = step.decision as Partial<StepLike['decision']> | undefined;
   const all = Array.isArray(decision?.options) ? decision.options : [];
 
@@ -291,15 +481,20 @@ export function optionsTable(step: Pick<StepLike, 'id' | 'decision'>): OptionsTa
   const chosen = decision?.chosen;
   const learners = isOptionKey(chosen) ? keys.indexOf(chosen) : -1;
   const on = learners !== -1 ? learners : author;
-  const canPress = rows.length >= 2 && typeof step.id === 'string' && step.id !== '';
+  const diverged = learners !== -1 && learners !== author;
+  // T-22: a step whose file another step writes now offers no road (R3); a choice no re-plan followed offers its own (R11).
+  const canPress = rows.length >= 2 && typeof step.id === 'string' && step.id !== '' && rules?.takenOverBy === undefined;
+  const replansOn = canPress && diverged && rules?.replansOwnRoad === true && keys[on] !== null;
   return {
     rows,
     omitted: all.length - rows.length,
     keys,
     author,
     on,
-    diverged: learners !== -1 && learners !== author,
-    choosable: keys.map((key, row) => canPress && key !== null && row !== on),
+    diverged,
+    choosable: keys.map((key, row) => canPress && key !== null && (row !== on || replansOn)),
+    replansOn,
+    backTo: replansOn && author !== -1 && author !== on && keys[author] !== null ? author : -1,
   };
 }
 

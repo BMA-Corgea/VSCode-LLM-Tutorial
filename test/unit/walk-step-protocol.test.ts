@@ -62,12 +62,13 @@ interface Calls {
   startDetour: number;
   regenerateDetour: number;
   returnFromDetour: number;
+  cancelReplan: number;
 }
 
 function noCalls(): Calls {
   return {
     goTo: [], openFile: 0, runCheck: 0, reproduce: 0, persistDial: [], choose: [], refuseStaleChoice: [], persistSkin: [], ask: [],
-    cancelAsk: 0, clearConversation: 0, startDetour: 0, regenerateDetour: 0, returnFromDetour: 0,
+    cancelAsk: 0, clearConversation: 0, startDetour: 0, regenerateDetour: 0, returnFromDetour: 0, cancelReplan: 0,
   };
 }
 
@@ -92,6 +93,7 @@ function fakeEffects(): { effects: StepEffects; calls: Calls } {
     startDetour: () => { calls.startDetour += 1; },
     regenerateDetour: () => { calls.regenerateDetour += 1; },
     returnFromDetour: () => { calls.returnFromDetour += 1; },
+    cancelReplan: () => { calls.cancelReplan += 1; },
   };
   return { effects, calls };
 }
@@ -268,6 +270,19 @@ suite('handleStepMessage — dial:set / skin:set (persist, reply with nothing)',
 });
 
 // ── the gate: nothing reaches handleStepMessage unparsed ────────────────────────────────────
+
+suite('replan:cancel — stopping a re-plan (T-22)', () => {
+  test('it parses with nothing in it, and a payload is ignored rather than trusted', () => {
+    assert.deepEqual(parseStepMessage({ type: 'replan:cancel' }), { type: 'replan:cancel' });
+    assert.deepEqual(parseStepMessage({ type: 'replan:cancel', payload: { stepId: 'x' } }), { type: 'replan:cancel' });
+  });
+
+  test('it asks the session to stop, and nothing else', () => {
+    const { effects, calls } = fakeEffects();
+    handleStepMessage(stateAt('st-2-file-parse'), { type: 'replan:cancel' }, effects);
+    assert.deepEqual(calls, { ...noCalls(), cancelReplan: 1 });
+  });
+});
 
 suite('step:choose — the learner takes a road (T-21)', () => {
   const HERE = 'st-4-symbol-render';

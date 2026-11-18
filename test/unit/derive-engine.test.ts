@@ -519,6 +519,17 @@ suite('replanPlan — a changed answer re-derives what it reaches, and nothing e
     assert.equal(second.state.files['core/tally.mjs'], OBJECT_TALLY);
   });
 
+  // T-22's live run found this in the seed adapter; Mode A asks for the decision's code the same way.
+  test('the answer is not argued for with the reason for the recommended road', async () => {
+    const { model } = await replanned();
+    const asks = model.asked.filter((a) => a.task === 'code' && (a.input['node'] as { path: string }).path === 'core/tally.mjs');
+    const node = asks[asks.length - 1]!.input['node'] as { chosen: { label: string }; why: string };
+    assert.equal(node.chosen.label, 'An object that remembers', 'discriminates: this is the code asked for after the answer');
+    assert.ok(!node.why.includes('A pure function is the simplest thing'), `the reason for the recommended road is not sent beside another: ${JSON.stringify(node.why)}`);
+    const first = asks[0]!.input['node'] as { why: string };
+    assert.equal(first.why, 'A pure function is the simplest thing that can be tested.', 'on the road it was written for, the reason is sent');
+  });
+
   test('every step the decision does not reach is kept exactly: id, decision, target, scaffold, dependsOn', async () => {
     const { first, second } = await replanned();
     for (const file of ['core', 'cli']) assert.equal(stepContent(second.plan, file), stepContent(first.plan, file), file);

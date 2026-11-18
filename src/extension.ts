@@ -29,11 +29,13 @@ import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
 import { readSkin } from './skins.js';
 import { StepDecorator } from './walk/editor.js';
 import { resolveInsideTarget } from './walk/paths.js';
-import { planEnds } from './walk/model.js';
-import { WalkSession, type WalkAdapters, type WalkView } from './walk/session.js';
+import { planEnds, takenOverBy } from './walk/model.js';
+import { WalkSession, type Replanner, type WalkAdapters, type WalkView } from './walk/session.js';
 import { StepViewProvider } from './walk/step-panel.js';
 import { WalkStatusBar } from './walk/status.js';
-import { hasPlan, loadPlan, loadProgress, loadRequest, saveProgress } from './walk/store.js';
+import { divergePlan } from './derive/diverge.js';
+import { DERIVED_TREES_DIR } from './derive/storage.js';
+import { hasPlan, loadPlan, loadProgress, loadRequest, saveDivergedPlan, saveProgress } from './walk/store.js';
 import { believeRequest } from './walk/provenance.js';
 import { dialCoreFor, type DialCore } from './dial/core.js';
 import { identityConfigured, NO_IDENTITY_NOTE } from './dial/commit.js';
@@ -487,10 +489,11 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     setTree: (view) => walkTree?.setView(view),
     setPanel: (view) => { walkPanel?.setView(view); setEndsContext(view); },
     setStatus: (text) => walkStatus?.setText(text),
-    revealEditor: (view) => { void walkDecorator?.revealStep(target, view.step); },
+    // A step whose file a re-plan has taken over paints none of its lines (T-22, the re-review's R3): they are the author's.
+    revealEditor: (view) => { void walkDecorator?.revealStep(target, view.step, { decorate: takenOverBy(view.plan, view.step) === undefined }); },
     clearEditor: () => walkDecorator?.clear(),
     // The one place focus is taken: the learner pressed *Open the file* and asked to go there.
-    openFile: (view) => { void walkDecorator?.revealStep(target, view.step, { preserveFocus: false }); },
+    openFile: (view) => { void walkDecorator?.revealStep(target, view.step, { preserveFocus: false, decorate: takenOverBy(view.plan, view.step) === undefined }); },
     // Closed over `target`, which is the only reason this adapter can answer the containment
     // half at all — `WalkAdapters.fileExists` is handed an absolute path and nothing else.
     fileExists: (absPath) => isOpenableFile(target, absPath),
@@ -498,8 +501,9 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     loadProgress,
     // T-92: `request.json` is believed only on the build's own record in this extension's storage,
     // asked before the store resolves anything. A folder whose `.repo-tour/` came with it is walked,
-    // and reads no reference at all.
-    loadRequest: (t) => believeRequest(t, context.globalStorageUri.fsPath, loadRequest),
+    // and reads no reference at all. T-22: behind that, a plan's re-derived code has to be proved to be
+    // in this store (the folder is the extension's to know); `believeRequest` keeps the tree it names.
+    loadRequest: (t, plan) => believeRequest(t, context.globalStorageUri.fsPath, (target) => loadRequest(target, { plan, store: path.join(context.globalStorageUri.fsPath, DERIVED_TREES_DIR) })),
     saveProgress,
 
     // ── T-5: what the dial needs from the outside world ──────────────────────────────────
@@ -535,6 +539,8 @@ function walkAdaptersFor(context: vscode.ExtensionContext, target: string): Walk
     // ── T-6: the tutor ───────────────────────────────────────────────────────────────────
     tutorCore: () => tutorCoreNow(context),
     tutorSettings: tutorSettingsNow,
+    // ── T-22: the re-plan ─────────────────────────────────
+    replanner: () => replannerFor(context, target),
 
     // ── T-7: the detour ──────────────────────────────────────────────────────────────────
     //
@@ -744,6 +750,41 @@ function tutorSettingsNow(): { provider: string; model: string; timeoutMs: numbe
   };
 }
 
+/**
+ * T-22: the one question of a re-plan may take this long. A whole file can be a long answer, and
+ * this is the figure T-17's live derivation was proved with. `boundedTimeoutMs` still caps it.
+ */
+const REPLAN_QUESTION_TIMEOUT_MS = 300_000;
+
+/**
+ * What a press of *Choose this instead* needs, or `undefined` when repo-tour cannot be loaded.
+ *
+ * The model is the build's (`resolveLlmSettings`), never the tutor's: a re-plan writes code the
+ * learner will be taught from, and `divergePlan` is handed a resolved name because an empty one
+ * would silently become the provider's strongest. The core is `tutorCoreNow`, so the suites'
+ * stand-in reaches it and no test can spend a token.
+ */
+let replannerStandIn: Replanner | undefined;
+
+async function replannerFor(context: vscode.ExtensionContext, target: string): Promise<Replanner | undefined> {
+  if (replannerStandIn !== undefined) return replannerStandIn;
+  const [core, tutor, dialCore] = await Promise.all([loadCore(configuredRepoTourRoot(context)), tutorCoreNow(context), ensureDialCore(context)]);
+  if (!core.found || tutor === undefined || dialCore === undefined) return undefined;
+  const { provider, model } = resolveLlmSettings(core);
+  return {
+    diverge: (input, hooks) => divergePlan(input, {
+      ledger: hooks.ledger,
+      settings: { core: tutor, provider, model, timeoutMs: REPLAN_QUESTION_TIMEOUT_MS },
+      globalStorageRoot: context.globalStorageUri.fsPath,
+      isCancelled: hooks.isCancelled,
+      onProgress: hooks.onProgress,
+      dialCore,
+      target,
+    }),
+    savePlan: (t, plan, derivedFrom) => { saveDivergedPlan(t, plan, undefined, derivedFrom); },
+  };
+}
+
 function registerWalk(context: vscode.ExtensionContext): void {
   walkTree = new DecisionsTreeProvider();
   walkDecorator = new StepDecorator();
@@ -864,6 +905,8 @@ export interface ExtensionApi {
      * way to intercept it either cannot test the tutor or has to pay to.
      */
     useTutorCore: (core: TutorCore | undefined) => void;
+    /** vscode-test only: what a press re-plans with; `undefined` restores the real one (`replannerFor`). */
+    useReplanner: (replanner: Replanner | undefined) => void;
     /** T-40: the detour narrator, so a test can read what it grants its webview (see `NarratorPanel.webview`). */
     narrator: () => NarratorPanel | undefined;
   };
@@ -968,6 +1011,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
       },
       tutorCore: () => ensureTutorCore(context),
       useTutorCore: (core: TutorCore | undefined) => { tutorCoreStandIn = core; },
+      useReplanner: (replanner: Replanner | undefined) => { replannerStandIn = replanner; },
       narrator: () => walkNarrator,
     },
   };

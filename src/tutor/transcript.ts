@@ -153,8 +153,18 @@ export function sanitizeTranscript(raw: unknown): AskMessage[] {
  * has to be here, upstream of a trimmer that cannot know what it is discarding.
  */
 export function sentTurns(progress: Progress, stepId: string): AskMessage[] {
-  return getTranscript(progress, stepId).filter((m) => m.kind !== 'note');
+  const all = getTranscript(progress, stepId);
+  // A re-plan rewrote this step's code (T-22's code review, N12): what was asked before is about code
+  // that is gone, so it is kept on the page and not sent as history about the new code.
+  const cut = all.map((m) => m.kind === 'note' && (m.content === REPLANNED_TRANSCRIPT_NOTE || m.content === REWRITTEN_TRANSCRIPT_NOTE)).lastIndexOf(true);
+  return all.slice(cut + 1).filter((m) => m.kind !== 'note');
 }
+
+/** The line a landed re-plan writes into its step's conversation (T-22). */
+export const REPLANNED_TRANSCRIPT_NOTE = 'Re-planned from your choice: this step\u2019s code is now the model\u2019s. What was asked here before was about the author\u2019s version.';
+
+/** The same line where the code a press replaced was already the model's: a second press at D, or a step written again. */
+export const REWRITTEN_TRANSCRIPT_NOTE = 'Re-planned from your choice: the model wrote this step\u2019s code again. What was asked here before was about its earlier version.';
 
 /**
  * Every stored turn for one step, or `[]` — for a step id `progress.steps` has no entry for, a
@@ -200,6 +210,22 @@ export function appendTurn(progress: Progress, stepId: string, turn: AskMessage)
     ...progress,
     steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, transcript } },
   };
+}
+
+/**
+ * An answer, appended (T-22's stopped re-review, NF7). When the last turn is the line a re-plan's landing wrote,
+ * the question this answers was sent before that landing, about the code it replaced: the answer goes BEFORE the
+ * line, so the history a later question sends (cut at the line, `sentTurns`) does not carry it either.
+ */
+export function appendAnswer(progress: Progress, stepId: string, answer: AskMessage): Progress {
+  const turns = getTranscript(progress, stepId);
+  const last = turns.at(-1);
+  if (last === undefined || last.kind !== 'note' || (last.content !== REPLANNED_TRANSCRIPT_NOTE && last.content !== REWRITTEN_TRANSCRIPT_NOTE)) {
+    return appendTurn(progress, stepId, answer);
+  }
+  const existing = progress.steps[stepId];
+  const transcript = sanitizeTranscript([...turns.slice(0, -1), answer, last]).slice(-MAX_TURNS_KEPT);
+  return { ...progress, steps: { ...progress.steps, [stepId]: { status: existing?.status ?? 'pending', ...existing, transcript } } };
 }
 
 /**

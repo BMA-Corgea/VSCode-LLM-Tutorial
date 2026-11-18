@@ -40,6 +40,7 @@ import { unsafeRelativePathReason } from '../relative-path.js';
 import {
   DERIVE_LIMITS,
   LANGUAGE_EXTENSION,
+  type CodeLanguage,
   type DeriveLanguage,
   type DeriveRefusal,
   type DerivedChapter,
@@ -167,7 +168,7 @@ export interface DependencyForPrompt extends DecisionForPrompt {
 export interface CodeInput {
   idea: string;
   title: string;
-  language: DeriveLanguage;
+  language: CodeLanguage;
   /** the node's own chapter decision — a file is shaped by the chapter it belongs to */
   chapter: DecisionForPrompt;
   node: DecisionForPrompt & { isEntry: boolean };
@@ -189,6 +190,9 @@ const CODE_INSTRUCTIONS = [
   '',
   DATA_NOT_INSTRUCTIONS,
 ].join('\n');
+
+// `whyForRoad` lives with the plan model (`../walk/model.ts`): the tutor and the detour need it too.
+export { whyForRoad } from '../walk/model.js';
 
 function decisionForPrompt(d: DecisionForPrompt): DecisionForPrompt {
   return {
@@ -233,7 +237,7 @@ export interface ShownStep {
 export interface ReplanInput {
   idea: string;
   title: string;
-  language: DeriveLanguage;
+  language: CodeLanguage;
   entry: string;
   chapters: DerivedChapter[];
   /** the decision the learner answered differently, with their answer */
@@ -445,16 +449,32 @@ const TOOL_OWNED_SEGMENTS: ReadonlySet<string> = new Set(['node_modules', '__pyc
 const TOOL_CONFIG_FILE = /^(?:[A-Za-z0-9_-]+\.config\.mjs|conftest\.py|setup\.py|noxfile\.py)$/;
 
 /**
+ * What a model-chosen path is held to beyond the shared lexical rule. Mode A's values are the
+ * default. A replan over a real repository (T-22) passes its own: the model names a chapter by a
+ * short alias, and the alias stands for a real directory, or for none (`@misc` has no folder).
+ */
+export interface PathRules {
+  /** The directory a chapter's files must lie in, or `null` when the chapter has no folder. */
+  chapterDir(chapter: string): string | null;
+  /** The extensions a file may end in. Absent means the language's one extension (Mode A). */
+  extensions?: readonly string[];
+  /** How deep a path may go. Absent means Mode A's limit; a real repository's tree goes deeper. */
+  maxSegments?: number;
+}
+
+export const MODE_A_PATHS: PathRules = { chapterDir: (chapter) => chapter };
+
+/**
  * Why `p` may not be this file step's path, or `null`. The shared lexical rule first (the
  * detour's attack list), then Mode A's own: inside its chapter's directory, and the language's
  * one extension. Exported so the cache's read path and the tree writer apply the SAME rule rather
  * than a looser second copy of it (T-7: a cache is a second parser).
  */
-export function unsafeDerivedFileReason(p: unknown, chapter: string, language: DeriveLanguage): string | null {
+export function unsafeDerivedFileReason(p: unknown, chapter: string, language: CodeLanguage, rules: PathRules = MODE_A_PATHS): string | null {
   const lexical = unsafeRelativePathReason(p, {
     folder: 'reference tree',
     maxChars: DERIVE_LIMITS.maxPathChars,
-    maxSegments: DERIVE_LIMITS.maxPathSegments,
+    maxSegments: rules.maxSegments ?? DERIVE_LIMITS.maxPathSegments,
   });
   if (lexical !== null) return lexical;
   const file = p as string;
@@ -463,10 +483,13 @@ export function unsafeDerivedFileReason(p: unknown, chapter: string, language: D
   if (TOOL_CONFIG_FILE.test(segments[segments.length - 1] ?? '')) {
     return "is named like a tool's configuration, which that tool would run in this folder without anyone starting the app";
   }
-  if (!file.startsWith(`${chapter}/`)) return `is not inside its chapter's directory, "${chapter}"`;
-  const extension = LANGUAGE_EXTENSION[language];
-  if (!file.endsWith(extension) || file.length === `${chapter}/`.length + extension.length) {
-    return `is not a ${language} file (its name must end in ${extension})`;
+  const dir = rules.chapterDir(chapter);
+  if (dir !== null && !file.startsWith(`${dir}/`)) return `is not inside its chapter's directory, "${chapter}"`;
+  const extensions = rules.extensions ?? [LANGUAGE_EXTENSION[language as DeriveLanguage]];
+  const extension = extensions.find((e) => file.endsWith(e));
+  const prefix = dir === null ? 0 : dir.length + 1;
+  if (extension === undefined || file.length === prefix + extension.length) {
+    return `is not a ${language} file (its name must end in ${extensions.join(' or ')})`;
   }
   return null;
 }
@@ -476,7 +499,7 @@ export function unsafeDerivedFileReason(p: unknown, chapter: string, language: D
  * shape here (strings, no repeats); whether each path names an EARLIER step is a question about
  * the whole plan, answered by `validatePlan`.
  */
-export function parseNode(raw: unknown, index: number, language: DeriveLanguage): DerivedNode | DeriveRefusal {
+export function parseNode(raw: unknown, index: number, language: CodeLanguage, rules: PathRules = MODE_A_PATHS): DerivedNode | DeriveRefusal {
   const where = `step ${index + 1}`;
   if (!isRecord(raw)) return refuse(`${where} is ${describe(raw)}, not an object`);
   const kind = raw['kind'];
@@ -490,7 +513,7 @@ export function parseNode(raw: unknown, index: number, language: DeriveLanguage)
   if (kind === 'shape') {
     if (p !== chapter) return refuse(`${where} is a shape step, so its path must be its chapter's key ${quote(chapter)}, not ${quote(p)}`);
   } else {
-    const unsafe = unsafeDerivedFileReason(p, chapter, language);
+    const unsafe = unsafeDerivedFileReason(p, chapter, language, rules);
     if (unsafe !== null) return refuse(`${where}'s path ${quote(p)} ${unsafe}`);
   }
   const question = line(raw, 'question', DERIVE_LIMITS.maxQuestionChars, where);
@@ -628,7 +651,7 @@ export interface ReplanReply {
 }
 
 /** The replan reply, each part checked on its own; `engine.ts` merges it and runs `validatePlan`. */
-export function parseReplanReply(textIn: unknown, language: DeriveLanguage): ReplanReply | DeriveRefusal {
+export function parseReplanReply(textIn: unknown, language: CodeLanguage, rules: PathRules = MODE_A_PATHS): ReplanReply | DeriveRefusal {
   const obj = readReplyObject(textIn, 'replan');
   if (isRefusal(obj)) return obj;
   const rawChapters = obj['chapters'] ?? [];
@@ -645,7 +668,7 @@ export function parseReplanReply(textIn: unknown, language: DeriveLanguage): Rep
   if (rawSteps.length > DERIVE_LIMITS.maxSteps) return refuse(`the replan returns ${rawSteps.length} steps, more than ${DERIVE_LIMITS.maxSteps}`);
   const nodes: DerivedNode[] = [];
   for (const [i, s] of rawSteps.entries()) {
-    const parsed = parseNode(s, i, language);
+    const parsed = parseNode(s, i, language, rules);
     if (isRefusal(parsed)) return parsed;
     nodes.push(parsed);
   }

@@ -98,6 +98,26 @@ suiteTeardown(() => {
 
 // ── outbound: what the prompt says ──────────────────────────────────────────────────────────
 
+suite('detourPrompt — a step a re-plan wrote (T-22, AC7)', () => {
+  test('it names no author\'s road', () => {
+    const { plan, step } = planAndStep();
+    const taken = step.decision.options.find((o) => o.taken)!;
+    const prompt = detourPrompt({ ...step, derivedFrom: step.id }, plan, 'sql-gauntlet');
+    // T-22's code review, SF1: "not recorded" was false; its author's choice is recorded, and the code follows another road.
+    assert.ok(!prompt.includes('this plan does not record which option the author took'));
+    assert.ok(prompt.includes('No author: a model wrote this step\'s code'));
+    assert.ok(!prompt.includes(`"whatTheAuthorChose": ${JSON.stringify(`${taken.label} \u2014 ${taken.consequence}`)}`));
+    assert.ok(detourPrompt(step, plan, 'sql-gauntlet').includes(taken.label), 'discriminates: an untouched step names it');
+  });
+
+  test('on the learner\'s road it names the road the code follows, and not the reason for the author\'s (code review SF1)', () => {
+    const { plan, step } = planAndStep();
+    const prompt = detourPrompt({ ...step, derivedFrom: step.id, decision: { ...step.decision, chosen: 'stream' } }, plan, 'sql-gauntlet');
+    assert.ok(prompt.includes('following \\"Stream the response as it is produced'), 'the road the code follows is named');
+    assert.ok(!prompt.includes(step.decision.why), 'the reason for the road the learner turned down is not sent');
+  });
+});
+
 suite('detourPrompt — the concept it states (AC1)', () => {
   test('the version is 1, and it is a number the cache can key on', () => {
     // `store.ts` caches by step id + THIS constant; a prompt whose text changed under an
