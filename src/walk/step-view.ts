@@ -176,8 +176,9 @@ import { codicon } from '../webview/codicons.js';
 import { renderPage, type PageAssets } from '../webview/page.js';
 import { escapeAttr, escapeHtml } from '../webview/html.js';
 import type { AskMessage } from '../tutor/core.js';
-import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, optionsTable, planEnds, type OptionLike, type StepLike, type WhySource } from './model.js';
+import { FALLBACK_DIAL, MAX_OPTIONS_RENDERED, divergenceAt, fileWriters, optionsTable, planEnds, pressRules, stepsTakenOverBy, takenOverIn, type OptionLike, type PlanLike, type StepLike, type WhySource } from './model.js';
 import { MAX_ASK_TEXT, type StepViewState } from './step-protocol.js';
+import { DERIVED_CODE_MISSING_MESSAGE } from './reference.js';
 
 export { MAX_OPTIONS_RENDERED };
 
@@ -245,8 +246,52 @@ export const AUTHOR_BADGE = 'What the author did';
 export const CHOSEN_BADGE = 'Your choice';
 /** T-21: the control on every option that is not the road this step is on. */
 export const CHOOSE_LABEL = 'Choose this instead';
-/** T-21: the line that says a choice has changed nothing else yet (T-22 is the replan). */
-export const DIVERGED_NOTE = 'You chose a different road. The rest of the walk still follows the author \u2014 re-planning from your choice isn\u2019t built yet.';
+/** T-22: what the row a re-plan recommended is called on a step that has no author. */
+export const SUGGESTED_BADGE = 'Suggested';
+/** T-22: on the step whose decision a re-plan followed. */
+export const REPLANNED_NOTE = 'The walk was re-planned from your choice at this step, by the model. What it re-derived is no longer the author\u2019s.';
+/** T-22: on a step a re-plan wrote from nothing. */
+export const WRITTEN_BY_THE_MODEL_NOTE = 'The model wrote this step when you took a different road. There is no author\u2019s version of it.';
+/** T-22: the control that stops a re-plan in flight. */
+export const REPLAN_CANCEL_LABEL = 'Cancel re-planning';
+/** T-22: how many walked steps the warning names before it counts the rest. */
+export const MAX_STALE_NAMED = 8;
+/** T-22 (M1): the warning on D's page, naming the walked steps that stood on the old road. */
+export function staleStepsNote(names: readonly string[], omitted: number): string {
+  const list = names.join(', ') + (omitted > 0 ? `, and ${omitted} more` : '');
+  const one = names.length + omitted === 1;
+  return `You have already walked ${one ? 'a step' : 'steps'} that stood on the old road: ${list}. Your files are as you left them, so ${one ? 'it' : 'they'} may need revisiting.`;
+}
+/** T-21, T-22: a choice at a chapter step that nothing later stands on, so there was nothing to re-plan. */
+export const DIVERGED_NOTE = 'You chose a different road here. Nothing later depended on it, so the rest of the walk stands.';
+/** T-22 (code review SF4): a choice with no re-plan on record, at a step something does stand on (a T-21-era choice). */
+export const NOT_REPLANNED_NOTE = 'You chose a different road here, but the walk was not re-planned from it: this step and the steps after it still follow the author\u2019s road.';
+/** T-22 (code review MF1): a re-plan was recorded at this step and re-derived nothing: everything that stood on it was walked. */
+export const RECORDED_NOTE = 'Your choice at this step is recorded. Every later step that stood on the old road is one you have already walked, so nothing was re-planned.';
+/** T-22 (the stopped re-review's NF3): the same record, when some of what stood on it is kept because a walked step stands on it. */
+export const RECORDED_KEPT_NOTE = 'Your choice at this step is recorded. Nothing was re-planned: every later step that stood on the old road is one you have walked, or one a step you have walked stands on.';
+/** T-22 (the re-review's R11): the control on a road a choice took that no re-plan followed. */
+export const REPLAN_OWN_ROAD_LABEL = 'Re-plan from this road';
+/** T-22 (the re-check's C2): the control on the author's road, beside such a choice: it drops the choice, for nothing. */
+export const BACK_TO_AUTHOR_LABEL = 'Back to the author\u2019s road';
+/** T-22 (the re-check's C8): a re-plan on record here followed another road than the one marked as the learner's. */
+export const REPLANNED_ELSEWHERE_NOTE = 'The walk was re-planned at this step from another road than the one marked as your choice. Re-plan from this road to follow yours.';
+/** T-22 (the re-review's R3, ruled 2026-11-11: one writer per file): on a step whose file a re-plan has taken over. */
+export function takenOverNote(writer: string): string {
+  return `This file is written and checked at ${writer} now: the model rewrote it when you took a different road. This step does neither any more, and its roads can no longer be chosen.`;
+}
+/** T-22 (R3): on the step that writes a file now, naming the steps that hold the author's version of it. */
+export function takesOverNote(names: readonly string[], omitted: number): string {
+  const list = names.join(', ') + (omitted > 0 ? `, and ${omitted} more` : '');
+  const one = names.length + omitted === 1;
+  return `The author\u2019s version of this file is at ${list}. This step writes and checks the file now, and ${one ? 'that step no longer does' : 'those steps no longer do'}.`;
+}
+/** T-22 (the stopped re-review's NF3): steps kept on the old road, not walked, because a walked step stands on them. */
+export function keptOnOldRoadNote(names: readonly string[], omitted: number): string {
+  const list = names.join(', ') + (omitted > 0 ? `, and ${omitted} more` : '');
+  const one = names.length + omitted === 1;
+  return `The re-plan kept ${list} on the old road, because ${one ? 'a step you have walked stands on it' : 'steps you have walked stand on them'}.`;
+}
 
 // ── the render caps (T-4 security review, finding 3) ───────────────────────────────────────
 // See the file header for the threat: `webview.html = ...` is synchronous on the extension
@@ -461,6 +506,11 @@ export function detourElsewhereMessage(stepNumber: number | undefined): string {
 export const TUTOR_EMPTY_MESSAGE =
   'Nothing asked about this step yet. The tutor is told this step’s question, its options, why the author chose as they did, and how your file differs from theirs.';
 
+/** T-22 (code review, N3): the same line on a step whose code a re-plan wrote, which has no author's code to compare
+ *  with and is not sent the author's reason (`src/tutor/context.ts`: the road its code follows is named instead). */
+export const TUTOR_EMPTY_DERIVED_MESSAGE =
+  'Nothing asked about this step yet. The tutor is told this step’s question, its options, which road its code follows, and how your file differs from the code the model wrote.';
+
 /** The placeholder in the box — and the one place the Enter/Shift+Enter rule is stated to the
  *  person it is a rule for. A keyboard shortcut nobody is told about is not a feature. */
 export const ASK_PLACEHOLDER = 'Ask about this step — Enter sends, Shift+Enter for a new line';
@@ -613,6 +663,7 @@ section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; col
 .options-outcome { margin:0 0 10px; }
 .options-refused { color:var(--kw); font-size:12px; margin:0 0 6px; }
 .options-diverged { font-size:12px; margin:0; }
+.options-replanning { font-size:12px; margin:0 0 6px; }
 .why-text { margin:0 0 4px; }
 .why-source, .witness-text { color:var(--muted); font-size:12px; margin:0; }
 /* The honest count under a capped options list — see MAX_OPTIONS_RENDERED. Styled like the
@@ -711,7 +762,7 @@ main, section, .option { min-width:0; }
 .note, .hint, .check-summary, .check-reason, .check-aside, .check-name, .shape-line,
 .write-note, .reproduce, .turn-text, .tutor-note, .tutor-unreachable, .tutor-empty,
 .tutor-elsewhere, .tutor-spend, .detour-note, .detour-open, .detour-hint,
-.options-refused, .options-diverged { overflow-wrap:anywhere; }
+.options-refused, .options-diverged, .options-replanning { overflow-wrap:anywhere; }
 
 /* The sidebar is narrow — often ~300px, not the 640px an editor tab gets. Below that, 48px of
    horizontal padding stops eating a sixth of the width. */
@@ -767,7 +818,7 @@ main, section, .option { min-width:0; }
    and an empty line must not grow a stray mark. */
 .hint:not(:empty), .write-note:not(:empty), .tutor-note:not(:empty), .detour-note:not(:empty),
 .detour-open:not(:empty), .tutor-elsewhere:not(:empty), .tutor-spend:not(:empty),
-.options-refused:not(:empty), .options-diverged:not(:empty) {
+.options-refused:not(:empty), .options-diverged:not(:empty), .options-replanning:not(:empty) {
   border-left:2px solid var(--status-news); padding-left:8px;
 }
 .notice-only h1 { font-size:13px; font-weight:600; margin:0 0 16px; }
@@ -818,8 +869,12 @@ main, section, .option { min-width:0; }
  *     label was not a string, in a render nobody was listening to (security, finding 5).
  *     `planText`/`planId` make every read total.
  */
-function optionsHtml(step: StepLike, choiceNote: unknown): string {
-  const table = optionsTable(step);
+function optionsHtml(step: StepLike, choiceNote: unknown, plan: PlanLike, replanning: StepViewState['replanning'], codeMissing: boolean): string {
+  // T-22: the rules the session takes a press by (`pressRules`), so a control is drawn exactly where a press is taken.
+  const table = optionsTable(step, pressRules(plan, step));
+  // T-22: a step a re-plan wrote from nothing has no author, so its recommended row cannot be
+  // called the author's. The step a re-plan was decided AT keeps its author's row, which is true.
+  const noAuthor = step.derivedFrom !== undefined && step.derivedFrom !== step.id;
 
   const items = table.rows
     .map((opt, i) => {
@@ -835,11 +890,12 @@ function optionsHtml(step: StepLike, choiceNote: unknown): string {
       // choice is still marked — `.option-taken` carries the accent border and highlight —
       // and the badge comes back the moment a plan has options whose labels differ.
       const authorBadge = isAuthors && label.trim().toLowerCase() !== AUTHOR_BADGE.toLowerCase()
-        ? `<span class="badge badge-taken">${AUTHOR_BADGE}</span>`
+        ? `<span class="badge badge-taken">${noAuthor ? SUGGESTED_BADGE : AUTHOR_BADGE}</span>`
         : '';
       const chosenBadge = isOn && table.diverged ? `<span class="badge badge-chosen">${CHOSEN_BADGE}</span>` : '';
+      // On the road the step is on, the control re-plans from it (the re-review's R11); on any other, it takes that road.
       const choose = table.choosable[i] === true
-        ? `<button type="button" class="btn option-choose" id="choose-${i}" data-option-id="${escapeAttr(id)}">${CHOOSE_LABEL}</button>`
+        ? `<button type="button" class="btn option-choose" id="choose-${i}" data-option-id="${escapeAttr(id)}">${isOn ? REPLAN_OWN_ROAD_LABEL : i === table.backTo ? BACK_TO_AUTHOR_LABEL : CHOOSE_LABEL}</button>`
         : '';
       return `<li class="${cls}" data-option-id="${escapeAttr(id)}">${authorBadge}${chosenBadge}<span class="option-label">${escapeHtml(label)}</span><p class="option-consequence">${escapeHtml(planText(opt?.consequence))}</p>${choose}</li>`;
     })
@@ -851,11 +907,78 @@ function optionsHtml(step: StepLike, choiceNote: unknown): string {
   const refusedNote = typeof choiceNote === 'string' && choiceNote !== ''
     ? `<p class="options-refused" id="choice-note" role="note">${escapeHtml(planText(choiceNote))}</p>`
     : '';
-  const divergedNote = table.diverged ? `<p class="options-diverged" role="note">${escapeHtml(DIVERGED_NOTE)}</p>` : '';
-  const outcome = refusedNote !== '' || divergedNote !== ''
-    ? `<div class="options-outcome" id="outcome-choice">${refusedNote}${divergedNote}</div>`
-    : '';
+  const { road, stale } = roadNotes(step, plan);
+  const roadNote = road === '' ? '' : `<p class="options-diverged" role="note">${escapeHtml(road)}</p>`;
+  const writtenNote = noAuthor ? `<p class="options-diverged" role="note">${escapeHtml(WRITTEN_BY_THE_MODEL_NOTE)}</p>` : '';
+  const staleNote = stale === '' ? '' : `<p class="options-stale options-diverged" role="note">${escapeHtml(stale)}</p>`;
+  const running = replanning === undefined
+    ? ''
+    // T-40's spinner, as beside the tutor's and the detour's waits: a re-plan is a wait for the model too.
+    : `<p class="options-replanning" id="replan-status" role="status">${codicon('loading', 'lead', { spin: true })}${escapeHtml(planText(replanning.message))} <button type="button" class="btn" id="btn-replan-cancel">${REPLAN_CANCEL_LABEL}</button></p>`;
+  // T-22 (code review SF5): a re-derived step whose code is gone says so where its road is drawn.
+  const missingNote = codeMissing ? `<p class="options-refused options-missing" role="note">${escapeHtml(DERIVED_CODE_MISSING_MESSAGE)}</p>` : '';
+  const notes = `${running}${refusedNote}${missingNote}${roadNote}${writtenNote}${staleNote}`;
+  const outcome = notes !== '' ? `<div class="options-outcome" id="outcome-choice">${notes}</div>` : '';
   return `${outcome}<ul class="options">${items}</ul>${omittedNote}`;
+}
+
+/**
+ * T-22: the lines under a step's roads, decided once for the page and its repaint key (`stepRenderKey`). `road` says
+ * what became of a choice at this step, or that the file was taken over (the re-review's R3). `stale` names the steps
+ * on the old road: the steps that hold the author's version of a file this step writes now (R3), the walked steps that
+ * stood on the old road (M1), and the steps kept on it for a walked step (NF3).
+ */
+function roadNotes(step: StepLike, plan: PlanLike): { road: string; stale: string } {
+  const rules = pressRules(plan, step);
+  const table = optionsTable(step, rules);
+  const record = divergenceAt(plan, step.id);
+  // Each line from what is known: a record and what it did, or what the plan itself shows follows this step
+  // ("nothing later depended on it" is never concluded from a record that is merely absent: code review SF4).
+  const road = rules.takenOverBy !== undefined
+    ? takenOverNote(stepName(rules.takenOverBy))
+    : record !== undefined && table.replansOn
+      ? REPLANNED_ELSEWHERE_NOTE
+      : record !== undefined
+        ? (record.replanned ? REPLANNED_NOTE : record.keptOnOldRoad.length > 0 ? RECORDED_KEPT_NOTE : RECORDED_NOTE)
+        : table.diverged ? (rules.replansOwnRoad ? NOT_REPLANNED_NOTE : DIVERGED_NOTE) : '';
+  return { road, stale: staleNoteText(plan, step, record) };
+}
+
+/** How the page names a step: its place, and its file or chapter. */
+function stepName(s: StepLike): string {
+  // Total over a hand-edited plan: a step with no target is named by its place alone (the re-check's security note).
+  return `step ${planText(String(s.ordinal))} (${planText(s.target?.file)})`;
+}
+
+/** T-22 (M1, R3, NF3): the sentences naming the steps on the old road, or '' when there are none. */
+function staleNoteText(plan: PlanLike, step: StepLike, record: { staleDependents: string[]; keptOnOldRoad: string[] } | undefined): string {
+  const known = new Map(plan.steps.map((s) => [s.id, s] as const));
+  const writers = fileWriters(plan);
+  const sentences: string[] = [];
+  // R3: the steps whose file this step writes now. Not "may need revisiting": they write nothing for it any more.
+  const taken = step.derivedFrom === undefined ? [] : stepsTakenOverBy(plan, step);
+  const takenIds = new Set(taken.map((s) => s.id));
+  if (taken.length > 0) {
+    const named = taken.slice(0, MAX_STALE_NAMED).map(stepName);
+    sentences.push(takesOverNote(named, taken.length - named.length));
+  }
+  const listed = (ids: readonly string[]): StepLike[] => ids.flatMap((id) => { const s = known.get(id); return s === undefined || takenIds.has(id) ? [] : [s]; });
+  // A walked step whose file another step writes now is revisited there, so that step is named with it.
+  const withWriter = (s: StepLike): string => {
+    const writer = takenOverIn(writers, s);
+    return writer === undefined ? stepName(s) : `step ${planText(String(s.ordinal))} (${planText(s.target?.file)}, written at step ${planText(String(writer.ordinal))} now)`;
+  };
+  const walked = listed(record?.staleDependents ?? []);
+  if (walked.length > 0) {
+    const named = walked.slice(0, MAX_STALE_NAMED).map(withWriter);
+    sentences.push(staleStepsNote(named, walked.length - named.length));
+  }
+  const kept = listed(record?.keptOnOldRoad ?? []);
+  if (kept.length > 0) {
+    const named = kept.slice(0, MAX_STALE_NAMED).map(stepName);
+    sentences.push(keptOnOldRoadNote(named, kept.length - named.length));
+  }
+  return sentences.join(' ');
 }
 
 /** `NO_HISTORY_MESSAGE`, verbatim, when there is nothing to show — gated on `sha`, matching
@@ -1197,9 +1320,9 @@ function answerHtml(text: unknown): string {
  * option by moving it into the window, and this one keeps the newest turns by taking the window
  * from the other end — same rule, different end of the list.
  */
-function transcriptHtml(turns: AskMessage[]): string {
+function transcriptHtml(turns: AskMessage[], rederived: boolean): string {
   const all = Array.isArray(turns) ? turns : [];
-  if (all.length === 0) return `<p class="tutor-empty">${escapeHtml(TUTOR_EMPTY_MESSAGE)}</p>`;
+  if (all.length === 0) return `<p class="tutor-empty">${escapeHtml(rederived ? TUTOR_EMPTY_DERIVED_MESSAGE : TUTOR_EMPTY_MESSAGE)}</p>`;
 
   const shown = all.slice(-MAX_TURNS_RENDERED);
   const omitted = all.length - shown.length;
@@ -1301,7 +1424,8 @@ function tutorHtml(state: StepViewState): string {
     : `<button type="button" class="btn" id="btn-tutor-ask">${escapeHtml(ASK_BUTTON_LABEL)}</button>`;
 
   return `<section class="tutor"><h2>${escapeHtml(TUTOR_HEADING)}</h2>`
-    + transcriptHtml(state.transcript)
+    // Re-derived exactly when the tutor's context says so (`derivedFrom` set: D itself, or a step the model wrote).
+    + transcriptHtml(state.transcript, state.step?.derivedFrom !== undefined)
     + note
     + unreachable
     + elsewhereHtml(state)
@@ -1552,7 +1676,7 @@ function bodyHtml(state: StepViewState, skins: SkinsModule): string {
 
   <section>
     <h2>Options</h2>
-    ${optionsHtml(step, state.choiceNote)}
+    ${optionsHtml(step, state.choiceNote, state.plan, state.replanning, state.derivedCodeMissing === true)}
   </section>
 
   <section>
@@ -1830,6 +1954,8 @@ const CLIENT_SCRIPT = `
   // Only on the page while the offer stands (see reproduceHtml); \`on\` is null-safe, so the
   // rest of the time this line hooks nothing rather than needing a condition of its own.
   on('btn-reproduce', 'click', function () { post('reproduce:run', {}); });
+  // T-22: on the page only while a re-plan runs; \`on\` is null-safe the rest of the time.
+  on('btn-replan-cancel', 'click', function () { post('replan:cancel', {}); });
 
   // ── T-6: the tutor ────────────────────────────────────────────────────────────────────
 
@@ -2162,6 +2288,14 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
     keyOf(decision.authorChoice),
     keyOf(decision.chosen), // T-21: a choice must repaint, or the press is silent
     keyOf(state.choiceNote ?? null), // T-21: so must a refusal, and a repeat of one (T-15)
+    keyOf(state.step.derivedFrom ?? null), // T-22: the badge and the line follow it
+    state.derivedCodeMissing === true, // T-22: the code it was re-derived to is gone
+    state.replanning ? [keyOf(state.replanning.stepId), keyOf(state.replanning.message)] : null, // T-22: every report changes the page
+    divergenceAt(state.plan, id) !== undefined, // T-22: "the walk was re-planned here"
+    divergenceAt(state.plan, id)?.replanned ?? null, // T-22: or recorded, with nothing re-planned
+    // T-22: every line under the roads (M1, R3, NF3), and which roads take a press (R3, R11)
+    ...((): unknown[] => { const notes = roadNotes(state.step, state.plan); return [keyOf(notes.road), keyOf(notes.stale)]; })(),
+    optionsTable(state.step, pressRules(state.plan, state.step)).choosable,
     keyOf(decision.why, MAX_PLAN_TEXT),
     decision.whySource,
     [keyOf(witness?.sha), keyOf(witness?.subject), keyOf(witness?.date)],

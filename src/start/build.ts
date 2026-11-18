@@ -631,7 +631,7 @@ export function provenBuildDir(target: string): string {
  */
 export interface FsWriteOps {
   mkdirSync(dir: string): void;
-  writeFileSync(file: string, data: string): void;
+  writeFileSync(file: string, data: string | Uint8Array): void;
   renameSync(from: string, to: string): void;
 }
 
@@ -650,6 +650,15 @@ export const realFsWriteOps: FsWriteOps = {
  * mid-write could leave a corrupt plan behind for T-4's walk to trip over.
  */
 export function writeJsonAtomic(filePath: string, value: unknown, ops: FsWriteOps = realFsWriteOps): void {
+  writeAtomic(filePath, JSON.stringify(value, null, 2), ops);
+}
+
+/** The same, for bytes that must land exactly as they are (T-22's plan versions). */
+export function writeBytesAtomic(filePath: string, bytes: Uint8Array, ops: FsWriteOps = realFsWriteOps): void {
+  writeAtomic(filePath, bytes, ops);
+}
+
+function writeAtomic(filePath: string, data: string | Uint8Array, ops: FsWriteOps): void {
   ops.mkdirSync(path.dirname(filePath));
   // The suffix is RANDOM, not a fixed `.tmp` (T-4 security review, finding 4). `writeFileSync`
   // follows symlinks, so a repository that commits `progress.json.tmp` as a symlink pointing
@@ -658,7 +667,7 @@ export function writeJsonAtomic(filePath: string, value: unknown, ops: FsWriteOp
   // the attacker cannot predict cannot be pre-planted, which closes that path without changing
   // the injected `FsWriteOps` shape every caller and test already depends on.
   const tmp = `${filePath}.${randomBytes(6).toString('hex')}.tmp`;
-  ops.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  ops.writeFileSync(tmp, data);
   ops.renameSync(tmp, filePath);
 }
 

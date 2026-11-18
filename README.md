@@ -120,12 +120,20 @@ the thing you got wrong is a tree that tells you nothing.
 - the **question** this step is really answering;
 - the **options** — the one the author chose, marked *What the author did*, and every
   alternative with its consequence spelled out. Each alternative has a **Choose this instead**
-  button: press it and that option becomes the highlighted one, marked *Your choice*, and a line
-  above the list says the rest of the walk still follows the author — re-planning the steps after
-  this one from your choice is not built yet. Your choice is kept with your progress, so it
-  survives a reload; you can change it, or choose the author's option again, at any time. A press
-  the panel cannot take, such as one from a page for a step you have already left, records nothing
-  and says so above the list. A step with only one option offers nothing to choose;
+  button: press it and the steps after this one are re-planned for your choice. A line above the
+  list says what it is doing, with a **Cancel** beside it; when it lands, the option is marked
+  *Your choice* and the steps that stood on the old road are the model's, written for the road you
+  took. Every step the model wrote says so, and none is ever called the author's. The steps you
+  have already walked and the files in your folder are never touched: a walked step that stood on
+  the old road is named on this page, and a re-planned step's code reaches your folder only when
+  you arrive at it, as your dial says. After a press on a step inside a file, that step writes and
+  checks the whole file from then on; the file's own step only shows the author's version. A press
+  asks the model a few questions through the provider you have set, and the page says how many and
+  what they cost. A reload shows
+  the same plan. **The release you can install, v0.1.0, does not re-plan yet:** there a choice is
+  kept and marked *Your choice*, and the rest of the walk follows the author. A press the panel
+  cannot take, such as one from a page for a step you have already left, records nothing and says
+  so above the list. A step with only one option offers nothing to choose;
 - the **why**, with its source named — *from the model, reading the code*, *from the author's
   own comment*, or *not inferable from the source*. You always know whether you are reading
   the author or an inference about them;

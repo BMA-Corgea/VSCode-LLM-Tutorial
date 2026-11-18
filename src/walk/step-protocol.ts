@@ -88,6 +88,10 @@ export function askTooLongMessage(length: number): string {
 }
 
 export interface StepViewState {
+  /** T-22: present while a press of *Choose this instead* is being re-planned (`WalkView.replanning`). */
+  replanning?: { stepId: string; message: string };
+  /** T-22: this re-derived step's code cannot be found (`WalkView.derivedCodeMissing`). */
+  derivedCodeMissing?: true;
   plan: PlanLike;
   progress: Progress;
   /** the CURRENT step, already resolved — `renderStepHtml` never has to re-derive it. */
@@ -273,6 +277,8 @@ export type InboundMessage =
   | { type: 'skin:set'; payload: { skin: string } }
   | { type: 'tutor:ask'; payload: { text: string } }
   | { type: 'tutor:cancel' }
+  // T-22: payload-less: which re-plan is the session's answer, and there is at most one.
+  | { type: 'replan:cancel' }
   | { type: 'tutor:clear' }
   | { type: 'detour:start' }
   | { type: 'detour:regenerate' }
@@ -307,6 +313,8 @@ export interface StepEffects {
   choose(stepId: string, optionId: string): void;
   /** T-21: answers a press from a page drawn for some other step, in words, on the host's current step (`WalkSession.refuseStaleChoice`). */
   refuseStaleChoice(stepId: string): void;
+  /** T-22: stops the re-plan in flight (`WalkSession.cancelReplan`). */
+  cancelReplan(): void;
   persistSkin(name: string): void;
 
   // ── T-6: the tutor ────────────────────────────────────────────────────────────────────
@@ -461,6 +469,10 @@ export function handleStepMessage(state: StepViewState, message: InboundMessage,
       effects.cancelAsk();
       return { state };
     }
+    case 'replan:cancel': {
+      effects.cancelReplan();
+      return { state };
+    }
     case 'detour:start': {
       // No state change and no reply, deliberately — the same routing `step:check` and
       // `tutor:clear` use. What the detour did comes back on the session's own push, as
@@ -501,7 +513,7 @@ export { MAX_OPTION_ID } from './model.js';
 
 const INBOUND_TYPES = [
   'step:next', 'step:prev', 'step:open', 'step:check', 'reproduce:run', 'dial:set', 'step:choose', 'skin:set',
-  'tutor:ask', 'tutor:cancel', 'tutor:clear',
+  'tutor:ask', 'tutor:cancel', 'tutor:clear', 'replan:cancel',
   // T-7. Both are payload-less, and that is the design rather than an omission: WHICH step a
   // detour is for and WHICH one is open are the session's answers, and a payload here would
   // be a webview-supplied key for work the host is about to do on disk — the one shape of
@@ -550,6 +562,7 @@ export function parseStepMessage(raw: unknown): InboundMessage | null {
     case 'step:check':
     case 'reproduce:run':
     case 'tutor:cancel':
+    case 'replan:cancel':
     case 'tutor:clear':
     case 'detour:start':
     case 'detour:regenerate':

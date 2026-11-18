@@ -220,6 +220,35 @@ suite('commitSubject — the one string the panel, the commit, and this suite al
   });
 });
 
+suite('commitSubject — a re-derived step is not the author\'s (T-22, AC7)', () => {
+  const chose = (derivedFrom: string | undefined): StepLike => {
+    const base = fixtureStep();
+    return { ...base, ...(derivedFrom === undefined ? {} : { derivedFrom }), decision: { ...base.decision, chosen: 'inline-in-routes' } };
+  };
+
+  test('the step whose road changed names the road its code now follows', () => {
+    assert.equal(commitSubject(chose('st-2-file-parse')), '2: Why does the tokenizer get its own module? — Tokenize inside the router');
+  });
+
+  test('a step the model wrote names the road it recommended', () => {
+    const base = fixtureStep();
+    assert.equal(commitSubject({ ...base, derivedFrom: 'x', decision: { ...base.decision, chosen: null } }), '2: Why does the tokenizer get its own module? — Split the tokenizer out of the router');
+  });
+
+  // T-22's code review, SF7: back on the author's road the code is still the model's, and repo-tour labels that row
+  // "What the author did"; this subject goes into the learner's own git history.
+  test('a re-derived step back on the author\'s road is not committed as what the author did', () => {
+    const base = fixtureStep();
+    const back = { ...base, derivedFrom: base.id, decision: { ...base.decision, chosen: 'author', options: base.decision.options.map((o) => (o.id === 'author' ? { ...o, label: 'What the author did' } : o)) } };
+    assert.doesNotMatch(commitSubject(back), /What the author did/);
+    assert.equal(commitSubject(back), '2: Why does the tokenizer get its own module? \u2014 the author\u2019s road, as the model re-derived it');
+  });
+
+  test('a choice that re-derived nothing leaves the code the author\'s, and the subject says so', () => {
+    assert.equal(commitSubject(chose(undefined)), '2: Why does the tokenizer get its own module? — Split the tokenizer out of the router');
+  });
+});
+
 suite('ensureRepo — git-inits a folder that is not in a work tree, and only then', () => {
   test('a folder with no .git becomes a repository', async () => {
     const target = tmpDir();

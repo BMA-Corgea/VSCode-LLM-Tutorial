@@ -82,3 +82,23 @@ suite('the replan\'s graph arithmetic, on a graph drawn by hand', () => {
     assert.deepEqual(insertInOrder(kept, fresh).map((n) => n.path), ['a', 'b', 'b/r.mjs', 'a/q.mjs', 'b/z.mjs']);
   });
 });
+
+suite('the graph arithmetic at a real repository\'s size (T-22 re-review)', () => {
+  // A chapter's shape step stands under every file in its chapter (`graphOf` in `diverge.ts`), so one
+  // decision can have as many dependents as the repository has files: T-30 walked one of 20,000. A press
+  // computes the reach on the extension host's thread before the reach limit can refuse, twice
+  // (`keptBy` asks `downstreamOf` again). Copying a node's list of dependents on every edge made that
+  // quadratic in fan-in: about 2.2 s each at 20,000 on a quiet machine, against about 10 ms appended.
+  test('the reach of a decision 20,000 files stand on is found in well under a second', function () {
+    this.timeout(120_000); // so a slow reach fails on the assertion below, with its own message
+    const N = 20_000;
+    const nodes = [{ path: 'chapter', dependsOn: [] as string[] }, ...Array.from({ length: N }, (_, i) => ({ path: `f${i}.ts`, dependsOn: ['chapter'] }))];
+    const start = performance.now();
+    const reach = downstreamOf(nodes, 'chapter');
+    const { replaced } = keptBy(nodes, 'chapter', []);
+    const ms = performance.now() - start;
+    assert.equal(reach.size, N, 'every file is downstream of its chapter');
+    assert.equal(replaced.size, N);
+    assert.ok(ms < 1000, `the reach over a fan-in of ${N} took ${ms.toFixed(0)} ms: it is not linear in fan-in`);
+  });
+});
