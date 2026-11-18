@@ -23,7 +23,7 @@ import {
   buildFromRequest, completionMessage, coreFor, readFreshMarker, readMarker, realGit, resumeIfMarked,
   type BuildContext, type BuildOutcome, type ResumeContext,
 } from './start/build.js';
-import type { BuildRequest } from './start/request.js';
+import { sameRequest, type BuildRequest } from './start/request.js';
 import type { BuildEnding } from './start/protocol.js';
 import { NarratorPanel, detourAdaptersFor } from './detour/panel.js';
 import { readSkin } from './skins.js';
@@ -96,10 +96,22 @@ async function runDoctorCommand(context: vscode.ExtensionContext): Promise<void>
  * finding 1).
  */
 const CURRENT_BUILD_KEY = 'buildTutorials.currentBuild';
+/**
+ * The request the window's last press made, kept beside the bookmark (T-122). From a press to its first marker write
+ * (the fetch, then T-72's check, minutes for a large clone) the folder's marker is still an OLDER build's; a reload in
+ * that time must not offer it as the build the learner pressed. Nothing is written in the folder before the check
+ * (T-72's rule): this record lives in the window's own state.
+ */
+const PRESSED_REQUEST_KEY = 'buildTutorials.pressedRequest';
 
-/** Clears the bookmark unless a marker is still sitting at `target` waiting to be resumed. */
+/** Clears the bookmark, and the request pressed with it, unless a marker is still sitting at `target` waiting to be resumed. */
 async function forgetUnlessResumable(context: vscode.ExtensionContext, target: string): Promise<void> {
-  if (readMarker(target) === null) await context.workspaceState.update(CURRENT_BUILD_KEY, undefined);
+  if (readMarker(target) === null) await forgetBuild(context);
+}
+
+async function forgetBuild(context: vscode.ExtensionContext): Promise<void> {
+  await context.workspaceState.update(CURRENT_BUILD_KEY, undefined);
+  await context.workspaceState.update(PRESSED_REQUEST_KEY, undefined);
 }
 
 /** `buildTutorials.llmModel`'s default is `""`: resolved here from repo-tour's own DEFAULT_MODEL
@@ -215,6 +227,7 @@ export async function runBuild(
   let outcome: BuildOutcome;
   try {
     await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
+    await context.workspaceState.update(PRESSED_REQUEST_KEY, request); // before the build: what this press is (T-122)
     outcome = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
       async (progress, token): Promise<BuildOutcome> => {
@@ -358,8 +371,18 @@ export async function resumeOnActivate(
   const target = context.workspaceState.get<string>(CURRENT_BUILD_KEY);
   if (!target) return;
 
-  if (!readFreshMarker(target)) {
-    await context.workspaceState.update(CURRENT_BUILD_KEY, undefined);
+  const fresh = readFreshMarker(target);
+  if (!fresh) {
+    await forgetBuild(context);
+    return;
+  }
+  // T-122: the marker is an older build's when the press this window made last asked for something else: that press
+  // stopped before it wrote its own (in its fetch, or T-72's check). It is not offered as the build pressed. A window
+  // with no record (from before T-122), or a marker for the very request pressed, goes on as before.
+  const pressed = context.workspaceState.get<BuildRequest>(PRESSED_REQUEST_KEY);
+  if (pressed !== undefined && !sameRequest(pressed, fresh.request)) {
+    deps.tell(`Build Tutorials: the build you pressed for ${target} was interrupted before it began, so nothing was resumed: press Build the plan to start it again`);
+    await forgetBuild(context);
     return;
   }
 
