@@ -180,6 +180,34 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
     });
   }
 
+  // T-61's code review, SF3: code inside a template literal's ${} or an f-string's {} is code, and a wrapped
+  // from-import is one import.
+  const inside: Array<[string, string, CodeLanguage, RegExp]> = [
+    ['src/show.js', 'export const show = (s) => `${eval(s)}`;\n', 'javascript', /calls eval/],
+    ['src/run.js', 'export const run = (s) => `${new Function(s)()}`;\n', 'javascript', /calls Function/],
+    ['app/show.py', 'def show(s):\n    return f"{eval(s)}"\n', 'python', /calls eval/],
+    ['app/run.py', 'from os import (\n    path,\n    system,\n)\n\n\ndef run():\n    system("true")\n', 'python', /os\.system/],
+  ];
+  for (const [file, code, language, said] of inside) {
+    test(`a call inside a template's \${}, an f-string's {}, or a wrapped from-import is read: ${file} (SF3)`, async () => {
+      const reason = await judged(file, code, language, REPO_IMPORTS);
+      assert.ok(reason !== null, `${file} passed the check`);
+      assert.match(reason, said);
+    });
+  }
+
+  test('and the literal text around a field is still text (SF3)', async () => {
+    for (const [file, code, language] of [
+      ['src/greet.js', 'export const greet = (n) => `eval( is ${n}`;\n', 'javascript'],
+      ['src/nested.js', "export const t = (a) => `x${a ? `y${a}` : 'eval('}z`;\n", 'javascript'],
+      ['app/greet.py', 'def greet(n):\n    return f"eval( is {n}"\n', 'python'],
+      ['app/braces.py', 'def show():\n    return f"{{eval(x)}}"\n', 'python'],
+      ['app/inner.py', 'def show(d):\n    return f"{d[\'eval(\']}"\n', 'python'],
+    ] as Array<[string, string, CodeLanguage]>) {
+      assert.equal(await judged(file, code, language, REPO_IMPORTS), null, `${file} was refused`);
+    }
+  });
+
   test('the words are about the model\'s code: a sentence that names one of them in a comment or a string is not refused', async () => {
     const js = "// we do not use child_process or eval( here\nexport const note = 'process.binding( is not called';\n";
     assert.equal(await judged('src/notes.js', js, 'javascript', REPO_IMPORTS), null);

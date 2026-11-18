@@ -341,7 +341,8 @@ export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonl
  *
  * **What it does not refuse, and what it still does.** A definition of one of these names, a name the module binds
  * itself, and a type-only import are not refused (T-61's code review, SF2). JSX text is read as code, so a page whose
- * prose names `eval(` or `Function(` is refused: no lexical reading tells JSX text from code.
+ * prose names `eval(` or `Function(` is refused, and an apostrophe in JSX text opens a string for the rest of its line,
+ * so a call after it on that line is not read (SF3): no lexical reading tells JSX text from code.
  */
 const RUNS_PROGRAMS = 'which starts other programs';
 const RUNS_TEXT = 'which runs text as code';
@@ -517,9 +518,13 @@ function runsAsTheLearner(extract: ExtractLike, content: string, code: string, l
     }
   }
   const bound = language === 'python' ? pythonBoundNames(code) : new Set<string>();
+  // A from-import wrapped in parentheses across lines, as black and ruff write it, is read as one line (SF3).
+  const flat = language === 'python'
+    ? code.replace(/\bfrom(\s+[\w.]+\s+)import\s*\(([^)]*)\)/g, (_m, mod: string, names: string) => `from${mod}import ${names.replace(/\s+/g, ' ')}`)
+    : code;
   for (const { re, name, what } of language === 'python' ? REFUSED_PY_CALLS : REFUSED_JS_CALLS) {
     if (bound.has(name)) continue;
-    if (language === 'python' ? re.test(code) : jsCalls(code, re)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
+    if (language === 'python' ? re.test(flat) : jsCalls(code, re)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
   }
   return null;
 }
