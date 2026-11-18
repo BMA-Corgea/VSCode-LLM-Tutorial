@@ -10,7 +10,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  BUILD_DIR, BUILDING_NOW, DEFAULT_DIAL, HEARTBEAT_STALE_MS, IDEA_FIRST_MESSAGE, MARKER_FILE, emptyRequest, parseGithubUrl, sameRequest, unfinishedBuildIn, validateRequest,
+  BUILD_DIR, BUILDING_NOW, DEFAULT_DIAL, HEARTBEAT_MS, HEARTBEAT_STALE_MS, IDEA_FIRST_MESSAGE, MARKER_FILE, READER_CLOCK, REREAD_AFTER_MS, confirmNotRunning, emptyRequest,
+  markerSaysRunning, onlyItsHeartbeatSaysDead, parseGithubUrl, pidSpace, sameRequest, unfinishedBuildIn, validateRequest, type ReaderClock,
 } from '../../src/start/request.js';
 
 function tmpEmptyDir(): string {
@@ -251,5 +252,97 @@ suite('T-122: the request a press made, and the one a marker carries', () => {
   });
   test('something that is not a request is not the one pressed', () => {
     for (const bad of [undefined, null, 'a string', 42, {}]) assert.equal(sameRequest(pressed, bad), false);
+  });
+});
+
+suite('T-121: a heartbeat is a time on the WRITER\'s clock: one from the future is not trusted, and a stale one is read again by the reader\'s own clock', () => {
+  const NOW = Date.parse('2026-11-17T20:00:00.000Z');
+  const DEAD_PID = 2 ** 22 + 54_321; // above Linux's default pid_max: no process has it
+  const at = (offsetMs: number): string => new Date(NOW + offsetMs).toISOString();
+  /** A marker from another machine (its pid cannot be asked here), so only its heartbeat speaks. */
+  const elsewhere = (fields: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'elsewhere', pid: 4242, host: 'another-machine', startedAt: at(-900_000), phase: 'interpret', request: { ...emptyRequest(), recreate: true }, ...fields,
+  });
+  /** A reader clock on which a heartbeat passes at once; `onSleep` sees the monotonic time slept so far. */
+  function fakeClock(onSleep?: (sleptMs: number) => void): ReaderClock & { slept(): number; sleeps(): number } {
+    let t = 1_000;
+    let slept = 0;
+    let sleeps = 0;
+    return {
+      monotonic: () => t,
+      sleep: (ms) => { t += ms; slept += ms; sleeps += 1; onSleep?.(slept); return Promise.resolve(); },
+      slept: () => slept,
+      sleeps: () => sleeps,
+    };
+  }
+
+  test('a beat from further in the future than the stale window is not trusted (a crashed build whose clock ran ahead); one within it still is', () => {
+    assert.equal(markerSaysRunning(elsewhere({ heartbeatAt: at(24 * 60 * 60 * 1000) }), NOW), false, 'a day ahead kept its folder refused for that day');
+    assert.equal(markerSaysRunning(elsewhere({ heartbeatAt: at(HEARTBEAT_STALE_MS + 1_000) }), NOW), false);
+    assert.equal(markerSaysRunning(elsewhere({ heartbeatAt: at(5_000) }), NOW), true, 'a clock a little ahead is still a live build');
+    assert.equal(markerSaysRunning(elsewhere({ heartbeatAt: at(-5_000) }), NOW), true);
+    assert.equal(onlyItsHeartbeatSaysDead(elsewhere({ heartbeatAt: at(24 * 60 * 60 * 1000) }), NOW), true, 'and it is a heartbeat\'s word: read again before a build goes over it');
+  });
+
+  test('a beat read as stale is read again ONCE, after one HEARTBEAT_MS of the reader\'s monotonic time: one that moved is a live build, whatever either clock says', async () => {
+    const first = elsewhere({ heartbeatAt: at(-600_000) });
+    let reads = 0;
+    let readAfter = -1;
+    const clock = fakeClock();
+    const verdict = await confirmNotRunning(() => { reads += 1; readAfter = clock.slept(); return { ...first, heartbeatAt: at(-570_000) }; }, first, clock);
+    assert.equal(verdict, false, 'a build that beat while the reader waited was called dead');
+    assert.equal(reads, 1, 'read again more or less than once');
+    assert.ok(readAfter >= HEARTBEAT_MS, `read again after ${readAfter} ms of the reader's monotonic time, not one heartbeat`);
+    assert.ok(REREAD_AFTER_MS >= HEARTBEAT_MS + 5_000 && readAfter >= REREAD_AFTER_MS, `no grace for a beat a little late (review S1): ${readAfter} ms`);
+  });
+
+  test('a beat that stood still for that heartbeat: not running, after exactly one wait of one heartbeat and one read', async () => {
+    const first = elsewhere({ heartbeatAt: at(-600_000) });
+    let reads = 0;
+    const clock = fakeClock();
+    assert.equal(await confirmNotRunning(() => { reads += 1; return { ...first }; }, first, clock), true);
+    assert.equal(reads, 1);
+    assert.ok(clock.slept() >= REREAD_AFTER_MS && clock.slept() < REREAD_AFTER_MS + 1_000, `waited ${clock.slept()} ms`);
+    // and a crashed build whose clock ran a day ahead OF THE REAL CLOCK (which the confirm reads; review N1): its beat
+    // never moves, so its folder is free after one wait
+    const ahead = elsewhere({ heartbeatAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() });
+    assert.equal(onlyItsHeartbeatSaysDead(ahead), true);
+    assert.equal(await confirmNotRunning(() => ({ ...ahead }), ahead, fakeClock()), true);
+  });
+
+  test('another build\'s marker there now is not ours to call dead; one that ended or went is', async () => {
+    const first = elsewhere({ heartbeatAt: at(-600_000) });
+    assert.equal(await confirmNotRunning(() => ({ ...first, id: 'a-new-build', heartbeatAt: at(-1_000) }), first, fakeClock()), false);
+    assert.equal(await confirmNotRunning(() => ({ ...first, endedAt: at(-1_000) }), first, fakeClock()), true);
+    assert.equal(await confirmNotRunning(() => null, first, fakeClock()), true);
+  });
+
+  test('a surer word is not waited on: an ended build, a host this machine sees gone, a fresh beat', async () => {
+    for (const sure of [
+      elsewhere({ heartbeatAt: at(-600_000), endedAt: at(-590_000) }),
+      elsewhere({ heartbeatAt: at(-600_000), pid: DEAD_PID, host: os.hostname(), pidSpace: pidSpace() }),
+    ]) {
+      const clock = fakeClock();
+      let reads = 0;
+      assert.equal(onlyItsHeartbeatSaysDead(sure, NOW), false);
+      assert.equal(await confirmNotRunning(() => { reads += 1; return sure; }, sure, clock), true);
+      assert.deepEqual([clock.sleeps(), reads], [0, 0], 'waited on, or read again, though its end was already certain');
+    }
+    assert.equal(onlyItsHeartbeatSaysDead(elsewhere({ heartbeatAt: new Date().toISOString() })), false, 'a fresh beat is running, not dead');
+  });
+
+  test('the reader\'s clock is the monotonic one, never the wall clock a marker is written in (review N2)', () => {
+    const read = READER_CLOCK.monotonic();
+    assert.ok(Math.abs(read - performance.now()) < 1_000, `READER_CLOCK.monotonic() read ${read}, not performance.now()`);
+  });
+
+  test('a Cancel during the wait ends it at once, before the heartbeat has passed', async () => {
+    const first = elsewhere({ heartbeatAt: at(-600_000) });
+    const clock = fakeClock();
+    let reads = 0;
+    const verdict = await confirmNotRunning(() => { reads += 1; return first; }, first, clock, () => clock.sleeps() >= 2);
+    assert.equal(verdict, 'cancelled');
+    assert.equal(reads, 0);
+    assert.ok(clock.slept() < HEARTBEAT_MS, `a Cancel waited ${clock.slept()} ms`);
   });
 });

@@ -21,6 +21,12 @@
 export const DERIVE_PROMPT_VERSION = 2;
 
 /**
+ * How the engine's refusal of a model's file ends (T-61 b): on the author's road, the step keeps it. The walk, which
+ * knows the road, says the other ending when the step is on a road a re-plan took (T-61's code review, SF4).
+ */
+export const KEEPS_AUTHORS_ROAD = 'so this step keeps the author\u2019s road';
+
+/**
  * Every bound the engine applies, in one place, each with the reason for its number. A test
  * holds the parsers and the prompt builders to these values by importing them, never by retyping
  * them (`autodev/instructions/testing-the-shipped-value.md`).

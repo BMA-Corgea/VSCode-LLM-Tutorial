@@ -77,3 +77,66 @@ suite('T-52: the Start form\'s fields in the real host, under System', function 
     }
   });
 });
+
+interface Control { visible: boolean; outline: string }
+interface ControlReading { skin: string | null; want: string; controls: Record<string, Control> }
+
+/**
+ * T-110: each control reached the way a Tab reaches it. A text field always shows `:focus-visible`, and focus moved by
+ * script from an element that showed it shows it too (Chromium's heuristic), so each control is focused from the idea
+ * field. Whether it shows `:focus-visible` is read and asserted, so the outline read is the keyboard one, not a guess.
+ */
+const READ_CONTROLS = `(async () => {
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--vscode-focusBorder)';
+  document.body.appendChild(probe);
+  const want = getComputedStyle(probe).color;
+  probe.remove();
+  const settle = () => new Promise((r) => setTimeout(r, 250)); // the base sheet's own .13 s transition settles
+  const idea = document.getElementById('idea');
+  const controls = [['recreate', document.getElementById('recreate')]];
+  for (const r of document.querySelectorAll('input[type=radio][name=dial]')) controls.push(['dial-' + r.value, r]);
+  controls.push(['skinpick', document.getElementById('skinpick')]);
+  const out = {};
+  for (const [name, el] of controls) {
+    idea.focus();
+    await settle();
+    el.focus();
+    await settle();
+    const cs = getComputedStyle(el);
+    out[name] = { visible: el.matches(':focus-visible'), outline: [cs.outlineStyle, cs.outlineWidth, cs.outlineColor, cs.outlineOffset].join(' ') };
+    el.blur();
+  }
+  return { skin: document.documentElement.getAttribute('data-theme'), want, controls: out };
+})()`;
+
+suite('T-110: the Start form\'s checkbox, dial radios and skin picker in the real host, under System', function () {
+  this.timeout(120_000);
+
+  test('keyboard focus on each draws VS Code\'s 1 px focusBorder outline: just outside the checkbox and radios, inset in the picker', async () => {
+    const ext = vscode.extensions.getExtension<ExtensionApi>('bma-corgea.build-tutorials');
+    assert.ok(ext);
+    const api = await ext.activate();
+    const was = api._context.globalState.get<string>(SKIN_KEY);
+    await api._context.globalState.update(SKIN_KEY, 'system');
+    const screen = await Screen.open(api._context);
+    try {
+      await vscode.commands.executeCommand('buildTutorials.start');
+      const read = screen.reader<ControlReading>(TITLE, READ_CONTROLS);
+      let r = await read();
+      const deadline = Date.now() + 20_000;
+      while (Object.values(r.controls).some((c) => !c.visible) && Date.now() < deadline) { await sleep(300); r = await read(); }
+      assert.equal(r.skin, null, `the form is under System (no data-theme): ${JSON.stringify(r)}`);
+      assert.deepEqual(Object.keys(r.controls).sort(), ['dial-automated', 'dial-manual', 'dial-scaffolded', 'recreate', 'skinpick'], `the five controls: ${JSON.stringify(r)}`);
+      for (const [name, c] of Object.entries(r.controls)) {
+        assert.ok(c.visible, `${name} did not show keyboard focus (:focus-visible), so its outline was not read as a Tab leaves it: ${JSON.stringify(r)}`);
+        const offset = name === 'skinpick' ? '-1px' : '1px';
+        assert.equal(c.outline, `solid 1px ${r.want} ${offset}`, `${name}: the keyboard-focus outline is VS Code's focusBorder: ${JSON.stringify(r)}`);
+      }
+    } finally {
+      screen.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await api._context.globalState.update(SKIN_KEY, was);
+    }
+  });
+});

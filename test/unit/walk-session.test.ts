@@ -2822,9 +2822,9 @@ suite('the dial, the check and the commit (T-5)', () => {
           // The walk is torn down between the question and the answer — the folder was closed,
           // or a rebuild replaced the session — which is the one thing an `await` inside a pass
           // cannot see for itself.
-          confirmOverwrite: async (relPath) => {
+          confirmOverwrite: async (relPath, question) => {
             walk.session?.dispose();
-            return fake.adapters.confirmOverwrite(relPath);
+            return fake.adapters.confirmOverwrite(relPath, question);
           },
         });
         await walk.session.settled();

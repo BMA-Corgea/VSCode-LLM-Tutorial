@@ -20,7 +20,10 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import { gitAttributesRefusal, hazardousGitAttributes } from './gitattributes.js';
-import { ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, parseGithubUrl, PHASES, pidSpace, type BuildRequest } from './request.js';
+import {
+  ATOMIC_TMP, BUILD_DIR, BUILDING_NOW, confirmNotRunning, HEARTBEAT_MS, MARKER_FILE, markerHostAlive, markerSaysRunning, onlyItsHeartbeatSaysDead,
+  parseGithubUrl, PHASES, pidSpace, type BuildRequest, type ReaderClock,
+} from './request.js';
 import { recordBuiltReference } from '../walk/provenance.js';
 
 // ── the core surface this file actually calls (a duck-typed slice, not a full mirror of
@@ -838,6 +841,9 @@ export interface BuildContext {
   /** Swappable filesystem writes — a test makes `renameSync` fail exactly where a crash
    *  would hurt most and asserts what is left on disk. Defaults to `realFsWriteOps`. */
   writeOps?: FsWriteOps;
+  /** The clock a marker read as not running by its heartbeat alone is waited out by before it is read again (T-121):
+   *  this process's monotonic time. A test passes a fake one. Defaults to `READER_CLOCK`. */
+  readerClock?: ReaderClock;
 }
 
 export interface BuildOutcome {
@@ -984,8 +990,11 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
     // running or stopped, and stays with everything beside it, so that window's reload still offers it
     // (T-72 merge check and fix check).
     const there = readMarker(target);
+    // Never on its heartbeat's word alone (T-121 review M1): that compares two clocks, and a build on a machine whose
+    // clock differs can be running. Such a marker is left for the next press or reload, which read it again first.
     if (there && markerBefore && markerKey(there) === markerKey(markerBefore)
-      && !markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) deleteMarker(target, there);
+      && !markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')
+      && !onlyItsHeartbeatSaysDead(there as unknown as Record<string, unknown>)) deleteMarker(target, there);
     if (hazard === 'cancelled') return cancel(target, 'while checking the repository');
     return { ok: false, reason: gitAttributesRefusal(repoRoot, hazard, fromUrl ? 'url' : 'folder') };
   }
@@ -1000,6 +1009,22 @@ async function runThePhases(request: BuildRequest, ctx: BuildContext, marker: Bu
   // one the press already weighed (`unfinishedBuildIn`) before this build began.
   if (there && there.id !== marker.id && markerSaysRunning(there as unknown as Record<string, unknown>, Date.now(), 'not-running')) {
     return { ok: false, reason: `another build started in ${target} while this one was ${meanwhile} — wait for it to finish, or pick an empty or new folder` };
+  }
+  // T-121: a marker this reader calls dead by its heartbeat alone compares two clocks, the writer's and this one, so it is
+  // read again once, after one heartbeat of this process's own monotonic time, before this build goes over it. A live
+  // build beats in that time. The second read is the last thing before the first write, with nothing awaited after it.
+  if (there && there.id !== marker.id && onlyItsHeartbeatSaysDead(there as unknown as Record<string, unknown>)) {
+    ctx.onProgress?.(`checking whether the build that was in ${target} is still running…`);
+    const gone = await confirmNotRunning(() => readMarker(target) as unknown as Record<string, unknown> | null, there as unknown as Record<string, unknown>, ctx.readerClock, ctx.isCancelled);
+    if (gone === 'cancelled') return cancel(target, 'while checking whether the build before it was still running');
+    if (!gone) {
+      // Which it was, in its own words (review S4): another build took the folder meanwhile, or this one beat.
+      const now = readMarker(target);
+      if (now && markerKey(now) !== markerKey(there)) {
+        return { ok: false, reason: `another build started in ${target} while this one was checking whether the build before it was still running — wait for it to finish, or pick an empty or new folder` };
+      }
+      return { ok: false, reason: `the build in ${target} is still running: its heartbeat moved while this one checked, perhaps in another window or on another machine whose clock differs — wait for it to finish, or pick an empty or new folder` };
+    }
   }
   if (!planBefore && planIn(target)) {
     return { ok: false, reason: `another build finished a tutorial in ${target} while this one was ${meanwhile} — it is left as it is; pick an empty or new folder to build another` };
@@ -1292,6 +1317,19 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
     if (!marker) return ended('while this window waited for it');
   }
   if (running(marker)) return declined(`a build in ${target} is running ${runningWhere()}, so it is not offered here`);
+  // T-121: a build this reader calls interrupted by its heartbeat alone is read again once, after one heartbeat of this
+  // process's own monotonic time, before it is offered: a live build elsewhere, whose clock differs, beats in that time.
+  if (onlyItsHeartbeatSaysDead(marker as unknown as Record<string, unknown>)) {
+    ctx.onProgress?.(`checking whether the build in ${target} is still running…`); // up to 35 s: said (review S5)
+    const gone = await confirmNotRunning(() => readMarker(target) as unknown as Record<string, unknown> | null, marker as unknown as Record<string, unknown>, ctx.readerClock, ctx.isCancelled);
+    if (gone === 'cancelled') return undefined; // the learner's own Cancel: nothing to say
+    if (!gone) return declined(`a build in ${target} is running ${runningWhere()}, so it is not offered here`);
+    // What the wait ended on, read again as the host wait above does (review S3): one that finished or went is said so,
+    // never offered as interrupted.
+    const after = readFreshMarker(target, ctx.now ?? Date.now);
+    if (!after) return ended('while this window checked whether it was still running');
+    marker = after;
+  }
 
   // The phase is shown only when it is one a build writes: a marker is a file in the learner's folder, and its
   // words reach a notification, where a link is live (T-120 review; T-72's rule).
@@ -1307,7 +1345,10 @@ export async function resumeIfMarked(target: string | undefined, ctx: ResumeCont
   const current = readMarker(target);
   if (!current) return declined(`the build in ${target} was discarded or finished since you were asked, so nothing was done`);
   if (markerKey(current) !== markerKey(marker)) return declined(`another build started in ${target} since you were asked, so nothing was done`);
-  if (running(current)) return declined(`the build in ${target} started running again since you were asked, so nothing was done`);
+  // A beat that moved since the question is a build that ran again, whatever either clock says (T-121 review S2).
+  if (running(current) || current.heartbeatAt !== marker.heartbeatAt) {
+    return declined(`the build in ${target} started running again since you were asked, so nothing was done`);
+  }
   if (answer === 'Discard') {
     deleteMarker(target, marker);
     return undefined;

@@ -126,13 +126,15 @@ interface Harness {
   session: WalkSession;
   target: string;
   overwriteAsks: string[];
+  /** what each Overwrite question said, in order (T-61) */
+  overwriteQuestions: string[];
   view(): WalkView;
   html(): string;
   /** the options area's notes, as text */
   notes(): string;
 }
 
-function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'], dial: 'manual' | 'scaffolded' | 'automated', learners: Record<string, string> = {}): Harness {
+function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'], dial: 'manual' | 'scaffolded' | 'automated', learners: Record<string, string> = {}, provider = 'claude'): Harness {
   const target = tempDir('walk-engine-target-');
   const repo = tempDir('walk-engine-repo-');
   const gs = tempDir('walk-engine-gs-');
@@ -148,12 +150,13 @@ function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'
   saveProgress(target, progress(plan));
   fs.writeFileSync(path.join(buildDir(target), 'request.json'), JSON.stringify({ idea: '', recreate: true, repo, target, dial, referenceRoot: repo }));
   const overwriteAsks: string[] = [];
+  const overwriteQuestions: string[] = [];
   const core: TutorCore = { ...realCore, runLlm: () => Promise.reject(new Error('a test in walk-replan-engine.test.ts reached the real model')), availability: () => Promise.resolve({ ok: true, detail: 'stubbed' }) };
   const store = path.join(gs, 'derived');
   const replanner: Replanner = {
     diverge: (input, hooks) => divergePlan(input, {
       ledger: hooks.ledger, isCancelled: hooks.isCancelled, onProgress: hooks.onProgress,
-      settings: { core, provider: 'claude', model: 'm', timeoutMs: 5_000, run }, globalStorageRoot: gs, dialCore, target,
+      settings: { core, provider, model: 'm', timeoutMs: 5_000, run }, globalStorageRoot: gs, dialCore, target,
     }),
     savePlan: (t, p, before) => { saveDivergedPlan(t, p, undefined, before); },
   };
@@ -166,7 +169,7 @@ function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'
     reportError: () => undefined,
     core: () => Promise.resolve(dialCore),
     readText: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return undefined; } },
-    confirmOverwrite: (file) => { overwriteAsks.push(file); return Promise.resolve(true); },
+    confirmOverwrite: (file, question) => { overwriteAsks.push(file); overwriteQuestions.push(question ?? ''); return Promise.resolve(true); },
     git: () => Promise.reject(new Error('no git here')),
     commitPerStep: () => false,
     replanner: () => Promise.resolve(replanner),
@@ -174,7 +177,7 @@ function harness(progress: (plan: PlanLike) => Progress, run: TutorCore['runLlm'
   const session = WalkSession.open(target, adapters);
   sessions.push(session);
   const h: Harness = {
-    session, target, overwriteAsks,
+    session, target, overwriteAsks, overwriteQuestions,
     view: () => { const v = session.getView(); assert.ok(v, 'the walk has a current step'); return v; },
     html: () => renderStepHtml({ ...h.view(), skin: 'system' }, SKINS),
     notes: () => {
@@ -314,6 +317,107 @@ suite('one writer per file after a symbol press, through the walk and the real e
     const replacing = ((m.asked.filter((a) => a.task === 'replan').at(-1)?.input['replacing'] as Array<{ path: string }> | undefined) ?? []).map((r) => r.path);
     assert.deepEqual(replacing.filter((p) => p === 'src/api/routes.ts'), ['src/api/routes.ts'], `routes.ts is asked about once: ${JSON.stringify(replacing)}`);
     assert.deepEqual(loadPlan(h.target).steps.filter((s) => s.target.file === 'src/api/routes.ts').map((s) => `${s.kind}:${s.derivedFrom ?? 'the author'}`), ['file:s-parse']);
+  });
+});
+
+// T-61 (a), ruled 2026-11-17: wherever code a model wrote reaches the learner, the walk says so first.
+suite('model-written code: the learner is told before it reaches them (T-61 a)', () => {
+  const SAID = /A model wrote this code\. Read it before you run it: it runs with your permissions\./;
+
+  test('the dial says it when it writes a file a model wrote, and not when it writes the author\'s', async () => {
+    const h = harness(at('s-routes'), scriptedModel().run, 'automated');
+    await drain(h);
+    assert.match(h.view().writeNote ?? '', /written for you/, 'discriminates: the author\'s file was written');
+    assert.doesNotMatch(h.view().writeNote ?? '', SAID, 'the author\'s code is not the model\'s');
+    await symbolPress(h);
+    h.session.goTo('s-handle'); await drain(h);
+    assert.ok(routesOf(h).startsWith(MODELS), 'discriminates: D wrote the model\'s code');
+    assert.match(h.view().writeNote ?? '', SAID, `the note says a model wrote it: ${JSON.stringify(h.view().writeNote ?? null)}`);
+  });
+
+  test('the Overwrite question for a file a model wrote says so, and the author\'s does not', async () => {
+    const h = harness(at('s-routes'), scriptedModel().run, 'automated', { 'src/api/routes.ts': 'the learner\'s own routes.ts\n' });
+    await drain(h);
+    assert.equal(h.overwriteQuestions.length, 1, 'discriminates: the author\'s file was asked about');
+    assert.doesNotMatch(h.overwriteQuestions[0]!, SAID);
+    await symbolPress(h);
+    h.session.goTo('s-handle'); await drain(h);
+    assert.equal(h.overwriteQuestions.length, 2, 'discriminates: the model\'s file was asked about');
+    assert.match(h.overwriteQuestions[1]!, SAID, `the question says a model wrote it: ${JSON.stringify(h.overwriteQuestions[1])}`);
+  });
+
+  test('every step whose code a model wrote says it on its page, once, and no author\'s step does', async () => {
+    const h = harness(at('s-routes'), scriptedModel().run, 'manual');
+    await drain(h);
+    assert.doesNotMatch(h.notes(), SAID, 'an author\'s step');
+    await symbolPress(h);
+    assert.equal((h.notes().match(new RegExp(SAID.source, 'g')) ?? []).length, 1, `D's page, once: ${JSON.stringify(h.notes())}`);
+    const fresh = loadPlan(h.target).steps.find((s) => s.derivedFrom !== undefined && s.id !== 's-handle' && s.kind === 'file')!;
+    h.session.goTo(fresh.id); await drain(h);
+    assert.match(h.notes(), SAID, 'a step a re-plan wrote');
+    h.session.goTo('s-routes'); await drain(h);
+    assert.doesNotMatch(h.notes(), SAID, 'the author\'s file step D took over');
+  });
+});
+
+// T-61 (d), ruled 2026-11-17: through the walk, a press on a provider with a shell is refused in words, asking nothing.
+suite('a press on a provider whose command line can run tools (T-61 d)', () => {
+  test('is refused in words before anything is asked, and nothing changes', async () => {
+    const m = scriptedModel();
+    const h = harness(at('s-parse'), m.run, 'manual', {}, 'codex');
+    await drain(h);
+    h.session.choose('s-parse', 'alt-1'); await drain(h);
+    assert.match(h.view().choiceNote ?? '', /^Nothing was changed.*"codex".*can run tools/, `said: ${JSON.stringify(h.view().choiceNote ?? null)}`);
+    assert.equal(m.asked.length, 0, 'nothing was asked');
+    assert.equal(divergencesOf(h).length, 0, 'nothing was re-planned');
+  });
+});
+
+// T-61's code review, SF4: a press the file check refuses says where the step really stays. On the author's road it
+// keeps the author's (AC5b, as ruled); on a road a re-plan took, it stays on that road.
+suite('a press the file check refuses says which road the step stays on (T-61 b; the code review, SF4)', () => {
+  /** The scripted model, whose code imports node:child_process once `hostile` is set. */
+  function turning() {
+    const m = scriptedModel();
+    const state = { hostile: false };
+    const run: TutorCore['runLlm'] = (...args) => {
+      const line = args[0].split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
+      const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
+      if (!state.hostile || input['task'] !== 'code') return m.run(...args);
+      m.asked.push({ task: 'code', input });
+      const file = (input['node'] as { path: string }).path;
+      const content = `import { spawn } from 'node:child_process';\n${MODELS}${JSON.stringify(file)};\n\nexport const run = () => spawn('true');\n`;
+      return Promise.resolve({ text: JSON.stringify({ content }), inputTokens: 10, outputTokens: 5, usd: 0.001, metered: true });
+    };
+    return { asked: m.asked, run, state };
+  }
+
+  test('on the author\'s road, the step keeps the author\'s road, as ruled', async () => {
+    const m = turning();
+    m.state.hostile = true;
+    const h = harness(at('s-parse'), m.run, 'manual');
+    await drain(h);
+    h.session.choose('s-parse', 'alt-1'); await drain(h);
+    const said = h.view().choiceNote ?? '';
+    assert.match(said, /^Nothing was changed.*node:child_process.*starts other programs/, `discriminates: refused: ${JSON.stringify(said)}`);
+    assert.match(said, /so this step keeps the author.s road/, `said: ${JSON.stringify(said)}`);
+  });
+
+  test('on a road a re-plan took, a refused press back says the step stays on that road, and it does', async () => {
+    const m = turning();
+    const h = harness(at('s-parse'), m.run, 'manual');
+    await drain(h);
+    h.session.choose('s-parse', 'alt-1'); await drain(h);
+    assert.match(h.view().choiceNote ?? '', /^Re-planned/, 'discriminates: the first press landed');
+    m.state.hostile = true;
+    h.session.choose('s-parse', 'author'); await drain(h);
+    const said = h.view().choiceNote ?? '';
+    assert.match(said, /^Nothing was changed.*node:child_process.*starts other programs/, `discriminates: refused: ${JSON.stringify(said)}`);
+    assert.doesNotMatch(said, /keeps the author.s road/, `it is not on the author's road: ${JSON.stringify(said)}`);
+    assert.match(said, /so this step stays on the road it is on/, `said: ${JSON.stringify(said)}`);
+    const d = loadPlan(h.target).steps.find((s) => s.id === 's-parse')!;
+    assert.equal(d.decision.chosen, 'alt-1', 'and it is still on that road');
+    assert.notEqual(d.derivedFrom, undefined, 'with the model\'s code');
   });
 });
 

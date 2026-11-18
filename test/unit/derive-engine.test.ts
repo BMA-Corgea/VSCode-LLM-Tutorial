@@ -196,6 +196,18 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     assert.equal((main.input['node'] as Record<string, unknown>)['isEntry'], true);
   });
 
+  // T-61 (d), ruled 2026-11-17: repo-tour runs codex in a read-only sandbox, which is still a shell that can read any file
+  // the learner can; claude runs with no tools, ollama is a local HTTP call.
+  test('a derivation on a provider whose command line can run tools is refused before anything is asked (T-61 d)', async () => {
+    let calls = 0;
+    const counted: TutorCore['runLlm'] = (...args) => { calls += 1; return fakeModel().run(...args); };
+    const d = deps(counted, tempDir('derive-engine-gs-'), tempDir('derive-engine-target-'));
+    const out = await derivePlan({ idea: FIXTURE_IDEA }, { ...d, settings: { ...d.settings, provider: 'codex' } });
+    assert.ok(!out.ok, 'refused');
+    assert.match(out.reason, /"codex".*can run tools.*claude or ollama/);
+    assert.equal(calls, 0, 'before anything is asked');
+  });
+
   test('the learner\'s target folder is untouched by a derivation (AC9)', async () => {
     const target = tempDir('derive-engine-target-');
     fs.writeFileSync(path.join(target, 'mine.txt'), 'mine');
@@ -208,6 +220,9 @@ suite('derivePlan — an idea becomes a plan and its tree, through the one door 
     ['a file that does not parse', 'export function total(xs {\n', /does not parse/],
     ['an import of a local file it does not depend on', "import { x } from './ghost.mjs';\nexport function total() { return x; }\n", /not one of its dependencies' files|a file it does not depend on/],
     ['an import of a package that would need installing', "import _ from 'lodash';\nexport function total(xs) { return _.sum(xs); }\n", /would need installing/],
+    // T-61 (b): what a model's file may not reach for, in Mode A too.
+    ['an import of child_process (T-61)', "import { execSync } from 'node:child_process';\nexport function total(xs) { execSync('true'); return xs.length; }\n", /child_process.*code a model writes may not/],
+    ['a call to eval (T-61)', "export function total(xs) { return eval('xs.length'); }\n", /calls eval.*code a model writes may not/],
   ] as Array<[string, string, RegExp]>) {
     test(`a derived file with ${name} fails the derivation with a sentence, and no tree is written`, async () => {
       const gs = tempDir('derive-engine-gs-');

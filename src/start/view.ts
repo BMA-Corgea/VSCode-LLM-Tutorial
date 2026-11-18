@@ -89,6 +89,14 @@ fieldset.dial label { display:inline-flex; align-items:center; gap:6px; margin:6
 :root:not([data-theme]) .field input[type=text]::placeholder { color:var(--vscode-input-placeholderForeground, var(--muted)); }
 :root:not([data-theme]) .field textarea:focus,
 :root:not([data-theme]) .field input[type=text]:focus { outline:1px solid var(--focus); outline-offset:-1px; }
+/* T-110: under System, the form's other controls draw the same 1 px focusBorder outline on KEYBOARD focus, as VS
+   Code's own do: the "Just recreate" checkbox, the three dial radios and the skin picker. The base sheet's glow alone
+   measured 1.30 to 1.48:1 against the background on Dark Modern (T-52's review, F2). The picker's is inset like a
+   field's; the small controls' sits just outside them. A named skin keeps its own. The Current Step panel's radios and
+   picker are T-110's other half, not this sheet's. */
+:root:not([data-theme]) .checkbox-field input[type=checkbox]:focus-visible,
+:root:not([data-theme]) .dial input[type=radio]:focus-visible { outline:1px solid var(--focus); outline-offset:1px; }
+:root:not([data-theme]) .panel-foot .skinpick:focus-visible { outline:1px solid var(--focus); outline-offset:-1px; }
 `;
 
 /** What the note says on a fresh render: a running build, else how the last one ended, else nothing. */

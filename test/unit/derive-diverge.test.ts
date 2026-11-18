@@ -803,6 +803,32 @@ suite('divergePlan — a different road in a real repository (T-22)', () => {
     assert.ok(!JSON.stringify(m.asked).includes('a-secret-value'), 'the credentials file\'s contents are in no question');
   });
 
+  // T-61 (d), ruled 2026-11-17: a re-plan shows the model a stranger's repository, so it runs only on a provider with no tools.
+  test('a re-plan on a provider whose command line can run tools is refused before anything is asked; ollama and claude press as before (T-61 d)', async () => {
+    const { plan, root, gs, target } = setup();
+    const m = model();
+    const d = depsFor(m.run, gs, target);
+    const out = await divergePlan(input(plan, root, 's-parse'), { ...d, settings: { ...d.settings, provider: 'codex' } });
+    assert.ok(!out.ok, 'refused');
+    assert.match(out.reason, /"codex".*can run tools.*claude or ollama/);
+    assert.equal(m.asked.length, 0, 'before anything is asked');
+    const local = depsFor(model().run, tempDir('diverge-gs-'), target);
+    const ok = await divergePlan(input(repoPlan(), root, 's-parse'), { ...local, settings: { ...local.settings, provider: 'ollama' } });
+    assert.ok(ok.ok, `ollama presses as before: ${ok.ok ? '' : ok.reason}`);
+  });
+
+  // T-61 (b): a re-plan whose code reaches for a process is refused in a sentence, with nothing written, even where the
+  // author's own code uses one; the learner keeps the author's road at that step.
+  test('a re-plan whose code starts a program is refused in words, nothing is written, even when the author\'s code does it too (T-61 b)', async () => {
+    const { plan, root, gs, target } = setup();
+    fs.writeFileSync(path.join(root, 'src/store.ts'), "import { execSync } from 'node:child_process';\nexport const STORE = execSync('true').length;\n");
+    const spawns = model((file) => (file.endsWith('parse.ts') ? "import { execSync } from 'node:child_process';\nexport const from = execSync('true');\n" : `export const from = ${JSON.stringify(file)};\n`));
+    const out = await divergePlan(input(plan, root, 's-parse'), depsFor(spawns.run, gs, target));
+    assert.ok(!out.ok, 'refused');
+    assert.match(out.reason, /^in the model.s answer, the derived file src\/parse\.ts imports "node:child_process", which starts other programs: code a model writes may not, so this step keeps the author.s road/);
+    assert.equal(fs.existsSync(path.join(gs, 'derived')), false, 'and no tree was written');
+  });
+
   test('a refusal of the model\'s answer says it was the model\'s answer: its "step 1" is not the walk\'s', async () => {
     const { plan, root, gs, target } = setup();
     const oneRoad = model(undefined, () => ({ steps: [{ kind: 'file', chapter: 'c2', path: 'src/api/routes.ts', question: 'q?', options: options().slice(0, 1), recommended: 'author', why: 'w', dependsOn: ['src/parse.ts'] }] }));
