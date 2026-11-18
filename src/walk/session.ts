@@ -382,7 +382,7 @@ export function choiceRefusalText(reason: string, inARow: number): string {
  * exactly as it was: a press that looks ignored (T-15). The count is what makes each further press change the words.
  */
 export function checkAgainText(inARow: number): string {
-  return `Checked again: the same answer as before (${inARow} checks in a row).`;
+  return `Checked again: the same answer as before (${inARow} in a row on this step).`;
 }
 
 /** T-22: a re-plan under way. It is the whole walk's state, so it is shown on whichever step is on screen. */
@@ -822,7 +822,7 @@ export class WalkSession {
    * T-73: the last answer *Check my work* gave on each step (a verdict or a note), and how many times in a row it has
    * given it. Per step, so a press after walking away and back still finds its step's last answer and says so.
    */
-  private readonly checkRepeats = new Map<string, { answer: string; inARow: number; verdict: boolean }>();
+  private readonly checkRepeats = new Map<string, { answer: string; inARow: number; verdict: boolean; shown?: string }>();
   /**
    * T-6: the ask in flight, and the step it belongs to. `undefined` means nothing is waiting
    * on a model, which is exactly what `TutorView.thinking` reports — so there is ONE answer to
@@ -1217,6 +1217,7 @@ export class WalkSession {
   private forgetOldCode(stepId: string, rewritten: readonly string[] = []): void {
     const stale = (id: string): boolean => id === stepId || rewritten.includes(id) || !this.hasStep(id);
     for (const id of [...this.checks.keys()]) if (stale(id)) this.checks.delete(id);
+    for (const id of [...this.checkRepeats.keys()]) if (stale(id)) this.checkRepeats.delete(id); // T-73 (the review's F2)
     for (const id of [...this.prompted.keys()]) if (stale(id)) this.prompted.delete(id);
   }
 
@@ -2098,6 +2099,7 @@ export class WalkSession {
     this.shape = undefined;
     this.note = undefined;
     this.checks.clear();
+    this.checkRepeats.clear();
     this.prompted.clear();
     // T-6: the ask in flight is DETACHED rather than merely forgotten, and the difference is
     // the point. Forgetting it would leave a live request whose answer resolves into a
@@ -2502,8 +2504,13 @@ export class WalkSession {
       return;
     }
 
+    // T-73: a verdict supersedes the note an earlier press of Check my work left on this step. That note is stale by
+    // definition ("has not been created" under a verdict about the file), and clearing it is what changes the page when
+    // the verdict is the one already drawn (the review's F1). Then the count, before the verdict is stored.
+    const lastCheck = this.checkRepeats.get(stepId);
+    if (lastCheck?.shown !== undefined && this.note?.stepId === stepId && this.note.text === lastCheck.shown) this.note = undefined;
+    this.countCheck(stepId, `verdict:${JSON.stringify([outcome.summary, outcome.report])}`, true);
     this.checks.set(stepId, outcome);
-    this.countCheck(stepId, `verdict:${JSON.stringify([outcome.summary, outcome.report])}`, true); // T-73
     const wasDone = this.progress.steps[stepId]?.status === 'done';
     this.progress = setCheck(this.progress, stepId, outcome.report.ok, new Date().toISOString());
     // One persist, not two: "this check passed" and "this step is done" are the same fact, and
@@ -2773,10 +2780,18 @@ export class WalkSession {
     this.refresh(false);
   }
 
-  /** T-73: counts an answer to a press of *Check my work* on `stepId`; the same answer as the step's last one is a repeat. */
+  /**
+   * T-73: counts an answer to a press of *Check my work* on `stepId`. It is a repeat when it is the step's last answer
+   * and what it repeats is still on screen: a verdict stays drawn while the walk moves (`checks`, until a re-plan
+   * forgets it), a note does not (`clearStepNotes`), so a note counts on only while it is the one shown (the
+   * review's F3). Called before the verdict is stored, so `checks` says whether one was drawn.
+   */
   private countCheck(stepId: string, answer: string, verdict: boolean): number {
     const last = this.checkRepeats.get(stepId);
-    const inARow = last !== undefined && last.answer === answer ? last.inARow + 1 : 1;
+    const shown = verdict
+      ? this.checks.has(stepId)
+      : last?.shown !== undefined && this.note?.stepId === stepId && this.note.text === last.shown;
+    const inARow = last !== undefined && last.answer === answer && shown ? last.inARow + 1 : 1;
     this.checkRepeats.set(stepId, { answer, inARow, verdict });
     return inARow;
   }
@@ -2784,7 +2799,10 @@ export class WalkSession {
   /** T-73: a note answering a press of *Check my work*, which says so when it is the same note as the last answer. */
   private checkNote(stepId: string, text: string): void {
     const inARow = this.countCheck(stepId, `note:${text}`, false);
-    this.noteFor(stepId, inARow > 1 ? `${text} ${checkAgainText(inARow)}` : text);
+    const shown = inARow > 1 ? `${text} ${checkAgainText(inARow)}` : text;
+    const counted = this.checkRepeats.get(stepId);
+    if (counted !== undefined) counted.shown = shown;
+    this.noteFor(stepId, shown);
   }
 
   /**

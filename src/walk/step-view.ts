@@ -2163,6 +2163,8 @@ export function renderNoticeHtml(notice: string, assets?: PageAssets): string {
  *   - `state.writeNote`                → the write note under the dial
  *   - `state.check`                    → the whole check report (AC5) — summary, verdict
  *                                        colour, every symbol and import row
+ *   - `state.checkAgain`               → inside it, under the summary: the same answer
+ *                                        again, and how many in a row (T-73)
  *   - `state.reproduce`                → the offer line and its button, present until done
  *   - `state.transcript[]`             → every turn drawn in the tutor log — `role` (which
  *                                        label and which class) and `content` (the escaped
@@ -2322,9 +2324,9 @@ export function stepRenderKey(state: StepViewState, skins: SkinsModule): string 
             keyOf(row?.name), keyOf(row?.kind), row?.status,
           ]),
           keyOfList<{ raw?: unknown; status?: unknown }>(report?.imports, MAX_LIST_ROWS, (row) => [keyOf(row?.raw), row?.status]),
+          keyOf(state.checkAgain ?? null), // T-73: a repeated answer must repaint, or the second press looks ignored
         ]
       : null,
-    keyOf(state.checkAgain ?? null), // T-73: a repeated answer must repaint, or the second press looks ignored
     state.reproduce ? [state.reproduce.count, state.reproduce.done] : null,
     // ── T-6: the tutor. Every one of these is drawn by `tutorHtml`, and every one of them is
     // a "stored on the host and never shown" bug if it is dropped from here. The thinking

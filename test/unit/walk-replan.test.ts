@@ -422,6 +422,17 @@ suite('it lands — the walk shows the new plan without a reload (T-22, AC3, AC4
     assert.equal(memory.checks.has('st-1-shape-src'), true, 'a step it did not reach keeps what it had');
   });
 
+  test('T-73 (the review\'s F2): the count of a repeated check at D is forgotten with its verdict', async () => {
+    const h = harness();
+    const memory = h.session as unknown as { checkRepeats: Map<string, unknown> };
+    memory.checkRepeats.set(D, { answer: 'verdict:old', inARow: 2, verdict: true });
+    memory.checkRepeats.set('st-1-shape-src', { answer: 'verdict:kept', inARow: 1, verdict: true });
+    h.session.choose(D, ANSWER);
+    await finish(h, await reachedEngine(h), landed(h.plan, h.tree));
+    assert.equal(memory.checkRepeats.has(D), false, 'the old code\'s count outlived the re-plan: the new step\'s first check would be called a repeat');
+    assert.equal(memory.checkRepeats.has('st-1-shape-src'), true, 'a step it did not reach keeps its count');
+  });
+
   test('a learner who walked on stays where they are, if that step is still there', async () => {
     const h = harness();
     h.session.choose(D, ANSWER);

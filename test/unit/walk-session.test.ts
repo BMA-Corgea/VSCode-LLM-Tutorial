@@ -1965,7 +1965,7 @@ suite('the dial, the check and the commit (T-5)', () => {
   // ── T-73: a second press with nothing changed says so (T-15: a press says something new where the eye is) ──
 
   suite('T-73: a repeated answer to Check my work says so, and how many times', () => {
-    const AGAIN = (n: number): string => `Checked again: the same answer as before (${n} checks in a row).`;
+    const AGAIN = (n: number): string => `Checked again: the same answer as before (${n} in a row on this step).`;
 
     test('a verdict given again carries the count into the view, and each further press moves it', async () => {
       const { session } = await walking({ dial: 'automated', commitPerStep: false });
@@ -2018,6 +2018,62 @@ suite('the dial, the check and the commit (T-5)', () => {
       session.runCheck();
       await session.settled();
       assert.equal(session.getView()?.checkAgain, AGAIN(2), 'a press after walking back found the same answer and said nothing new');
+    });
+
+    test('the review\'s F7: another step\'s check neither counts as this step\'s repeat nor resets it', async () => {
+      const { session, plan } = await walking({ dial: 'automated', commitPerStep: false });
+      session.runCheck();
+      await session.settled();
+      const other = plan.steps.find((s) => s.id !== 'st-2-file-parse');
+      assert.ok(other, 'the fixture plan has another step');
+      session.goTo(other.id);
+      await session.settled();
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, undefined, 'another step\'s first check was called a repeat of this one');
+      assert.ok(!(session.getView()?.writeNote ?? '').includes('Checked again'), 'another step\'s first check was called a repeat of this one');
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.checkAgain, AGAIN(2), 'another step\'s check reset this step\'s count');
+    });
+
+    test('the review\'s F1: a verdict clears the note an earlier check left on its step, so verdict, note, verdict changes the page', async () => {
+      const { session } = await walking({ dial: 'manual', commitPerStep: false });
+      writeTarget('src/parse.ts', 'export function tokenize(): void {}\n');
+      session.runCheck();
+      await session.settled();
+      assert.ok(session.getView()?.check, 'the premise: a verdict');
+      fs.rmSync(path.join(target, 'src/parse.ts'));
+      session.runCheck();
+      await session.settled();
+      assert.match(session.getView()?.writeNote ?? '', /has not been created/, 'the premise: the file gone, the answer is a note');
+      writeTarget('src/parse.ts', 'export function tokenize(): void {}\n');
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.writeNote, undefined, 'the note says the file "has not been created" under a verdict about it, and the page is as it was');
+      assert.equal(session.getView()?.checkAgain, undefined, 'a verdict after a note was called the same answer as the one before');
+    });
+
+    test('the review\'s F3: a note given again after walking away is new on screen, so it is not called a repeat', async () => {
+      const { session, plan } = await walking({ dial: 'manual' });
+      session.runCheck();
+      await session.settled();
+      const first = session.getView()?.writeNote ?? '';
+      assert.match(first, /nothing to check here yet/, 'the premise: the answer is a note');
+      const other = plan.steps.find((s) => s.id !== 'st-2-file-parse');
+      assert.ok(other, 'the fixture plan has another step');
+      session.goTo(other.id);
+      await session.settled();
+      session.goTo('st-2-file-parse');
+      await session.settled();
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.writeNote, first, 'a note no longer on screen was called "the same answer as before"');
+      session.runCheck();
+      await session.settled();
+      assert.equal(session.getView()?.writeNote, `${first} ${AGAIN(2)}`, 'and the note given again while still on screen did not say so');
     });
   });
 

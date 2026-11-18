@@ -280,7 +280,7 @@ suite('T-42: the real panel keeps the outcome of a press in view', function () {
       const was = await atButton('btn-check', 'outcome-check');
       await click('btn-check');
       const now = await whenShown('outcome-check', (r) => verdict(r) && r.outcome?.words !== was.outcome?.words, `press ${press}'s answer, changed`);
-      assert.ok(now.outcome?.words.includes(`(${press} checks in a row)`), `press ${press} did not say how many times the same answer has come back: ${JSON.stringify(now)}`);
+      assert.ok(now.outcome?.words.includes(`(${press} in a row on this step)`), `press ${press} did not say how many times the same answer has come back: ${JSON.stringify(now)}`);
       assertTheOutcomeCanFit(now);
       assert.ok(now.outcome?.fullyInView, `press ${press}'s verdict is not fully in the panel: ${JSON.stringify(now)}`);
     }
