@@ -373,6 +373,54 @@ suite('a press on a provider whose command line can run tools (T-61 d)', () => {
   });
 });
 
+// T-61's code review, SF4: a press the file check refuses says where the step really stays. On the author's road it
+// keeps the author's (AC5b, as ruled); on a road a re-plan took, it stays on that road.
+suite('a press the file check refuses says which road the step stays on (T-61 b; the code review, SF4)', () => {
+  /** The scripted model, whose code imports node:child_process once `hostile` is set. */
+  function turning() {
+    const m = scriptedModel();
+    const state = { hostile: false };
+    const run: TutorCore['runLlm'] = (...args) => {
+      const line = args[0].split('\n').find((l) => l.startsWith('INPUT (JSON): '))!;
+      const input = JSON.parse(line.slice('INPUT (JSON): '.length)) as Record<string, unknown>;
+      if (!state.hostile || input['task'] !== 'code') return m.run(...args);
+      m.asked.push({ task: 'code', input });
+      const file = (input['node'] as { path: string }).path;
+      const content = `import { spawn } from 'node:child_process';\n${MODELS}${JSON.stringify(file)};\n\nexport const run = () => spawn('true');\n`;
+      return Promise.resolve({ text: JSON.stringify({ content }), inputTokens: 10, outputTokens: 5, usd: 0.001, metered: true });
+    };
+    return { asked: m.asked, run, state };
+  }
+
+  test('on the author\'s road, the step keeps the author\'s road, as ruled', async () => {
+    const m = turning();
+    m.state.hostile = true;
+    const h = harness(at('s-parse'), m.run, 'manual');
+    await drain(h);
+    h.session.choose('s-parse', 'alt-1'); await drain(h);
+    const said = h.view().choiceNote ?? '';
+    assert.match(said, /^Nothing was changed.*node:child_process.*starts other programs/, `discriminates: refused: ${JSON.stringify(said)}`);
+    assert.match(said, /so this step keeps the author.s road/, `said: ${JSON.stringify(said)}`);
+  });
+
+  test('on a road a re-plan took, a refused press back says the step stays on that road, and it does', async () => {
+    const m = turning();
+    const h = harness(at('s-parse'), m.run, 'manual');
+    await drain(h);
+    h.session.choose('s-parse', 'alt-1'); await drain(h);
+    assert.match(h.view().choiceNote ?? '', /^Re-planned/, 'discriminates: the first press landed');
+    m.state.hostile = true;
+    h.session.choose('s-parse', 'author'); await drain(h);
+    const said = h.view().choiceNote ?? '';
+    assert.match(said, /^Nothing was changed.*node:child_process.*starts other programs/, `discriminates: refused: ${JSON.stringify(said)}`);
+    assert.doesNotMatch(said, /keeps the author.s road/, `it is not on the author's road: ${JSON.stringify(said)}`);
+    assert.match(said, /so this step stays on the road it is on/, `said: ${JSON.stringify(said)}`);
+    const d = loadPlan(h.target).steps.find((s) => s.id === 's-parse')!;
+    assert.equal(d.decision.chosen, 'alt-1', 'and it is still on that road');
+    assert.notEqual(d.derivedFrom, undefined, 'with the model\'s code');
+  });
+});
+
 // The re-review of the fixes, R11: SF4's line says a choice was never re-planned, and the walk would not re-plan from it.
 suite('a choice no re-plan followed can be re-planned from its own road (T-22 re-review R11)', () => {
   const t21Choice = (plan: PlanLike): Progress => {

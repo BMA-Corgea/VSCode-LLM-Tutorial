@@ -175,6 +175,7 @@ import type { Dial } from '../start/request.js';
 import { DERIVED_CODE_MISSING_MESSAGE, derivedCodeMissing, referenceRootFor, repositoryRootOf, rootsForEngine } from './reference.js';
 import type { DeriveCost } from '../derive/assemble.js';
 import type { DivergeInput, DivergeOutcome } from '../derive/diverge.js';
+import { KEEPS_AUTHORS_ROAD } from '../derive/types.js';
 import type { ResolvedRequest } from './store.js';
 import { commitStep, ensureTranscriptIgnored, type CommitResult } from '../dial/commit.js';
 import type { DialCore } from '../dial/core.js';
@@ -304,6 +305,9 @@ export function checkTakenOverText(writer: StepLike): string {
 }
 
 /** T-22: why a re-plan did not land. It always says the state is as it was, and that the press still works. */
+/** Where a step stays when the file check refuses its press and it is not on the author's road (T-61's code review, SF4). */
+export const STAYS_ON_ITS_ROAD = 'so this step stays on the road it is on';
+
 export function replanRefusedText(reason: string): string {
   return `Nothing was changed, and the road is still there to press. Why: ${reason}.`;
 }
@@ -1129,7 +1133,10 @@ export class WalkSession {
   private landReplan(job: ReplanJob, outcome: DivergeOutcome, replanner: Replanner, request: ResolvedRequest, derivedFrom: PlanLike): void {
     if (this.replan !== job) return;
     if (!outcome.ok) {
-      this.replanRefused(job, replanRefusedText(outcome.reason));
+      // The engine's sentence ends on the author's road; D says the road it is really on (SF4).
+      const d = this.plan.steps.find((s) => s.id === job.stepId);
+      const onAuthorsRoad = d === undefined || (d.derivedFrom === undefined && (d.decision.chosen === null || d.decision.chosen === d.decision.authorChoice));
+      this.replanRefused(job, replanRefusedText(onAuthorsRoad ? outcome.reason : outcome.reason.replace(KEEPS_AUTHORS_ROAD, STAYS_ON_ITS_ROAD)));
       return;
     }
     if (!outcome.changed) {

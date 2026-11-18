@@ -52,7 +52,7 @@ import {
 import { PYTHON_STDLIB_MODULES } from './python-stdlib.js';
 import { codeOnly } from './source-scan.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
-import { DERIVE_LIMITS, isDeriveRefusal, type CodeLanguage, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
+import { DERIVE_LIMITS, isDeriveRefusal, KEEPS_AUTHORS_ROAD, type CodeLanguage, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
 
 export interface DeriveDeps extends DeriveAskDeps {
   /** repo-tour's `extract`, the same slice the dial's check uses */
@@ -380,7 +380,7 @@ const REFUSED_PY_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }
 ];
 /** A `require` of one of the refused modules, read on the file's own text (`codeOnly` blanks the name). */
 const JS_REQUIRE_OF = /(?<![.\w$])require\s*\(\s*(['"`])((?:node:)?([\w/]+))\1\s*\)/g;
-const REFUSED_TAIL = 'code a model writes may not, so this step keeps the author\u2019s road';
+const REFUSED_TAIL = `code a model writes may not, ${KEEPS_AUTHORS_ROAD}`;
 
 /** Every module a Python file's own text imports, at any depth (`codeOnly`'s text, so a docstring's line is not one). */
 function pythonImportsInText(code: string): string[] {
