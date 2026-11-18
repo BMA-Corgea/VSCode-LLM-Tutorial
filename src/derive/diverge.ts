@@ -31,7 +31,7 @@ import { readReference, withheldReason } from '../dial/writer.js';
 import { fileWriters, takenOverIn, treeNamedBy, type ChapterLike, type PlanDivergence, type PlanLike, type StepLike } from '../walk/model.js';
 import { askOnce, newTally, type DeriveAskDeps } from './ask.js';
 import { boilerplateRanges, lineCountOf, loadBearingRanges, stepIdFor, type DeriveCost, type ExtractLike } from './assemble.js';
-import { costOf, extractAll, REPO_IMPORTS, refusalForFile, thrownSentence, type ImportRules } from './engine.js';
+import { costOf, extractAll, providerRefusal, REPO_IMPORTS, refusalForFile, thrownSentence, type ImportRules } from './engine.js';
 import { ancestorsOf, downstreamOf, externalDependencies, insertInOrder, keptBy, type GraphNode } from './graph.js';
 import {
   codePrompt, parseCodeReply, parseReplanReply, replanPrompt, whyForRoad,
@@ -176,6 +176,9 @@ export async function divergePlan(input: DivergeInput, deps: DivergeDeps): Promi
   const tally = newTally();
   const fail = (reason: string): DivergeOutcome => ({ ok: false, reason, cost: costOf(tally, deps) });
   try {
+    // T-61 (d): before anything else, and before anything is asked.
+    const tools = providerRefusal(deps.settings.provider, 'a re-plan');
+    if (tools !== null) return fail(tools);
     const { plan, stepId, answer, walked, referenceRoot, derivedRoot } = input;
     const steps = [...plan.steps].sort((a, b) => a.ordinal - b.ordinal);
     const byId = new Map(steps.map((s) => [s.id, s] as const));

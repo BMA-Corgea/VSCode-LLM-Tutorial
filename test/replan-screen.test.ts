@@ -23,7 +23,7 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension.js';
 import type { TutorCore } from '../src/tutor/core.js';
-import type { PlanLike, StepLike } from '../src/walk/model.js';
+import { MODEL_CODE_NOTE, type PlanLike, type StepLike } from '../src/walk/model.js';
 import { CHOICE_ALREADY_REPLANNING, REPLAN_CANCELLED_BILLED, REPLAN_NOTHING_FOLLOWS } from '../src/walk/session.js';
 import { AUTHOR_BADGE, DIVERGED_NOTE, REPLANNED_NOTE, WRITTEN_BY_THE_MODEL_NOTE } from '../src/walk/step-view.js';
 import { recordBuiltHere } from './support/built-here.js';
@@ -305,6 +305,8 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     const before = await d.onStep(D);
     assert.deepEqual(before.on, ['author']);
     assert.equal(before.cancel, false);
+    // T-61 (a, AC8): the author's code is not the model's, so its page says nothing of the kind.
+    assert.ok(!before.notes.includes(MODEL_CODE_NOTE), 'an author\'s step does not say a model wrote its code');
     const treeBefore = d.treeSteps();
     assert.ok(treeBefore.includes(AFTER_D), 'discriminates: the step that follows D is in the tree');
 
@@ -329,7 +331,8 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     assert.equal(done.step, D, 'and the learner is still on D');
     assert.deepEqual(done.on, [ROAD]);
     assert.deepEqual(done.yours, [ROAD]);
-    assert.deepEqual(done.notes, [REPLANNED_NOTE]);
+    // T-61 (a, AC8): D's code is the model's now, and its page says so, and that it runs with the learner's permissions.
+    assert.deepEqual(done.notes, [REPLANNED_NOTE, MODEL_CODE_NOTE]);
     assert.match(done.note, /and 1 later step now follow your choice/, 'the note counts the step that followed, not D itself');
     assert.match(done.note, /cost about \$/, 'what it cost is on the page (AC10)');
 
@@ -343,6 +346,7 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
 
     const page = await d.onStep(fresh[0]!);
     assert.ok(page.notes.includes(WRITTEN_BY_THE_MODEL_NOTE), `the page says who wrote it; it shows ${JSON.stringify(page)}`);
+    assert.ok(page.notes.includes(MODEL_CODE_NOTE), 'and that it runs with the learner\'s permissions (T-61 a, AC8)');
     assert.ok(!page.badges.includes(AUTHOR_BADGE), 'no badge claims an author');
     assert.ok(!page.labels.some((l) => /what the author did/i.test(l)), `nor does any option: ${JSON.stringify(page.labels)}`);
     // Manual mode's outline of the file, which is read from the reference: the repository's file at
@@ -356,7 +360,7 @@ suite('a different road, re-planned, read off the screen (T-22)', function () {
     await vscode.commands.executeCommand('buildTutorials.step.focus');
     const reloaded = await d.onStep(D);
     assert.deepEqual(reloaded.on, [ROAD], 'a reload remembers the road');
-    assert.deepEqual(reloaded.notes, [REPLANNED_NOTE]);
+    assert.deepEqual(reloaded.notes, [REPLANNED_NOTE, MODEL_CODE_NOTE], 'and after a reload, D still says whose code it is (T-61 a)');
     assert.deepEqual(d.treeSteps(), treeAfter, 'and shows the same walk');
     await d.onStep(fresh[0]!);
     const again = await until(d.read, (p) => p.step === fresh[0] && p.shape.length > 0, 'manual mode outlines the file after a reload');

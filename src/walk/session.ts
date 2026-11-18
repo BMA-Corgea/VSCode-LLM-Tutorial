@@ -175,6 +175,7 @@ import type { Dial } from '../start/request.js';
 import { DERIVED_CODE_MISSING_MESSAGE, derivedCodeMissing, referenceRootFor, repositoryRootOf, rootsForEngine } from './reference.js';
 import type { DeriveCost } from '../derive/assemble.js';
 import type { DivergeInput, DivergeOutcome } from '../derive/diverge.js';
+import { KEEPS_AUTHORS_ROAD } from '../derive/types.js';
 import type { ResolvedRequest } from './store.js';
 import { commitStep, ensureTranscriptIgnored, type CommitResult } from '../dial/commit.js';
 import type { DialCore } from '../dial/core.js';
@@ -228,6 +229,8 @@ import {
   optionsTable,
   pressRules,
   takenOverBy,
+  writesModelCode,
+  MODEL_CODE_NOTE,
   clearChosen as clearChosenIn,
   walkedSteps,
   withChosen,
@@ -282,6 +285,11 @@ export function replanNothingFollowsText(at: string | null): string {
   return at === null ? REPLAN_NOTHING_FOLLOWS : `Your choice at ${at} is recorded. Nothing later depended on it, so the rest of the walk stands.`;
 }
 
+/** The question before the dial writes over a file of the learner's that differs; T-61 (a): it says when a model wrote the new code. */
+export function overwriteQuestion(relPath: string, modelWrote: boolean): string {
+  return `${relPath} already has your own changes. Overwrite it with this step's version?${modelWrote ? ` ${MODEL_CODE_NOTE}` : ''}`;
+}
+
 /** T-22 (the re-review's R3, ruled 2026-11-11: one writer per file): a press at a step whose file another step writes now. */
 export function choiceTakenOverText(writer: StepLike): string {
   // Not "chosen at that step": it keeps a decision of its own, so this step's roads are chosen nowhere now (the re-check's C7).
@@ -297,6 +305,9 @@ export function checkTakenOverText(writer: StepLike): string {
 }
 
 /** T-22: why a re-plan did not land. It always says the state is as it was, and that the press still works. */
+/** Where a step stays when the file check refuses its press and it is not on the author's road (T-61's code review, SF4). */
+export const STAYS_ON_ITS_ROAD = 'so this step stays on the road it is on';
+
 export function replanRefusedText(reason: string): string {
   return `Nothing was changed, and the road is still there to press. Why: ${reason}.`;
 }
@@ -665,7 +676,7 @@ export interface WalkAdapters {
    * asked on a real difference, asked once per (step, file), obeyed afterwards — is testable
    * with no editor anywhere near it.
    */
-  confirmOverwrite(relPath: string): Promise<boolean>;
+  confirmOverwrite(relPath: string, question: string): Promise<boolean>;
   /** `git`, for the commit per completed step (AC7) and for the tutor's pre-flight diff.
    *  `src/start/build.ts`'s `realGit` wires in as-is; `src/dial/commit.ts` is what actually
    *  holds the git knowledge, including the rule that a missing identity is a refusal and never
@@ -1122,7 +1133,10 @@ export class WalkSession {
   private landReplan(job: ReplanJob, outcome: DivergeOutcome, replanner: Replanner, request: ResolvedRequest, derivedFrom: PlanLike): void {
     if (this.replan !== job) return;
     if (!outcome.ok) {
-      this.replanRefused(job, replanRefusedText(outcome.reason));
+      // The engine's sentence ends on the author's road; D says the road it is really on (SF4).
+      const d = this.plan.steps.find((s) => s.id === job.stepId);
+      const onAuthorsRoad = d === undefined || (d.derivedFrom === undefined && (d.decision.chosen === null || d.decision.chosen === d.decision.authorChoice));
+      this.replanRefused(job, replanRefusedText(onAuthorsRoad ? outcome.reason : outcome.reason.replace(KEEPS_AUTHORS_ROAD, STAYS_ON_ITS_ROAD)));
       return;
     }
     if (!outcome.changed) {
@@ -2379,7 +2393,7 @@ export class WalkSession {
       if (answered === 'asking') return { landed: false };
       asked.set(absPath, 'asking');
       this.prompted.set(step.id, asked);
-      const overwrite = await this.adapters.confirmOverwrite(step.target.file);
+      const overwrite = await this.adapters.confirmOverwrite(step.target.file, overwriteQuestion(step.target.file, writesModelCode(step)));
       asked.set(absPath, overwrite ? 'overwrite' : 'keep');
       // The learner's answer is honoured wherever the WALK has moved to while the dialog was
       // up (`applyDial`'s header argues why, and why the modal makes that a narrow case). A
@@ -2410,11 +2424,13 @@ export class WalkSession {
       return { landed: false, note: `${step.target.file} could not be written — ${reason}` };
     }
 
+    // T-61 (a): code a model wrote is said to be the model's as it reaches the learner's folder.
+    const models = writesModelCode(step) ? ` ${MODEL_CODE_NOTE}` : '';
     return {
       landed: true,
       note: overwriting
-        ? `${step.target.file} was replaced with this step's version, as you asked.`
-        : `${step.target.file} was written for you.`,
+        ? `${step.target.file} was replaced with this step's version, as you asked.${models}`
+        : `${step.target.file} was written for you.${models}`,
     };
   }
 

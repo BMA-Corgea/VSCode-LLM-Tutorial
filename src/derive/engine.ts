@@ -52,7 +52,7 @@ import {
 import { PYTHON_STDLIB_MODULES } from './python-stdlib.js';
 import { codeOnly } from './source-scan.js';
 import { writeReferenceTree, type DerivedFile } from './tree.js';
-import { DERIVE_LIMITS, isDeriveRefusal, type CodeLanguage, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
+import { DERIVE_LIMITS, isDeriveRefusal, KEEPS_AUTHORS_ROAD, type CodeLanguage, type DeriveLanguage, type DeriveRefusal, type DerivedChapter, type DerivedNode } from './types.js';
 
 export interface DeriveDeps extends DeriveAskDeps {
   /** repo-tour's `extract`, the same slice the dial's check uses */
@@ -148,7 +148,8 @@ function shownStepOf(node: DerivedNode, answers: Readonly<Record<string, string>
  * **This is a correctness check, never a sandbox.** It keeps the plan's graph true and the app
  * able to start. It does not make the code safe: a Node built-in can run a process or open a
  * socket, and the file runs as the learner the moment they run it. What the learner is told about
- * that belongs to the tickets that show it to them (T-61).
+ * that belongs to the tickets that show it to them: T-61 tells them, and refuses by name what a
+ * model's file may not reach for (`runsAsTheLearner`), which is an intent check, never a sandbox.
  */
 export function unsoundFileReason(
   extract: ExtractLike, allowedFiles: ReadonlySet<string>, language: CodeLanguage, plannedFiles: ReadonlySet<string> = allowedFiles, rules: ImportRules = MODE_A_IMPORTS,
@@ -328,6 +329,206 @@ export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonl
   }
 }
 
+/**
+ * T-61 (b), ruled 2026-11-17: what a file a MODEL wrote may not reach for, whatever the repository's own code imports. The
+ * author's code may use these; a model's may not, because what the model is shown of a stranger's repository can carry an
+ * instruction (T-22's security review). `http` and `https` stay allowed: a tiny web server is a legitimate idea, and Node's
+ * global `fetch` reaches the network whatever the imports say.
+ *
+ * **An intent check, never a sandbox.** It catches a model that reaches for one of these by name, innocently or on a
+ * planted instruction; it cannot catch code that hides what it does. The learner is told to read every model-written file
+ * before they run it (T-61 a), and that is the defence that holds.
+ *
+ * **What it does not refuse, and what it still does.** A definition of one of these names, a name the module binds
+ * itself, and a type-only import are not refused (T-61's code review, SF2). JSX text is read as code, so a page whose
+ * prose names `eval(` or `Function(` is refused, and an apostrophe in JSX text opens a string for the rest of its line,
+ * so a call after it on that line is not read (SF3): no lexical reading tells JSX text from code.
+ */
+const RUNS_PROGRAMS = 'which starts other programs';
+const RUNS_TEXT = 'which runs text as code';
+const OPENS_SOCKETS = 'which opens network connections of its own';
+const REACHES_IN = 'which reaches into the runtime';
+const REFUSED_NODE_MODULES: ReadonlyMap<string, string> = new Map([
+  ['child_process', RUNS_PROGRAMS], ['cluster', RUNS_PROGRAMS], ['worker_threads', RUNS_PROGRAMS],
+  ['vm', RUNS_TEXT], ['repl', RUNS_TEXT], ['inspector', REACHES_IN], ['dgram', OPENS_SOCKETS], ['net', OPENS_SOCKETS], ['tls', OPENS_SOCKETS],
+]);
+const REFUSED_PYTHON_MODULES: ReadonlyMap<string, string> = new Map([
+  ['subprocess', RUNS_PROGRAMS], ['multiprocessing', RUNS_PROGRAMS], ['pty', RUNS_PROGRAMS],
+  ['socket', OPENS_SOCKETS], ['ctypes', REACHES_IN],
+]);
+/** The calls that do the same with no import at all, read on `codeOnly`'s text (so a comment or a string is not one). */
+const REFUSED_JS_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }> = [
+  { re: /(?<![.\w$])process\s*\.\s*binding\s*\(/, name: 'process.binding', what: REACHES_IN },
+  { re: /(?<![.\w$])process\s*\.\s*dlopen\s*\(/, name: 'process.dlopen', what: REACHES_IN },
+  { re: /(?<![.\w$])eval\s*\(/, name: 'eval', what: RUNS_TEXT },
+  { re: /(?<![.\w$])Function\s*\(/, name: 'Function', what: RUNS_TEXT },
+];
+const REFUSED_PY_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }> = [
+  // A `def` or `class` of the name is its definition, not a call (T-61's code review, SF2).
+  { re: /(?<![.\w])(?<!\b(?:def|class)\s+)eval\s*\(/, name: 'eval', what: RUNS_TEXT },
+  { re: /(?<![.\w])(?<!\b(?:def|class)\s+)exec\s*\(/, name: 'exec', what: RUNS_TEXT },
+  { re: /(?<![.\w])(?<!\b(?:def|class)\s+)compile\s*\(/, name: 'compile', what: RUNS_TEXT },
+  { re: /(?<![.\w])os\s*\.\s*system\s*\(|\bfrom\s+os\s+import\b[^\n]*\bsystem\b/, name: 'os.system', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])os\s*\.\s*popen\s*\(|\bfrom\s+os\s+import\b[^\n]*\bpopen\b/, name: 'os.popen', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])os\s*\.\s*exec\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bexec\w*\b/, name: 'os.exec', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])os\s*\.\s*(?:posix_)?spawn\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\b(?:posix_)?spawn\w*\b/, name: 'os.spawn', what: RUNS_PROGRAMS },
+  // T-61's security review, SF1: the named forms the first list missed. asyncio itself is ordinary async Python.
+  { re: /(?<![.\w])os\s*\.\s*fork\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bfork\w*\b/, name: 'os.fork', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])asyncio\s*\.\s*create_subprocess_(?:exec|shell)\s*\(|\bfrom\s+asyncio\s+import\b[^\n]*\bcreate_subprocess_\w*/, name: 'asyncio.create_subprocess', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])asyncio\s*\.\s*open_(?:unix_)?connection\s*\(/, name: 'asyncio.open_connection', what: OPENS_SOCKETS },
+  { re: /(?<![.\w])asyncio\s*\.\s*start_(?:unix_)?server\s*\(/, name: 'asyncio.start_server', what: OPENS_SOCKETS },
+];
+/** A `require` of one of the refused modules, read on the file's own text (`codeOnly` blanks the name). */
+const JS_REQUIRE_OF = /(?<![.\w$])require\s*\(\s*(['"`])((?:node:)?([\w/]+))\1\s*\)/g;
+const REFUSED_TAIL = `code a model writes may not, ${KEEPS_AUTHORS_ROAD}`;
+
+/** Every module a Python file's own text imports, at any depth (`codeOnly`'s text, so a docstring's line is not one). */
+function pythonImportsInText(code: string): string[] {
+  const names: string[] = [];
+  for (const m of code.matchAll(PY_IMPORT)) {
+    for (const part of (m[1] ?? '').split(',')) {
+      const name = (part.trim().split(/\s+as\s+/)[0] ?? '').trim();
+      if (name !== '') names.push(name);
+    }
+  }
+  for (const m of code.matchAll(PY_FROM_IMPORT)) {
+    const name = m[1] ?? '';
+    if (name !== '' && !name.startsWith('.')) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * The names a Python module binds at its top level (a `def`, a `class`, an assignment, a top-level import's name), so a
+ * bare call to one is the module's own and not the builtin: `from re import compile` then `compile(r"x+")` (SF2). Only
+ * the top level: a method `def eval(self)` binds no bare `eval`, and an import inside a function binds it only there.
+ */
+function pythonBoundNames(code: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of code.matchAll(/^(?:async[ \t]+)?(?:def|class)[ \t]+(\w+)/gm)) names.add(m[1] ?? '');
+  for (const m of code.matchAll(/^(\w+)[ \t]*(?::[^=\n]*)?=(?!=)/gm)) names.add(m[1] ?? '');
+  for (const m of code.matchAll(/^from[ \t]+(\.*[A-Za-z_][\w.]*|\.+)[ \t]+import[ \t]+(\([^)]*\)|[^\n]*)/gm)) {
+    if ((m[1] ?? '') === 'builtins') continue;
+    for (const part of (m[2] ?? '').replace(/[()]/g, ' ').split(',')) {
+      const bits = part.trim().split(/\s+as\s+/);
+      const name = (bits[1] ?? bits[0] ?? '').trim();
+      if (name !== '') names.add(name);
+    }
+  }
+  for (const m of code.matchAll(/^import[ \t]+([^\n]+)/gm)) {
+    for (const part of (m[1] ?? '').split(',')) {
+      const alias = part.trim().split(/\s+as\s+/)[1];
+      if (alias !== undefined && alias.trim() !== '') names.add(alias.trim());
+    }
+  }
+  return names;
+}
+
+/** The index of the `)` that closes the `(` at `open`, or -1. On `codeOnly`'s text, so a string's parenthesis is not one. */
+function closingParen(code: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === '(') depth += 1;
+    else if (code[i] === ')') { depth -= 1; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/** Whether `index` starts a class or interface member: after `{`, `}`, `;` or `,`, and any modifiers. */
+function atMemberStart(code: string, index: number): boolean {
+  let before = code.slice(Math.max(0, index - 300), index);
+  for (;;) {
+    before = before.replace(/\s+$/, '');
+    const word = /(?:^|[^\w$])(public|private|protected|static|async|readonly|override|abstract|declare)$/.exec(before);
+    if (word === null) break;
+    before = before.slice(0, before.length - (word[1] ?? '').length);
+  }
+  return before === '' || /[{};,]$/.test(before);
+}
+
+/**
+ * Whether `re` finds a real call in JavaScript's code-only text. `NAME(...) {` on one line is a method's definition, and
+ * `NAME(...): T;` at the start of a member is a signature; neither is a call (SF2). `c ? eval(a) : b` still is one.
+ */
+function jsCalls(code: string, re: RegExp): boolean {
+  for (const m of code.matchAll(new RegExp(re.source, `${re.flags}g`))) {
+    const close = closingParen(code, m.index + m[0].length - 1);
+    if (close !== -1) {
+      const eol = code.indexOf('\n', close + 1);
+      const rest = code.slice(close + 1, eol === -1 ? code.length : eol);
+      if (/^[ \t]*(?::[^;{}=]*)?\{/.test(rest)) continue;
+      if (/^[ \t]*:[^;{}=]*;/.test(rest) && atMemberStart(code, m.index)) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether offset `at` of the file's own text is code, not inside a string or a comment. `codeOnly` drops a string's
+ * contents and a comment, so its offsets are not the file's; it reads the text up to `at` with a marker put there, and
+ * keeps the marker only where code stands.
+ */
+function isCodeAt(content: string, at: number, language: CodeLanguage): boolean {
+  return codeOnly(`${content.slice(0, at)}\u0000`, language).endsWith('\u0000');
+}
+
+const JS_FROM_CLAUSE = /\b(import|export)\b([^;'"`]*?)\bfrom\s*(['"])([^'"\n]+)\3/g;
+
+/**
+ * Whether every statement in the file that names `spec` as its module imports or re-exports only types, which
+ * TypeScript erases: `import type { AddressInfo } from 'node:net'`, `import { type Socket } from 'net'` (SF2). Fails
+ * closed: no such statement found, an empty `{}`, or one value import among them, and the module counts as loaded.
+ */
+function onlyTypesFrom(content: string, spec: string, language: CodeLanguage): boolean {
+  let found = false;
+  for (const m of content.matchAll(JS_FROM_CLAUSE)) {
+    if (m[4] !== spec) continue;
+    // Only where the code itself has the statement: a comment that quotes one is not one.
+    if (!isCodeAt(content, m.index, language)) continue;
+    found = true;
+    const clause = (m[2] ?? '').trim();
+    const specs = /^\{[^}]*\}$/.test(clause) ? clause.slice(1, -1).split(',').map((s) => s.trim()).filter((s) => s !== '') : [];
+    const typeOnly = /^type\b/.test(clause) || (specs.length > 0 && specs.every((s) => /^type\s/.test(s)));
+    if (!typeOnly) return false;
+  }
+  return found;
+}
+
+function runsAsTheLearner(extract: ExtractLike, content: string, code: string, language: CodeLanguage): string | null {
+  const refused = language === 'python' ? REFUSED_PYTHON_MODULES : REFUSED_NODE_MODULES;
+  // repo-tour's `extract` reads the imports it reaches. It does not reach a Python import more than four blocks deep,
+  // nor TypeScript's import-equals form, so the file's own text is read for both as well (T-61's code review, MF1, SF1).
+  for (const imp of extract.imports) {
+    if (imp.resolved !== null || imp.raw.startsWith('.')) continue;
+    const name = language === 'python' ? (imp.raw.split('.')[0] ?? '') : (imp.raw.replace(/^node:/, '').split('/')[0] ?? '');
+    const what = refused.get(name);
+    if (what !== undefined && !(language !== 'python' && onlyTypesFrom(content, imp.raw, language))) return `imports ${quote(imp.raw)}, ${what}: ${REFUSED_TAIL}`;
+  }
+  if (language === 'python') {
+    for (const raw of pythonImportsInText(code)) {
+      const what = REFUSED_PYTHON_MODULES.get(raw.split('.')[0] ?? '');
+      if (what !== undefined) return `imports ${quote(raw)}, ${what}: ${REFUSED_TAIL}`;
+    }
+  } else {
+    for (const m of content.matchAll(JS_REQUIRE_OF)) {
+      const what = REFUSED_NODE_MODULES.get((m[3] ?? '').split('/')[0] ?? '');
+      // Only where the code itself has a require there: a comment or a string that quotes one is not one.
+      if (what !== undefined && isCodeAt(content, m.index, language)) return `requires ${quote(m[2] ?? '')}, ${what}: ${REFUSED_TAIL}`;
+    }
+  }
+  const bound = language === 'python' ? pythonBoundNames(code) : new Set<string>();
+  // A from-import wrapped in parentheses across lines, as black and ruff write it, is read as one line (SF3).
+  const flat = language === 'python'
+    ? code.replace(/\bfrom(\s+[\w.]+\s+)import\s*\(([^)]*)\)/g, (_m, mod: string, names: string) => `from${mod}import ${names.replace(/\s+/g, ' ')}`)
+    : code;
+  for (const { re, name, what } of language === 'python' ? REFUSED_PY_CALLS : REFUSED_JS_CALLS) {
+    if (bound.has(name)) continue;
+    if (language === 'python' ? re.test(flat) : jsCalls(code, re)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
+  }
+  return null;
+}
+
 /** Why `node`'s file may not stand, from repo-tour's reading of it and its own text, or `null`. */
 export function refusalForFile(
   node: Pick<DerivedNode, 'path'>, content: string, extract: ExtractLike | undefined, allowedFiles: ReadonlySet<string>, plannedFiles: ReadonlySet<string>, language: CodeLanguage, rules: ImportRules = MODE_A_IMPORTS,
@@ -336,7 +537,8 @@ export function refusalForFile(
   const code = codeOnly(content, language);
   const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles, rules)
     ?? computedImportReason(code, language, rules)
-    ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null);
+    ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null)
+    ?? runsAsTheLearner(extract, content, code, language);
   return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
 }
 
@@ -542,7 +744,23 @@ async function replanCore(
 }
 
 /** Why a derivation may not start, or `null`. Checked before anything can be spent. */
+/**
+ * T-61 (d), ruled 2026-11-17: the providers whose command line runs with no tools. repo-tour runs `claude` with `--tools ''`
+ * in an empty folder, and `ollama` is a local HTTP call; `codex` runs in a read-only sandbox, which is still a shell that
+ * can read any file the learner can, while it is shown a stranger's repository. Mode A's derivation and a re-plan run only
+ * on these. (The tutor, the detour and the Start build under such a provider are T-160's.)
+ */
+export const PROVIDERS_WITHOUT_TOOLS: ReadonlySet<string> = new Set(['claude', 'ollama']);
+
+/** Why `what` will not run on `provider`, or `null` when the provider runs with no tools. */
+export function providerRefusal(provider: unknown, what: string): string | null {
+  if (typeof provider === 'string' && PROVIDERS_WITHOUT_TOOLS.has(provider)) return null;
+  return `the model provider is ${JSON.stringify(String(provider).slice(0, 40))}, whose command line can run tools on this machine (codex's read-only sandbox is a shell that can read your files), and ${what} runs only on a provider with none: claude or ollama. Nothing was asked`;
+}
+
 function startRefusal(deps: DeriveDeps): string | null {
+  const tools = providerRefusal(deps.settings.provider, 'a derivation');
+  if (tools !== null) return tools;
   // An empty model does not mean "the default" further down: `resolveTutorChoice` turns it into
   // the provider's STRONGEST model, so a caller that passed the raw setting would quietly buy
   // the expensive one. The caller resolves it, as `src/extension.ts`'s `resolveLlmSettings` does.
