@@ -251,7 +251,7 @@ suite('resumeOnActivate (T-3 rework, review finding 1)', () => {
     assert.equal(context.workspaceState.get<string>(CURRENT_BUILD_KEY), target, 'and the bookmark stays, as the marker does');
   });
 
-  test('T-122: a reload whose folder holds an older build than the one pressed offers nothing, and says the press was interrupted before it began', async () => {
+  test('T-122: a reload whose folder holds an older build than the one pressed offers nothing, and says the build in the folder is not the one pressed', async () => {
     const target = tmpDir('resume-pressed-other-');
     const old = writeMarkerAt(target, 60 * 1000); // the previous build's marker: the press never wrote its own
     const pressedNow = { ...old.request, repo: tmpDir('resume-pressed-repo-'), dial: 'automated' as const };
@@ -262,7 +262,7 @@ suite('resumeOnActivate (T-3 rework, review finding 1)', () => {
     await resumeOnActivate(context, deps);
 
     assert.equal(deps.confirmed.length, 0, 'the reload offered the build the learner had changed away from');
-    assert.deepEqual(deps.told, [`Build Tutorials: the build you pressed for ${target} was interrupted before it began, so nothing was resumed: press Build the plan to start it again`]);
+    assert.deepEqual(deps.told, [`Build Tutorials: the build in ${target} is not the one you last pressed in this window, so nothing was resumed: press Build the plan to start yours again`]);
     assert.equal(deps.loadCoreCalls, 0, 'the core was loaded to resume nothing');
     assert.equal(readMarker(target)?.startedAt, old.startedAt, 'the older marker was touched');
     assert.equal(context.workspaceState.get(CURRENT_BUILD_KEY), undefined, 'the bookmark stays, so every reload says it again');

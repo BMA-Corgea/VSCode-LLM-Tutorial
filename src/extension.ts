@@ -104,9 +104,15 @@ const CURRENT_BUILD_KEY = 'buildTutorials.currentBuild';
  */
 const PRESSED_REQUEST_KEY = 'buildTutorials.pressedRequest';
 
-/** Clears the bookmark, and the request pressed with it, unless a marker is still sitting at `target` waiting to be resumed. */
-async function forgetUnlessResumable(context: vscode.ExtensionContext, target: string): Promise<void> {
-  if (readMarker(target) === null) await forgetBuild(context);
+/**
+ * Clears the bookmark, and the request pressed with it, unless a marker is still sitting at `target` waiting to be
+ * resumed. After a press only the press's OWN marker keeps them (T-122's review, F1): a press that ended before its
+ * first write (its fetch failed, T-72's check refused it, another window's build arrived) leaves an older build's or
+ * another window's marker there, and a record kept for it would make a later reload say something false.
+ */
+async function forgetUnlessResumable(context: vscode.ExtensionContext, target: string, pressed?: BuildRequest): Promise<void> {
+  const marker = readMarker(target);
+  if (marker === null || (pressed !== undefined && !sameRequest(pressed, marker.request))) await forgetBuild(context);
 }
 
 async function forgetBuild(context: vscode.ExtensionContext): Promise<void> {
@@ -226,8 +232,10 @@ export async function runBuild(
   // except where it cannot — the write-ahead marker failing to write to the target.
   let outcome: BuildOutcome;
   try {
+    // What this press is, before the build begins (T-122), and before the bookmark: a reload between the two then pairs
+    // this record with an older bookmark, which offers nothing and says only what is true (the review's F3).
+    await context.workspaceState.update(PRESSED_REQUEST_KEY, request);
     await context.workspaceState.update(CURRENT_BUILD_KEY, request.target);
-    await context.workspaceState.update(PRESSED_REQUEST_KEY, request); // before the build: what this press is (T-122)
     outcome = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
       async (progress, token): Promise<BuildOutcome> => {
@@ -244,7 +252,7 @@ export async function runBuild(
   // After the progress has closed: the ending is told once, on screen and in a notification, and
   // nothing waits on the person to dismiss anything.
   reportOutcome(outcome, true);
-  await forgetUnlessResumable(context, request.target);
+  await forgetUnlessResumable(context, request.target, request);
   if (outcome.ok) await tellIfNoIdentity(request.target);
   if (outcome.ok) await openOrOfferWalk(context, request.target);
 }
@@ -376,12 +384,13 @@ export async function resumeOnActivate(
     await forgetBuild(context);
     return;
   }
-  // T-122: the marker is an older build's when the press this window made last asked for something else: that press
-  // stopped before it wrote its own (in its fetch, or T-72's check). It is not offered as the build pressed. A window
-  // with no record (from before T-122), or a marker for the very request pressed, goes on as before.
+  // T-122: the marker is not the build this window pressed last when that press asked for something else: the press
+  // has not yet written its own (a reload in its fetch, or T-72's check), or another window's build has replaced it.
+  // It is not offered as the build pressed, and the words claim no more than that (the review's F1). A window with no
+  // record (from before T-122), or a marker for the very request pressed, goes on as before.
   const pressed = context.workspaceState.get<BuildRequest>(PRESSED_REQUEST_KEY);
   if (pressed !== undefined && !sameRequest(pressed, fresh.request)) {
-    deps.tell(`Build Tutorials: the build you pressed for ${target} was interrupted before it began, so nothing was resumed: press Build the plan to start it again`);
+    deps.tell(`Build Tutorials: the build in ${target} is not the one you last pressed in this window, so nothing was resumed: press Build the plan to start yours again`);
     await forgetBuild(context);
     return;
   }
