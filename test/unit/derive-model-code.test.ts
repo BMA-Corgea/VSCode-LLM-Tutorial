@@ -8,6 +8,8 @@
  */
 
 import * as assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { loadCore, resolveCoreRoot, type CoreLoadResult } from '../../src/core.js';
 import { dialCoreFor, type DialCore } from '../../src/dial/core.js';
 import { extractAll, MODE_A_IMPORTS, REPO_IMPORTS, refusalForFile, type ImportRules } from '../../src/derive/engine.js';
@@ -206,6 +208,19 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
     ] as Array<[string, string, CodeLanguage]>) {
       assert.equal(await judged(file, code, language, REPO_IMPORTS), null, `${file} was refused`);
     }
+  });
+
+  // AC7, which the code review found unpinned (N8): the check says what it is, in its own source.
+  test('the file check\'s header and the refusal list each say: an intent check, never a sandbox (AC7)', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'derive', 'engine.ts'), 'utf8');
+    const headerOf = (marker: string): string => {
+      const at = src.indexOf(marker);
+      assert.ok(at !== -1, `${marker} is in engine.ts`);
+      const head = src.slice(0, at);
+      return head.slice(head.lastIndexOf('/**'));
+    };
+    assert.match(headerOf('export function unsoundFileReason('), /\(`runsAsTheLearner`\), which is an intent check, never a sandbox\./);
+    assert.match(headerOf('const RUNS_PROGRAMS'), /\*\*An intent check, never a sandbox\.\*\*/);
   });
 
   test('the words are about the model\'s code: a sentence that names one of them in a comment or a string is not refused', async () => {

@@ -148,8 +148,8 @@ function shownStepOf(node: DerivedNode, answers: Readonly<Record<string, string>
  * **This is a correctness check, never a sandbox.** It keeps the plan's graph true and the app
  * able to start. It does not make the code safe: a Node built-in can run a process or open a
  * socket, and the file runs as the learner the moment they run it. What the learner is told about
- * that belongs to the tickets that show it to them: T-61 tells them, and refuses by name what a model's file may not reach
- for (`runsAsTheLearner`), which is an intent check too.
+ * that belongs to the tickets that show it to them: T-61 tells them, and refuses by name what a
+ * model's file may not reach for (`runsAsTheLearner`), which is an intent check, never a sandbox.
  */
 export function unsoundFileReason(
   extract: ExtractLike, allowedFiles: ReadonlySet<string>, language: CodeLanguage, plannedFiles: ReadonlySet<string> = allowedFiles, rules: ImportRules = MODE_A_IMPORTS,
