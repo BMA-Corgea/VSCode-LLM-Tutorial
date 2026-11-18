@@ -94,3 +94,41 @@ suite('T-52: the Start form\'s fields, as VS Code draws its own inputs', () => {
     assert.ok(!/<input type="text"(?![^>]*id="(repo|target)")/.test(html), 'and there is no other text input on the form');
   });
 });
+
+/** T-110's Start half: the form's other controls, each in the container the selector names. */
+const CONTROLS = ['.checkbox-field input[type=checkbox]', '.dial input[type=radio]', '.panel-foot .skinpick'];
+
+suite('T-110: the Start form\'s checkbox, dial radios and skin picker show VS Code\'s focus outline under System', () => {
+  test('under System each draws VS Code\'s 1 px focusBorder outline on :focus-visible (the base sheet\'s glow alone measured 1.30 to 1.48:1)', () => {
+    const css = cssOf(startPage());
+    // The offsets too, the T-52 way (review N2): 1 px outside the small controls, inset in the picker like a field.
+    const offset: Record<string, string> = { '.checkbox-field input[type=checkbox]': '1px', '.dial input[type=radio]': '1px', '.panel-foot .skinpick': '-1px' };
+    for (const control of CONTROLS) {
+      const decls = declarationsFor(css, `${SYSTEM} ${control}:focus-visible`);
+      assert.match(decls, /outline:1px solid var\(--focus\)/, `${control}: no focusBorder outline under System`);
+      assert.match(decls, new RegExp(`outline-offset:${offset[control]}(;|$)`), `${control}: the offset is not ${offset[control]}: ${decls}`);
+    }
+  });
+
+  test('a named skin keeps its own: no unscoped focus rule for these controls', () => {
+    const css = cssOf(startPage());
+    for (const control of CONTROLS) {
+      assert.equal(declarationsFor(css, `${control}:focus-visible`), '', `${control}: an unscoped :focus-visible rule`);
+      assert.equal(declarationsFor(css, `${control}:focus`), '', `${control}: an unscoped :focus rule`);
+    }
+    // And no focus rule on the page at all that a named skin would get, whatever its selector (review S1): an extra
+    // `.skinpick:focus-visible` or `fieldset.dial input:focus` passed the checks above.
+    const focusSelectors = [...css.matchAll(/([^{}]+)\{[^{}]*\}/g)].flatMap((m) => m[1]!.split(',').map((x) => x.trim())).filter((x) => x.includes(':focus'));
+    assert.ok(focusSelectors.length >= 5, `the page's focus rules were not found: ${JSON.stringify(focusSelectors)}`);
+    for (const selector of focusSelectors) assert.ok(selector.startsWith(`${SYSTEM} `), `a focus rule a named skin would get: ${selector}`);
+  });
+
+  test('the selectors reach exactly the checkbox, the three dial radios and the skin picker', () => {
+    const html = startPage();
+    assert.match(html, /<div class="field checkbox-field">\s*<label><input type="checkbox" id="recreate"/, 'the checkbox sits in .checkbox-field');
+    const dial = /<fieldset class="field dial">([\s\S]*?)<\/fieldset>/.exec(html)?.[1] ?? '';
+    assert.equal([...dial.matchAll(/<input type="radio" name="dial"/g)].length, 3, 'the three dial radios sit in fieldset.dial');
+    assert.equal([...html.matchAll(/<input type="radio"/g)].length, 3, 'and there is no other radio on the form');
+    assert.match(html, /<div class="panel-foot"><select class="skinpick" id="skinpick"/, 'the skin picker sits in .panel-foot');
+  });
+});
