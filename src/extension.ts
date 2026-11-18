@@ -195,8 +195,13 @@ function reportOutcome(outcome: BuildOutcome | undefined, fromStartScreen: boole
 
 /** What the start screen's note says about a build that has ended. `undefined` is a dismissed resume. */
 function buildEnding(outcome: BuildOutcome | undefined): BuildEnding {
-  // T-171: a plan with no answer from the model in it is not "Done": the form says it failed, and why, under Reference repo.
-  if (outcome?.ok) return outcome.cost && everyQuestionFailed(outcome.cost) ? 'failed' : 'built';
+  // T-171: a plan with no answer from the model in it is not "Done": the form says it failed, and why, under Reference
+  // repo. One with SOME failed is built, and its note points at the line that says how many (review S2).
+  if (outcome?.ok) {
+    if (!outcome.cost) return 'built';
+    if (everyQuestionFailed(outcome.cost)) return 'failed';
+    return failedQuestionsSentence(outcome.cost) === undefined ? 'built' : 'partial';
+  }
   return !outcome || outcome.cancelled ? 'cancelled' : 'failed';
 }
 

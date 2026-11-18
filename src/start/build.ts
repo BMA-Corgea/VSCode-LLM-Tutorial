@@ -1156,10 +1156,32 @@ export function everyQuestionFailed(cost: InterpretCostLike): boolean {
   return failed > 0 && failed >= asked && numberIn(cost, 'interpretedStops') + numberIn(cost, 'cachedStops') === 0;
 }
 
-/** One reason, short: it is a provider's own words about one file, quoted for a notification and the form. */
-function shortReason(reason: string): string {
-  const flat = reason.replace(/\s+/g, ' ').trim();
-  return flat.length <= 200 ? flat : `${flat.slice(0, 199)}…`;
+/**
+ * The first failure, as a clause: repo-tour writes `<file>: <the provider's own words>`. The file is named by its base
+ * name, so a long path cannot crowd out the words, which are cut at 160 characters and end with one full stop however
+ * they ended (T-171 review S4).
+ */
+function reasonClause(first: string | undefined, failed: number): string {
+  if (first === undefined) return '';
+  const at = first.indexOf(': ');
+  const file = at > 0 ? first.slice(0, at) : '';
+  const words = (at > 0 ? first.slice(at + 2) : first).replace(/\s+/g, ' ').trim().replace(/[\s.:;,…]+$/, '');
+  const said = words.length <= 160 ? words : `${words.slice(0, 159)}…`;
+  const named = file === '' ? '' : ` (${path.basename(file)})`;
+  return ` ${failed === 1 ? 'Why' : 'The first reason'}${named}: ${said}.`;
+}
+
+/**
+ * What the learner can do about it, said only as far as it is true (T-171 review M1). The Doctor checks whether the
+ * `claude` CLI is FOUND, not whether it is logged in, so the sentence names both and says which one the Doctor shows.
+ */
+function providerAdvice(cost: InterpretCostLike): string {
+  const raw = cost['provider'];
+  const provider = typeof raw === 'string' ? raw : '';
+  if (provider === '' || provider === 'claude') {
+    return 'Check that the claude CLI is installed and logged in (Build Tutorials: Doctor shows whether it is found)';
+  }
+  return `Check that ${provider} is installed and can be reached`;
 }
 
 /**
@@ -1171,11 +1193,13 @@ function shortReason(reason: string): string {
 export function failedQuestionsSentence(cost: InterpretCostLike): string | undefined {
   const { asked, failed, first } = questionTally(cost);
   if (failed === 0) return undefined;
-  const why = first === undefined ? '' : ` The first: ${shortReason(first)}.`;
+  const why = reasonClause(first, failed);
+  const advice = providerAdvice(cost);
   if (everyQuestionFailed(cost)) {
-    return `The plan is built, but every one of its ${asked} question${asked === 1 ? '' : 's'} to the model failed, so no step has a why from the model.${why} Run Build Tutorials: Doctor to see why, then build again into an empty folder. You can still walk it: its steps, their order and the commits they come from are there.`;
+    // Worded as the failure the form's note calls it (review S1): the plan exists, the build's purpose did not happen.
+    return `The build got no answer from the model: every one of its ${asked} question${asked === 1 ? '' : 's'} failed, so the plan it wrote has no why from the model.${why} ${advice}, then build again into an empty folder. You can still walk the plan it wrote: its steps and their order are there.`;
   }
-  return `${failed} of ${asked} question${asked === 1 ? '' : 's'} to the model failed, so the steps of ${failed === 1 ? 'that file have' : 'those files have'} no why from the model.${why} Run Build Tutorials: Doctor to see why.`;
+  return `${failed} of ${asked} question${asked === 1 ? '' : 's'} to the model failed, so the steps of ${failed === 1 ? 'one file have' : `${failed} files have`} no why from the model.${why} ${advice}, then build again into an empty folder to get them.`;
 }
 
 /** The human-readable line spec §5.2's "cost is shown on completion" asks for. */

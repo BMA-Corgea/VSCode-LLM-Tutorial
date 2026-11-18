@@ -954,9 +954,12 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     held.end(allFailed);
     const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== SUBMIT_NOTES.building, 'the build gives the button back');
     assert.equal(ended.note, SUBMIT_NOTES.failed, 'a plan with no answer from the model in it was reported as Done');
-    assert.match(ended.problems[1] ?? '', /every one of its 2 questions to the model failed/);
-    assert.match(ended.problems[1] ?? '', /index\.js: claude was not found on PATH/);
+    assert.match(ended.problems[1] ?? '', /every one of its 2 questions failed/);
+    assert.match(ended.problems[1] ?? '', /\(index\.js\): claude was not found on PATH/);
     assert.match(ended.problems[1] ?? '', /Build Tutorials: Doctor/);
+    // Review S3: the notification says it too, as a warning, not the information a clean build gets.
+    const said = (await centre()).join('\n');
+    assert.match(said, /every one of its 2 questions failed/, `the notification did not say it: ${said}`);
   });
 
   test('T-171: a build where some questions failed is built, and the form says how many, under Reference repo', async () => {
@@ -969,7 +972,9 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await until(read, (s) => s.button === 'Building… [disabled]' && s.note === SUBMIT_NOTES.building, 'an accepted press says it is building');
     held.end(someFailed);
     const ended = await until(read, (s) => s.button === 'Build the plan' && s.note !== SUBMIT_NOTES.building, 'the build gives the button back');
-    assert.equal(ended.note, SUBMIT_NOTES.built);
+    assert.equal(ended.note, SUBMIT_NOTES.partial, 'the note under the button must point at the line that says how many (review S2)');
     assert.match(ended.problems[1] ?? '', /^1 of 3 questions to the model failed/, 'the form said nothing about the failed question');
+    const said = (await centre()).join('\n');
+    assert.match(said, /1 of 3 questions to the model failed/, `the notification did not say it: ${said}`);
   });
 });

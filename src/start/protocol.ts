@@ -75,8 +75,12 @@ export interface PanelState {
   failedInARow?: number;
 }
 
-/** How a build that the start screen started came to an end — what its note says afterwards. */
-export type BuildEnding = 'built' | 'failed' | 'cancelled';
+/**
+ * How a build that the start screen started came to an end — what its note says afterwards. `partial` (T-171): the
+ * plan is built, but some of its questions to the model failed; how many, and why, is under Reference repo. A build
+ * whose EVERY question failed ends `failed`.
+ */
+export type BuildEnding = 'built' | 'partial' | 'failed' | 'cancelled';
 
 /** The failure count after a build ends this way: one more for a failure, none after anything else. */
 export function failedInARowAfter(previous: number | undefined, ended: BuildEnding): number {
