@@ -913,7 +913,11 @@ suite('the start screen, read off the screen (T-15 AC1–AC6)', function () {
     await until(read, filled, 'valid form');
     await press(page);
     await until(read, (s) => s.note === SUBMIT_NOTES.building, 'building');
-    assert.equal(context.workspaceState.get(BOOKMARK), request.target);
+    // T-154: the press writes its record and then the bookmark (T-122, its review's F3), so the bookmark can land a
+    // moment after the page says "Building…". Waited for, bounded, not read at once (GitHub CI, run 44230665824).
+    const bookmarkedBy = Date.now() + 5_000;
+    while (context.workspaceState.get(BOOKMARK) !== request.target && Date.now() < bookmarkedBy) await sleep(50);
+    assert.equal(context.workspaceState.get(BOOKMARK), request.target, 'the press never bookmarked the folder it builds in');
 
     held.end({ ok: false, reason: 'refused for the test' });
     // Nobody touches the notifications. runBuild must finish on its own.
