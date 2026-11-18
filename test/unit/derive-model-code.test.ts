@@ -59,6 +59,25 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
     }
   }
 
+  // T-61's code review, SF1: TypeScript's import-equals reaches the module the way require does.
+  test('TypeScript, import cp = require(\'child_process\'), in a replan: refused in one sentence', async () => {
+    const reason = await judged('src/run.ts', "import cp = require('child_process');\nexport const run = () => cp.execSync('true');\n", 'typescript', REPO_IMPORTS);
+    assert.ok(reason !== null, 'import cp = require(\'child_process\') passed the check');
+    assert.match(reason, /child_process.*starts other programs/);
+    assert.match(reason, AUTHORS_ROAD);
+  });
+
+  test('a nested import the text read must still pass: a relative one, and one inside a docstring (MF1)', async () => {
+    const cases: Array<[string, string]> = [
+      ['app/nested.py', 'def load():\n    if True:\n        from . import helpers\n        return helpers\n'],
+      ['app/doc.py', 'def run():\n    """\n    import subprocess\n    from socket import socket\n    """\n    return 1\n'],
+    ];
+    for (const [file, code] of cases) {
+      const reason = await judged(file, code, 'python', REPO_IMPORTS);
+      assert.ok(reason === null || !/starts other programs|network connections/.test(reason), `${file} was refused: ${reason ?? ''}`);
+    }
+  });
+
   // CommonJS, which only a replan's rules allow (Mode A's files are ES modules and refuse require outright).
   test('JavaScript, a CommonJS require of child_process, in a replan: refused in one sentence', async () => {
     const reason = await judged('src/run.cjs', "const { execSync } = require('child_process');\nmodule.exports = () => execSync('true');\n", 'javascript', REPO_IMPORTS);
@@ -88,6 +107,11 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
     ['asyncio.create_subprocess_exec', 'import asyncio\n\nasync def run():\n    await asyncio.create_subprocess_exec("true")\n', /calls asyncio\.create_subprocess/],
     ['asyncio.create_subprocess_shell', 'import asyncio\n\nasync def run():\n    await asyncio.create_subprocess_shell("true")\n', /calls asyncio\.create_subprocess/],
     ['asyncio.open_connection', 'import asyncio\n\nasync def run():\n    await asyncio.open_connection("example.invalid", 80)\n', /calls asyncio\.open_connection.*network connections/],
+    // T-61's code review, MF1: an import deeper than repo-tour's extract reads is read from the text.
+    ['subprocess, in a method\'s if', 'class Runner:\n    def run(self):\n        if True:\n            import subprocess\n            return subprocess.run(["true"])\n', /subprocess.*starts other programs/],
+    ['subprocess, in a method\'s try', 'class Runner:\n    def run(self):\n        try:\n            import subprocess\n        except ImportError:\n            return None\n        return subprocess\n', /subprocess.*starts other programs/],
+    ['socket, in a decorated method', 'import functools\n\nclass Client:\n    @functools.cache\n    def connect(self):\n        import socket\n        return socket\n', /socket.*network connections of its own/],
+    ['from subprocess import, two blocks deep in a function', 'def run(flag):\n    if flag:\n        for _ in range(1):\n            from subprocess import run as go\n            go(["true"])\n', /subprocess.*starts other programs/],
   ];
   for (const [name, code, said] of py) {
     test(`Python, ${name}: refused in one sentence that says why and what the learner keeps`, async () => {

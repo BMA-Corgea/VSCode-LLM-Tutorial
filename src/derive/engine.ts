@@ -372,16 +372,47 @@ const REFUSED_PY_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }
   { re: /(?<![.\w])asyncio\s*\.\s*open_(?:unix_)?connection\s*\(/, name: 'asyncio.open_connection', what: OPENS_SOCKETS },
   { re: /(?<![.\w])asyncio\s*\.\s*start_(?:unix_)?server\s*\(/, name: 'asyncio.start_server', what: OPENS_SOCKETS },
 ];
+/** A `require` of one of the refused modules, read on the file's own text (`codeOnly` blanks the name). */
+const JS_REQUIRE_OF = /(?<![.\w$])require\s*\(\s*(['"`])((?:node:)?([\w/]+))\1\s*\)/g;
 const REFUSED_TAIL = 'code a model writes may not, so this step keeps the author\u2019s road';
 
-function runsAsTheLearner(extract: ExtractLike, code: string, language: CodeLanguage): string | null {
+/** Every module a Python file's own text imports, at any depth (`codeOnly`'s text, so a docstring's line is not one). */
+function pythonImportsInText(code: string): string[] {
+  const names: string[] = [];
+  for (const m of code.matchAll(PY_IMPORT)) {
+    for (const part of (m[1] ?? '').split(',')) {
+      const name = (part.trim().split(/\s+as\s+/)[0] ?? '').trim();
+      if (name !== '') names.push(name);
+    }
+  }
+  for (const m of code.matchAll(PY_FROM_IMPORT)) {
+    const name = m[1] ?? '';
+    if (name !== '' && !name.startsWith('.')) names.push(name);
+  }
+  return names;
+}
+
+function runsAsTheLearner(extract: ExtractLike, content: string, code: string, language: CodeLanguage): string | null {
   const refused = language === 'python' ? REFUSED_PYTHON_MODULES : REFUSED_NODE_MODULES;
-  // repo-tour's `extract` reads every import, a CommonJS `require` of a plain string included.
+  // repo-tour's `extract` reads the imports it reaches. It does not reach a Python import more than four blocks deep,
+  // nor TypeScript's import-equals form, so the file's own text is read for both as well (T-61's code review, MF1, SF1).
   for (const imp of extract.imports) {
     if (imp.resolved !== null || imp.raw.startsWith('.')) continue;
     const name = language === 'python' ? (imp.raw.split('.')[0] ?? '') : (imp.raw.replace(/^node:/, '').split('/')[0] ?? '');
     const what = refused.get(name);
     if (what !== undefined) return `imports ${quote(imp.raw)}, ${what}: ${REFUSED_TAIL}`;
+  }
+  if (language === 'python') {
+    for (const raw of pythonImportsInText(code)) {
+      const what = REFUSED_PYTHON_MODULES.get(raw.split('.')[0] ?? '');
+      if (what !== undefined) return `imports ${quote(raw)}, ${what}: ${REFUSED_TAIL}`;
+    }
+  } else {
+    for (const m of content.matchAll(JS_REQUIRE_OF)) {
+      const what = REFUSED_NODE_MODULES.get((m[3] ?? '').split('/')[0] ?? '');
+      // Only where the code itself has a require there: a comment or a string that quotes one is not one.
+      if (what !== undefined && /(?<![.\w$])require\s*\(/.test(code.slice(m.index, m.index + m[0].length))) return `requires ${quote(m[2] ?? '')}, ${what}: ${REFUSED_TAIL}`;
+    }
   }
   for (const { re, name, what } of language === 'python' ? REFUSED_PY_CALLS : REFUSED_JS_CALLS) {
     if (re.test(code)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
@@ -398,7 +429,7 @@ export function refusalForFile(
   const unsound = unsoundFileReason(extract, allowedFiles, language, plannedFiles, rules)
     ?? computedImportReason(code, language, rules)
     ?? (language === 'python' ? undeclaredPythonImport(code, node.path, allowedFiles, plannedFiles) : null)
-    ?? runsAsTheLearner(extract, code, language);
+    ?? runsAsTheLearner(extract, content, code, language);
   return unsound === null ? null : refuse(`the derived file ${node.path} ${unsound}`);
 }
 
