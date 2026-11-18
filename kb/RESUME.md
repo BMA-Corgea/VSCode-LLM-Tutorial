@@ -1,169 +1,175 @@
-# RESUME — Build Tutorials · foreman burn run of Wed 2026-11-11, 17:15–19:30 MST
+# RESUME — Build Tutorials · MVP run of Tue 2026-11-17, 13:37–22:20 MST
 
-> **Read this file first and read it in order. It is written for someone who was not here.**
-> The run ended at 91% of the week, before its 94% wind-down line (A-20261111-1803-4bd7), because what was left
-> (T-72's fix, T-22's R3, T-92) could not reach a clean stage boundary before the 93% line stops new stages: starting
-> any of it would have left half-built work for the power-off that follows. **Nothing was deleted after 17:31**
-> (A-20261111-1731-24c9, the owner away): see "Cleanup for the owner" at the end.
+## NEEDS THE OWNER
 
-**In one line:** GitHub CI is **green on every step** at `f841827` (run 43140599113), for the first time since
-2026-09-05, and it is the first run ever to reach the install check and the publish dry run (nothing was published).
-Landed and pushed tonight: T-51 (last night's merge), T-71, T-83, T-70 and T-131. Five tickets closed on the owner's
-form answer. T-72 and T-22 are held on their branches, each for a real reason.
+Road: proof · Rung: applications · A stranger can now download Build Tutorials v0.1.0 from this repository's GitHub
+Releases page, install it, and build and walk a tutorial of a real repository, which gives an application a
+working, installable VS Code extension to point to.
 
----
+1. **Sign off 15 tickets at `uat`**: T-72, T-92, T-91, T-141, T-140, T-120, T-22, T-152, T-171, T-122, T-154, T-121,
+   T-61, T-110 (its Start-form half) and T-73. All landed today on `main` and are green on GitHub on every step (the last
+   is CI 44242668108 on `45fdfd5`). *Recommend:* accept on the evidence, as the owner did on Nov 11's Q4 and today's
+   evening-form Q4. *If never:* they stay at `uat`; the code is on `main` either way.
+2. **T-90's product ruling, now with a live data point.** In AC12 run 2 the re-derived `isInRange` destructured
+   `[start, end]` pairs while the author's data file holds flat arrays, so the re-planned app would throw on its first
+   lookup: D's code question is never shown the file it rewrites. *Recommend:* (a) show the file as it stands, framed so
+   the author's code does not argue for the author's road. *If never:* the replan (on `main`, not in v0.1.0) can write
+   code that doesn't fit the data it reads; it is labelled as the model's, and T-61 refuses process and eval calls in it.
+3. **T-161, optional:** after a symbol press, the taken-over file's own question can't be chosen anywhere (the
+   reviewer's cheaper alternative is in the ticket). The foreman's ruling stands for v0.1 until the owner rules.
+4. **Optional: the Marketplace and Open VSX.** v0.1.0 is on GitHub Releases only. Publishing to either registry needs
+   the owner's own tokens and is the owner's act (T-8's script refuses otherwise).
+5. *(Carried from Nov 11, never put to the owner)* The CI secret holds the owner's first name only; this machine's own
+   package check searches the git email instead. *Recommend:* leave it.
 
-## 0 · NEEDS THE OWNER (each with a recommendation, and what happens if never answered)
+## 0 · In one paragraph
 
-1. **Sign off T-51, T-71, T-83, T-70, T-130 and T-131.** Each is at `uat`, on `main`, with its own tests green on
-   GitHub. The owner's Q4 answer covered only the five it named (T-81, T-80, T-40, T-52, T-82: closed tonight).
-   *Recommend:* accept on the evidence, as Q4. *If never:* they stay at `uat`; the code is on `main` either way.
-2. **The CI secret holds the owner's first name only**, as the Q5 answer said ("your name as the foremen's push checks
-   already know it"; no other names in its notes). This machine's own package check searches the git email instead:
-   the git name here is the public org name, which the check skips. *Recommend:* leave it. *If never:* CI checks the
-   name and this machine checks the email.
+**Build Tutorials v0.1.0 is public:** https://github.com/BMA-Corgea/VSCode-LLM-Tutorial/releases/tag/v0.1.0, tag
+`v0.1.0` at `1656cf9`. Before it was published, all four of the owner's conditions (form "Build Tutorials release",
+GA-29) were checked:
+- the hostile-repository safety tickets T-72, T-92 and T-91 (plus T-120), and the first-run words of T-141, are on `main`;
+- CI is green on every step at the release commit;
+- the release's `.vsix` is byte for byte the one CI built (sha256 `6fce9047…7467`);
+- a live stranger check from that downloaded file passed: fresh profile; Doctor; a build from
+  `github.com/sindresorhus/get-east-asian-width` with 10 of 10 questions answered ($0.36); an automated step; Check my
+  work; a tutor answer; a reload; no ticket number on any screen.
 
-Decided for the owner tonight, standing unless overturned: T-22's R3 is one writer per file after a symbol press
-(`.autodev/foreman/2026-11-11-burn/decisions/t22-r3-one-writer.md`); T-22's second live model run waits for the next run,
-because it must judge the final head and R3 is not built.
+After the release, the replan (T-22) and its safety rules (T-61) landed on `main`, with T-171, T-122, T-121, T-110's
+Start half, T-73 and two test fixes. **`main` is green on GitHub at `45fdfd5`, and nothing is unpushed.**
 
 ## 1 · WHAT YOU WILL GET WRONG IF YOU TRUST THIS REPO
 
-1. **"Green here means green on GitHub."** It didn't, twice tonight. GitHub's runner has **no git identity**, so a
-   passing check's commit is refused there, and that refusal's note pushed the verdict out of view (T-83; a learner on
-   a fresh machine meets the same path). And the install check's own `xvfb-run` closed its display about a second after
-   the `code` launcher returned, so the editor never opened (T-131); every local run had an outer `xvfb-run`, which hid
-   it. **Read `gh run list` after every push.** VSCodium's half of the install check is UNPROVEN on GitHub (not on the
-   runner), by design.
-2. **"vscode-test runs the same VS Code here and on GitHub."** No. Here: 1.145.2, always pinned with `--code-version
-   1.145.2` (the config's `stable` now resolves to 1.146.0 and would download). GitHub: 1.146.0 since tonight.
-3. **"The repo-tour beside the tree is the one CI tests against."** No: CI checks out repo-tour's GitHub `main`, now
-   `e79619b` (pushed 18:35 tonight, carrying repo-tour's T-63). T-63 is this repo's T-72 fix applied there (the owner's
-   Q6): repo-tour no longer follows a link out of the tree. It broke T-30's committed-cache test's positive control here;
-   fixed in `4a1837e` (inside T-83), checked on both repo-tour heads (T-130), green on GitHub against the new core.
-   After any repo-tour landing, re-run this unit suite against its new head the same hour.
-4. **"A unit failure under load is a defect."** Load ran 17-43 on 20 threads tonight: T-13's subprocess scan,
-   dial-commit's stranded-file test and T-30 AC2's stall bound each failed once under load and passed alone
-   (0.3-1.3 s). One quiet re-run before believing a timing failure. T-13's scan sits near mocha's 2 s timeout.
-5. **"T-72 only needs its merge."** No: merging it with T-71 needs new code, and a focused blind check found that code
-   can delete a live build's marker. See §2.
-6. **"T-22 is close to landing."** No: R3 (must-fix) is ruled but not built, R11, R9 and NF3 are open, the re-check of
-   tonight's fixes has not run, and AC12's second live run has not been made.
-7. **"The run's evidence is in /tmp."** /tmp is wiped at boot. Everything needed is in the main checkout's `.autodev/`
-   (untracked by design, on this disk only) or on a branch.
+1. **"v0.1.0 has the replan."** It does not. v0.1.0 is `1656cf9`, which has none of T-22, T-61, T-171, T-122, T-121,
+   T-110 or T-73. The README on `main` describes the replan and says the release does not have it. **A next release
+   carries T-22 only because T-61 is on `main` too, and that rule stands:** see
+   `.autodev/foreman/2026-11-17/decisions/t22-lands-after-the-release-commit.md`.
+2. **"T-110 is done."** Only its Start-form half landed (`e6964c4`). The step panel's controls are still open (T-110's
+   handoff), although the ticket sits at `uat`. File the panel half as its own ticket, or rewind T-110, before
+   accepting it.
+3. **"T-61's AC9 (a model following an instruction a repository planted) is proven."** It is not. The one live press
+   was refused at parse: `lookup.js`'s reply was not one JSON object, probably cut off. Nothing was written or run, and
+   the only code question shown the plant was the refused one. AC9 is carried to T-162.
+4. **"Unit and host green means safe to land."** Not here. T-122 landed after unit and host only, and turned `main` red
+   on GitHub: T-15 AC6 read the bookmark one await too early, and T-154 fixed it. **Run every label the change lives in
+   (unit, `host` AND `screen`) on the exact head,** in a `git archive` copy. A seat's own tree carries compiled tests of
+   other branches in `dist/`.
+5. **"A red Test step on GitHub is a regression."** Twice today it was not: a test helper's race (T-152) and a timing
+   assumption (T-154), both test-only fixes now on `main`. Read the failing test before reverting anything.
+6. **"The shared machine lock is first come, first served."** Only if every waiter backs off. Fast polls starved another
+   foreman for 45 minutes, so `bigstep.sh` now waits 150 s after any release. An EMPTY lock folder (no owner or pid)
+   blocks every big step on the machine until someone renames it aside.
+7. **"repo-tour's main is e79619b"** (Nov 11's RESUME). It is `b0006b7` (T-59, T-67), pushed 2026-11-12 02:03Z; every
+   CI run since has used it.
 
 ## 2 · HALF-DONE, UNVERIFIED, OR DELIBERATELY PARKED
 
-| what | state at the end | next / trigger |
+| what | state | trigger / owner |
 |---|---|---|
-| **T-72** hostile `.gitattributes` | `feature/T-72-hostile-gitattributes` @ `2c09378` (main `75a6c7c` merged in), clean, at its merge gate, **not merged**. Its own work is green (unit 1862, screen 35, host 89; F5 red-checked; 31 mutants killed). The 5-minute check of the T-71 merge resolution (`.autodev/reviews/T-72-merge-check.md`) found `deleteMarker` can remove a live build's marker when the marker on disk predates T-71's ids, and a marker or `plan.json` that appears during the walk is overwritten; and T-30's real-Cancel screen test races T-72's walk (34/35 on the merge tree) | the fix order in `.autodev/handoffs/T-72.md` (walk first, then T-71's live-build check, then delete only a marker that is not running, matched on `id ?? startedAt`; the screen test waits for the read's progress line), one focused check, GO |
-| **T-22** the replan | `feature/T-22-the-replan` @ `e77666e`, clean, `auto-review`. Tonight: a fresh blind re-review (2 must-fix, 6 should-fix, 3 notes) and both reviews' fixes over 7 commits, each red first; host 89, screen 34; unit 1971 with 1 failing that was T-30's control before its fix reached main (merge main to clear it) | merge main; build R3 (ruled); a focused blind re-check of tonight's fixes; then AC12 run 2 (authorised; harness proved dry): `.autodev/handoffs/T-22.md` |
-| T-51, T-71, T-83, T-70, T-130, T-131 | at `uat`, on `main`, green on GitHub | the owner's accept (§0.1) |
-| **T-92** (risk high) | not started | first after T-22: a cloned repository's own `.repo-tour/` can aim the dial and the tutor at a file under a root it chooses |
-| T-120..T-123, T-90, T-91, T-93, T-94, T-110, T-111, T-100, T-50, T-73, T-60, T-23, T-14, T-18, T-20, T-61 | filed, named by a go-ahead, not started | by what a learner meets first; T-61 before T-20 ships Mode A (Q9: T-61's draft rulings are its starting defaults) |
-| next-run candidates, not filed | T-13's subprocess scan near mocha's 2 s timeout; a learner with no git identity first hears of it at their first passing check (an earlier word on the Start screen would help); T-131's notes (a killed `xvfb-run` may leave a temp folder; the `DISPLAY` test is written twice) | file when next touched |
+| T-23 (the replan never touches the walked prefix or the disk) | `queue`, R9 ruled (A) | first for the engine seat next run; its handoff gives the steps |
+| T-110's step-panel half | not built | file it, or rewind T-110, before the owner accepts T-110 |
+| T-162 (T-61's open notes, and AC9) | filed, `intake` | AC9 needs another live press, kept raw: the foreman's call on subscription usage |
+| T-50, T-123 (MVP items 10 and 13) | `intake`, not started | both touch the step panel, so not alongside T-61 and T-73 |
+| T-150 (a planted marker's Resume builds a repository the folder names; medium), T-151, T-153, T-160, T-161, T-170 | filed today, below the MVP line | — |
+| T-14, T-18, T-20 (Mode A), T-90 (needs the ruling above), T-93, T-94, T-60, T-100, T-111 | `intake` | below the MVP line |
 
-**Killed rather than finished:** none. Every seat ended at a stage boundary on the foreman's word.
+**Killed rather than finished:** none of the run's tickets. One foreman re-derive was killed by Claude Code for low
+memory at 17:33, and not restarted, per the harness. T-120 landed on its seat's checks plus GitHub CI instead, and that
+is said in its record.
 
 ## 3 · AUTHORITY
 
-- **GA-22** (the owner's words, 2026-11-11 about 17:00: "pick up where the foremen left off last night … I need it to
-  burn out", A-20261111-1712-5c46, plus form Q5 and Q9) names the work the 2026-11-10 RESUME queued. **GA-23** (form Q4)
-  cleared the accept gates of T-81, T-80, T-40, T-52 and T-82 only. **GA-24..GA-26** record the same words for tickets
-  filed tonight (T-120..T-122; T-123, T-130; T-131). Every other accept gate stays the owner's.
-- The form "Nov 10 Run Questions" (https://claude.ai/artifact/HSV9CM2A5dZsGi5s6KKv9x) was read first-hand from its
-  state-data (submitted 2026-11-11 23:43 UTC).
-- Push: `main` only, after each reviewed landing, `push-scan.sh` first (GA-16 Q13). Branches stay local.
-- One action outside the ledger: `gh secret set BUILD_TUTORIALS_OWNER_NAMES` (Q5), from a 0600 file, never printed;
-  the file was removed before the away rule began. Package has passed with it on every GitHub run since.
+- GA-27 (today's words, 13 tickets, scope_confirmed false), GA-28 (T-140, T-141), **GA-29 (the owner's form: publish
+  v0.1.0 once four checks hold, now spent)**, **GA-30 (the owner's evening form: the accepts of T-51, T-71, T-83, T-70,
+  T-130 and T-131, cleared today)**, GA-31 (T-171), GA-32 (T-152), GA-33 (T-154).
+- Push: `main` only, after a reviewed landing, `push-scan.sh` first (GA-16 Q13). Branches stay local.
+- Forms: "Build Tutorials release" https://claude.ai/artifact/RwcrmtvjZkEYBr9GRWpJDe (answered A, spent). The evening
+  form https://claude.ai/artifact/FGZRhDkBsUDmiU9yvSV2Qx (its Q4 is answered and spent).
 
 ## 4 · THE INSTRUMENTS
 
-All in `.autodev/foreman/2026-11-11-burn/` (local, untracked): `instruments/rederive.sh` (the foreman's check of a head
-in a `git archive` copy; tonight it printed "to delete" paths that were NOT deleted), `push-scan.sh`, `safe-send.sh`
-(refuses to paste into a seat with a prompt open), `watch-seats.mjs`; `foreman.conf` (seats under `nice -n 10`,
-`TMPDIR=/tmp/fmv-cJ5M7G/<seat>`); `briefs/` (both charters and every message sent); `decisions/`; `log.md`;
-`report-input.md`; `foreman-checks/` (every GitHub run's log and every re-derive).
-
-**Known gap:** `seat send` cannot prove delivery of a one-line message (no marker): read the transcript instead.
+In `.autodev/foreman/2026-11-17/instruments/` on the main checkout (untracked, local): `bigstep.sh` (one big step
+machine-wide, a memory floor, nice 19 and idle I/O, a 150 s back-off after any release), `clear.py` (removes scratch
+by exact path, only what was born today), `rederive.sh`, `push-scan.sh`, `safe-send.sh`, `watch-seats.mjs` (also
+flags a question asked without a marker; persists its offsets), `meter-read.sh` and `meter-loop.sh`. **Before
+reusing them, edit `clear.py`'s `ROOTS` and `TODAY_BOOT`, and the `/tmp/fmv-…` and run-folder paths.** What each one
+refuses, and why, is in the appendix of the run folder's `RESUME.md`. Seat bt-ui's own instruments are in
+`.autodev/foreman/2026-11-17/seat-bt-ui-instruments/`.
 
 ## 5 · THE SHAPE OF THE RUN
 
-- Two seats, fresh (not resumed: last night's T-22 seat held 864k tokens of context), `opus` → claude-opus-5-5,
-  `--effort max`: `bt-ui` (session `f8c837fc-931c-4367-a214-dd7d79ba2cb4`, `VSCode-LLM-Tutorial-bt-ui` plus
-  `-bt-polish` for T-83: T-71, T-83, T-70, T-72) and `bt-engine` (`9979c76c-1cc5-4d99-873c-4b375b394bdf`,
-  `-bt-engine`: T-22, T-130, T-131). Both closed at the end; either resumes with `claude --resume <id>` in its tree.
-- Blind Opus reviews inside each seat, plus a focused check wherever a fix or a merge resolution was a new mechanism.
-  The foreman re-derived every head before its GO, pushed after each landing and read each GitHub run.
-- The real VS Code 1.145.2 install is in the `VSCode-LLM-Tutorial-bt-t30` worktree's `.vscode-test/`; keep that tree.
+- Three seats on `opus` (claude-opus-5-5 by their transcripts), effort max, nice 19 from 17:36. All closed. Each
+  resumes with `claude --resume <id>` in its tree:
+  - **bt-ui** `2167d1aa-2f31-4b37-a524-b2d3389c85a0`, in `VSCode-LLM-Tutorial-bt-ui`: T-72, T-91, T-141, T-120, T-152,
+    T-122, T-154, T-73.
+  - **bt-engine** `8f08d029-56e8-4c5b-8a88-b3a2f2eceb86`, in `VSCode-LLM-Tutorial-bt-engine`: T-22, T-61, then T-23 next.
+  - **bt-guard** `2bf92f33-f030-4ce8-85dc-12c3a950e07a`, in `VSCode-LLM-Tutorial-bt-polish`: T-92, T-140 and the
+    release, T-171, T-121, T-110's Start half.
+- The release worktree `VSCode-LLM-Tutorial-bt-release` was removed at the wind-down; its branch `feature/T-140-release`
+  is merged and kept. Re-cutting a release: `node scripts/release-draft.mjs <main sha>` prints the draft command;
+  `--verify-draft` checks the draft's asset byte for byte.
+- Run folder: `.autodev/foreman/2026-11-17/`, with `MVP.md`, `log.md` (every decision with its time), `decisions/`,
+  `briefs/` (every message sent), `foreman-checks/` (every re-derive and CI log) and `report-input.md`.
+- **Real VS Code 1.145.2 lives in `VSCode-LLM-Tutorial-bt-t30/.vscode-test/`**; the other trees link to it. Keep that tree.
 
 ## 6 · STATE, PASTED FROM THE AUDIT
 
-Pasted from `wind-down/reference/wd-audit` at 19:31, project paths elided (public repo). `dirty:1` is
-`kb/CURRENT-WORK.md` (the tracker's rewrite), committed with this file right after. The pytest in flight is fm-autosql's
-(its cwd is the `GIMS-asql-dash` tree), not this run's. The scratchpad listing is fm-guts's session (37 files), trimmed
-here; this run's scratchpad holds nothing. The three local-only branches are the owner's Q13 rule (`T-8-package`
-predates this run).
+Run at 22:18 MST, after every seat was closed and the disk step was done. `dirty:1` is `kb/CURRENT-WORK.md` (the
+tracker's rewrite), committed with this file. `T-61-before-rebase-2026-11-17` is a local ref kept on purpose, so the
+old SHAs in T-61's evidence still resolve. The scratchpad instruments listed belong to another foreman's session (GUTS),
+not this run's.
 
 ```
-── GATES / LONG RUNS STILL IN FLIGHT ─────────────────────────────────────────
-2486195 .venv/bin/python -m pytest tests/test_g11_paths_stay_in_their_project.py tests/test_g70_camera_run_id_stays_in_its_project.py tests/test_archi
-  ^ LET THESE FINISH, or record the SHA + command + 'killed, not failed'.
-
-── UNCOMMITTED / UNPUSHED, PER REPO ─────────────────────────────────────────
+── GATES / LONG RUNS STILL IN FLIGHT ──
+  none running (a bash shell merely WAITING on one does not count)
+── UNCOMMITTED / UNPUSHED, PER REPO ──
   VSCode-LLM-Tutorial            [main] dirty:1   untracked:0   unpushed:0
-
-── BRANCHES THAT EXIST ONLY ON THIS DISK (every local branch, not just the checked-out one) ─────────────────────────────────────────
-  feature/T-22-the-replan              28 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
-  feature/T-72-hostile-gitattributes    6 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
+── BRANCHES THAT EXIST ONLY ON THIS DISK ──
+  T-61-before-rebase-2026-11-17         8 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
   feature/T-8-package                   1 commit(s)  <-- NO REMOTE COUNTERPART, exists only on this disk
-  Stash entries ... 0 entry(s), and the stack is shared across worktrees.
-
-── SEAT HOLDS — every one of these must be GONE before the panes close ─────────────────────────────────────────
+  Stash entries ... 0 entry(s)
+── SEAT HOLDS ──
   none (good)
-
-── WORKER PANES ─────────────────────────────────────────
+── WORKER PANES ──
   no w-* sessions
-
-── INSTRUMENTS STILL ONLY IN A SCRATCHPAD — these die with the session ─────────────────────────────────────────
-  /tmp/claude-1000/<the GUTS project>/<fm-guts's session>/scratchpad   (37 files: fm-guts's, not this run's)
-
-── OPERATOR GATES STILL OPEN ─────────────────────────────────────────
-  go-aheads recorded: 26
+── INSTRUMENTS STILL ONLY IN A SCRATCHPAD ──
+  (another foreman's session: GUTS)
+── OPERATOR GATES STILL OPEN ──
+  go-aheads recorded: 33
   grants recorded:    0  (0 is fine if that was decided)
 ```
 
 ## 7 · THE BOARD
 
-- **Landed and pushed tonight:** T-51 (`3c858cb`, last night's merge), T-71 (`c4dded9`), T-83 (`2c61b7b`), T-70
-  (`aa41e36`), T-131 (`75a6c7c`, `1125115`, `f841827`). `main` = `origin/main` = `f841827` plus this kb commit.
-- **Closed on the owner's Q4:** T-81, T-80, T-40, T-52, T-82.
-- **At `uat`:** T-51, T-71, T-83, T-70, T-130, T-131.
-- **Filed tonight:** T-120..T-123 (bt-ui), T-130, T-131 (bt-engine).
-- **Final main `f841827`:** the full suite once at the end, here: unit 1842, host 89, screen 33 (1.145.2), first runs,
-  temp folder unchanged (`.autodev/evidence/main-2026-11-11/verify-f841827.log`); GitHub run 43140599113 green on every
-  step.
+- **Published:** v0.1.0 at `1656cf9`.
+- **Landed and pushed today, in order:** T-72 `954d7a0`, T-92 `bfda586`, T-91 `ff48dff`, T-141 `b00d38d`, T-140
+  `728c584`, T-120 `1656cf9`, T-152 `eb830c3`, T-22 `e35ba56`, T-171 `59aeae9`, T-122 `2dfdfaa`, T-154 `34ba7f5`, T-121
+  `f8c185c`, T-110 (Start half) `e6964c4`, T-61 `a491fb0`, T-73 `45fdfd5`. All 15 are at `uat`.
+- **Closed today** (accepted on the owner's evening-form Q4, GA-30): T-51, T-71, T-83, T-70, T-130, T-131.
+- **Filed today:** T-140, T-141, T-150, T-151, T-152, T-153, T-154, T-160, T-161, T-162, T-170, T-171.
+- **Open:** T-23 (`queue`); 18 at `intake`, listed in §2.
 
-## 8 · WHAT THIS RUN LEARNED THAT IS NOT IN A TICKET
+## 8 · WHAT THIS RUN LEARNED
 
-A push read on GitHub found, in one night, two failures this machine could not show (a runner with no git identity, a
-virtual display that outlived nothing), and fixing both turned two months of red into a fully green run. A fix applied
-to a sibling repository broke this repository's test within the hour, and two seats then fixed it at once, because the
-foreman answered one seat's heads-up and not the other's: answer every heads-up, or route it. And a 5-minute blind look
-at a merge resolution, held for on a mechanism with a review history, found a live-marker deletion that every green
-suite had passed.
+The release was cut twice. A review of a later ticket found a one-click link a planted marker could still draw, at the
+very commit the first draft pointed at: "every gate green" and "the MVP's promise kept" are different claims, and only
+re-reading the promise catches the gap. And a test label skipped because "nothing it draws changed" turned main red
+within the hour, so run every label a change lives in.
 
-## Cleanup for the owner (nothing below was deleted, by the away rule)
+## Cleanup for the owner (nothing below was deleted)
 
-Everything under `/tmp` is wiped at the next boot anyway.
-
-- `/tmp/fmv-cJ5M7G/` (2.0 GB): the seats' temp folders (`bt-ui/` 1.1 GB, `bt-engine/` 480 MB: test temp folders,
-  reviewers' scratch, `git archive` copies, editor profiles, T-83's diagnostic in `bt-ui/moved/T-83/`, T-131's wrappers)
-  and the foreman's re-derive copies (`fm/`, 430 MB, with its `fm/repo-tour` link).
-- In the worktrees, gitignored: `VSCode-LLM-Tutorial-bt-engine/build-tutorials-0.0.1.vsix`, its `vendor/` and
-  `.scratch/ac12/dry-ff9d67e.vscode-test.mjs`; `VSCode-LLM-Tutorial-bt-polish/.scratch/vscode-test.pinned.mjs` and an
-  empty `test/screen-diag/`.
+*Carried from 2026-11-11, untouched:*
 - Local branches merged into `main` and kept: `feature/T-51-plan-ends`, `-T-70-…`, `-T-71-…`, `-T-83-…`, `-T-130-…`,
   `-T-131-install-logs`.
 - In `.autodev/reviews/`: `T-71-recheck-stopped-2026-11-10.md` and `T-22-rereview-partial-2026-11-10.md` (with its
-  `-drives/`), last night's stopped partial reviews, moved aside.
+  `-drives/`).
+- In the worktrees, gitignored: `VSCode-LLM-Tutorial-bt-engine/build-tutorials-0.0.1.vsix`, its `vendor/` and
+  `.scratch/` folders from Nov 10-11; `VSCode-LLM-Tutorial-bt-polish/.scratch/vscode-test.pinned.mjs`, its `vendor/`
+  and an empty `test/screen-diag/`.
+
+*Added today:*
+- `VSCode-LLM-Tutorial-bt-ui/.vscode-test/vscode-linux-x64-1.145.0`: a real 178 MB VS Code install from Nov 5. It
+  slows T-13's scan in that tree (T-151), and bt-polish links to it.
+- Local branches merged into `main` today and kept: `feature/T-72-…`, `-T-92-…`, `-T-91-…`, `-T-141-…`, `-T-140-release`,
+  `-T-120-…`, `-T-152-…`, `-T-22-the-replan`, `-T-171-…`, `-T-122-…`, `-T-154-…`, `-T-121-…`, `-T-110-…`, `-T-61-…`,
+  `-T-73-…`; and the local ref `T-61-before-rebase-2026-11-17`.
+- In the coordinator's run folder: this run's `bigstep.lock.released-*-fm-vscode-llm-tutorial-*` lock history.

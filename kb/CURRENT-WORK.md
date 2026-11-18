@@ -7,10 +7,11 @@ here and found via the reference table below.
 
 ## Live edge
 
-> **The foreman burn run of 2026-11-11 ended cleanly at 91% of the week: read [`kb/RESUME.md`](RESUME.md) first.**
-> GitHub CI is green on every step at `f841827`. T-51, T-71, T-83, T-70 and T-131 landed and are pushed; T-72 and
-> T-22 are held on local branches with exact handoffs. It supersedes "Where that stands" and "Waiting on" below,
-> which still describe September.
+> **The MVP run of 2026-11-17 ended cleanly at 75% of the week: read [`kb/RESUME.md`](RESUME.md) first.**
+> **v0.1.0 is public** (GitHub Releases, tag `v0.1.0` at `1656cf9`). Fifteen tickets landed and are pushed, and `main`
+> is green on GitHub at `45fdfd5`. The replan (T-22) and its safety rules (T-61) are on `main` but not in v0.1.0.
+> Fifteen tickets wait at `uat` for the owner's accept. This note supersedes "Where that stands" and "Waiting on"
+> below, which still describe September.
 
 <!-- What is in motion right now: one line per active ticket/effort —
      what, why, where it stands, what is next. Never pruned while live.
@@ -50,38 +51,50 @@ that undo and the deferred replan diff need the same substrate.
 **Test baseline on `main`: 1248 unit + 75 vscode-test.** It was 479 + 50 when T-6 began.
 
 - **T-14** (feature) — Undo a divergence — return to the pre-divergence plan — intake
-- **T-23** (feature) — The walked prefix and the learner's disk — a replan never touches either — intake
 - **T-18** (feature) — Asking before showing — the decision comes before its code in a Mode A walk — intake
 - **T-20** (feature) — The idea path — the start screen's idea box builds a Mode A plan — intake
 - **T-60** (bug) — A Claude reply's input token count leaves out cached input — intake
 - **T-50** (bug) — A press from a stale step page acts on the step the learner moved to, on every … — intake
-- **T-61** (feature) — Model-written code runs as the learner: tell them first, and decide which built… — intake
-- **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — auto-review
-- **T-73** (bug) — A second Check my work with nothing changed leaves the panel exactly as it was:… — intake
+- **T-22** (feature) — The replan — after a divergence the remaining steps follow the learner's choice — uat
 - **T-81** (bug) — The unit and screen suites leave about 390 temp folders per run in /tmp and nev… — monitor
 - **T-40** (feature) — Codicons in the webviews, and waiting states that move — monitor
 - **T-80** (bug) — T-15's folder-picker screen test fails on clean main: the press after a failed … — monitor
-- **T-71** (bug) — After a failed build the same form is refused as 'not empty', with no word that… — uat
+- **T-71** (bug) — After a failed build the same form is refused as 'not empty', with no word that… — monitor
 - **T-100** (bug) — Every vscode-test host run leaves a dead vscode-git-*.sock in XDG_RUNTIME_DIR — intake
-- **T-70** (bug) — Cancel during 'asking about each decision…' does not stop the model calls — the… — uat
-- **T-72** (bug) — A .gitattributes committed as a symlink to /dev/zero makes repo-tour's read end… — gate
+- **T-70** (bug) — Cancel during 'asking about each decision…' does not stop the model calls — the… — monitor
+- **T-72** (bug) — A .gitattributes committed as a symlink to /dev/zero makes repo-tour's read end… — uat
 - **T-82** (bug) — CI has been red since Sep 8: a newer git (2.56) no longer prints the index.lock… — monitor
 - **T-52** (feature) — The Start form's fields: the theme's placeholder colour and focus outline — monitor
 - **T-90** (feature) — A symbol press rewrites its whole file from the decision alone: show the code q… — intake
-- **T-91** (bug) — The Start build writes request.json and plan.json through a linked .repo-tour/b… — intake
-- **T-92** (bug) — The dial and the tutor read a taught step's file from an attacker-chosen refere… — intake
 - **T-93** (bug) — A re-plan question cancelled in flight is paid for twice: its late answer is ne… — intake
 - **T-94** (techdebt) — Derived trees: a lifetime cap of 200 files per plan, and orphan trees never pru… — intake
-- **T-110** (bug) — The Start form's checkbox, radios and skin picker show no focus outline under S… — intake
 - **T-111** (techdebt) — native-polish.test.ts's CSS-rule helpers squeeze out every space, so a selector… — intake
-- **T-51** (bug) — Previous and Next at the ends of the plan are enabled and answer nothing — uat
-- **T-120** (bug) — A Resume or Discard the reload declines does nothing and says nothing — intake
-- **T-121** (bug) — A build's heartbeat is a wall-clock time compared across clocks: a clock ahead … — intake
-- **T-122** (bug) — A reload during a build's clone offers to Resume the previous build's request, … — intake
-- **T-83** (bug) — On GitHub's runner the step panel's Check my work verdict ends below the panel:… — uat
+- **T-51** (bug) — Previous and Next at the ends of the plan are enabled and answer nothing — monitor
+- **T-83** (bug) — On GitHub's runner the step panel's Check my work verdict ends below the panel:… — monitor
 - **T-123** (bug) — The step panel's hold (T-83) misses a refusal that comes over 20 s after the pr… — intake
-- **T-130** (bug) — T-30's committed-cache test leans on the core following a link out of the tree — uat
-- **T-131** (bug) — CI's install-and-activate step fails on VS Code 1.146.0: no exthost.log is prod… — uat
+- **T-130** (bug) — T-30's committed-cache test leans on the core following a link out of the tree — monitor
+- **T-131** (bug) — CI's install-and-activate step fails on VS Code 1.146.0: no exthost.log is prod… — monitor
+- **T-92** (bug) — The dial and the tutor read a taught step's file from an attacker-chosen refere… — uat
+- **T-140** (feature) — A release a stranger can install: the CI-verified .vsix on a draft GitHub relea… — uat
+- **T-141** (bug) — A stranger's first run reads an internal ticket number on the Start form, and l… — uat
+- **T-91** (bug) — The Start build writes request.json and plan.json through a linked .repo-tour/b… — uat
+- **T-61** (feature) — Model-written code runs as the learner: tell them first, and decide which built… — uat
+- **T-160** (feature) — The tutor, the detour and the Start build hand a repository's content to a prov… — intake
+- **T-170** (bug) — verify:install with no display leaves its virtual display's scratch in TMPDIR o… — intake
+- **T-150** (bug) — A Resume builds the repository a marker file names, on a prompt that names only… — intake
+- **T-161** (feature) — After a symbol press, the file's own file-level question can no longer be chose… — intake
+- **T-120** (bug) — A Resume or Discard the reload declines does nothing and says nothing — uat
+- **T-151** (techdebt) — T-13's subprocess-scan test walks the whole working tree, so a .vscode-test ins… — intake
+- **T-23** (feature) — The walked prefix and the learner's disk — a replan never touches either — queue
+- **T-171** (bug) — A build whose questions to the model all failed says it is done, and the strang… — uat
+- **T-122** (bug) — A reload during a build's clone offers to Resume the previous build's request, … — uat
+- **T-152** (bug) — pressNotificationButton clicks the first 'Build Tutorials' notification, which … — uat
+- **T-73** (bug) — A second Check my work with nothing changed leaves the panel exactly as it was:… — uat
+- **T-153** (bug) — Keyboard focus leaves the pressed button whenever a press repaints the panel — intake
+- **T-154** (bug) — AC6 reads the bookmark the moment the page says Building, but T-122 writes it a… — uat
+- **T-121** (bug) — A build's heartbeat is a wall-clock time compared across clocks: a clock ahead … — uat
+- **T-162** (feature) — T-61's follow-up: the code review's open notes, and AC9's unanswered question (… — intake
+- **T-110** (bug) — The Start form's checkbox, radios and skin picker show no focus outline under S… — uat
 
 ## Waiting on
 
@@ -105,6 +118,20 @@ that undo and the deferred replan diff need the same substrate.
 - **T-83** — waiting at spec_ready on human:owner since 2026-11-12
 - **T-130** — waiting at spec_ready on human:owner since 2026-11-12
 - **T-131** — waiting at spec_ready on human:owner since 2026-11-12
+- **T-92** — waiting at spec_ready on human:owner since 2026-11-17
+- **T-140** — waiting at spec_ready on human:owner since 2026-11-17
+- **T-141** — waiting at spec_ready on human:owner since 2026-11-17
+- **T-61** — waiting at spec_ready on human:owner since 2026-11-17
+- **T-91** — waiting at spec_ready on human:owner since 2026-11-17
+- **T-120** — waiting at spec_ready on human:owner since 2026-11-17
+- **T-23** — waiting at spec_ready on human:owner since 2026-11-18
+- **T-171** — waiting at spec_ready on human:owner since 2026-11-18
+- **T-122** — waiting at spec_ready on human:owner since 2026-11-18
+- **T-152** — waiting at spec_ready on human:owner since 2026-11-18
+- **T-73** — waiting at spec_ready on human:owner since 2026-11-18
+- **T-154** — waiting at spec_ready on human:owner since 2026-11-18
+- **T-121** — waiting at spec_ready on human:owner since 2026-11-18
+- **T-110** — waiting at spec_ready on human:owner since 2026-11-18
 
 
 ## Known landmines (not bugs today; they bite on a named trigger)
