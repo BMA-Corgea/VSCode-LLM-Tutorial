@@ -284,8 +284,9 @@ const REAL_RESUME_DEPS: ResumeDeps = {
     { location: vscode.ProgressLocation.Notification, title: 'Build Tutorials', cancellable: true },
     (progress, token) => task(progress, token),
   )),
-  confirm: (message) => Promise.resolve(vscode.window.showInformationMessage(message, 'Resume', 'Discard')),
-  tell: (message) => { void vscode.window.showInformationMessage(message); },
+  // Both through `neutraliseLinks`, as every notification is (T-72 security review, finding 1; T-120 review F2).
+  confirm: (message) => Promise.resolve(vscode.window.showInformationMessage(neutraliseLinks(message), 'Resume', 'Discard')),
+  tell: (message) => { void vscode.window.showInformationMessage(neutraliseLinks(message)); },
 };
 
 /**
@@ -329,6 +330,7 @@ export async function resumeOnActivate(
     const resumeCtx: ResumeContext = {
       ...buildContextFor(context, core, progress, token),
       confirm: deps.confirm,
+      markerSeen: true, // this function read a fresh marker just above, before it opened the progress
     };
     return resumeIfMarked(target, resumeCtx);
   });

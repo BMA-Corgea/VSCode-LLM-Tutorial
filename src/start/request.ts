@@ -42,7 +42,7 @@ export const HEARTBEAT_MS = 30_000;
 export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS;
 /** A marker with no heartbeat (one written before T-71) is taken as a build in progress for this long. */
 const NO_HEARTBEAT_STALE_MS = 6 * 60 * 60 * 1000;
-const PHASES = ['digest', 'plan', 'interpret', 'write'];
+export const PHASES: readonly string[] = ['digest', 'plan', 'interpret', 'write'];
 
 export type Dial = 'manual' | 'scaffolded' | 'automated';
 

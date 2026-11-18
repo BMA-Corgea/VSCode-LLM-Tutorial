@@ -242,7 +242,7 @@ suite('resumeOnActivate (T-3 rework, review finding 1)', () => {
     await resumeOnActivate(context, deps);
 
     assert.equal(deps.confirmed.length, 0, 'the prompt was shown for a build that is running');
-    assert.deepEqual(deps.told, [`Build Tutorials: a build in ${target} is running on another machine, so it is not offered here`], 'the reload declined in silence');
+    assert.deepEqual(deps.told, [`Build Tutorials: a build in ${target} is running elsewhere (in another window, or on another machine), so it is not offered here`], 'the reload declined in silence');
     assert.equal(readMarker(target)?.id, 'elsewhere', 'its marker was touched');
     assert.equal(context.workspaceState.get<string>(CURRENT_BUILD_KEY), target, 'and the bookmark stays, as the marker does');
   });
