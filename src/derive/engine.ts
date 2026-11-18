@@ -345,7 +345,7 @@ const OPENS_SOCKETS = 'which opens network connections of its own';
 const REACHES_IN = 'which reaches into the runtime';
 const REFUSED_NODE_MODULES: ReadonlyMap<string, string> = new Map([
   ['child_process', RUNS_PROGRAMS], ['cluster', RUNS_PROGRAMS], ['worker_threads', RUNS_PROGRAMS],
-  ['vm', RUNS_TEXT], ['inspector', REACHES_IN], ['dgram', OPENS_SOCKETS], ['net', OPENS_SOCKETS], ['tls', OPENS_SOCKETS],
+  ['vm', RUNS_TEXT], ['repl', RUNS_TEXT], ['inspector', REACHES_IN], ['dgram', OPENS_SOCKETS], ['net', OPENS_SOCKETS], ['tls', OPENS_SOCKETS],
 ]);
 const REFUSED_PYTHON_MODULES: ReadonlyMap<string, string> = new Map([
   ['subprocess', RUNS_PROGRAMS], ['multiprocessing', RUNS_PROGRAMS], ['pty', RUNS_PROGRAMS],
@@ -365,7 +365,12 @@ const REFUSED_PY_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }
   { re: /(?<![.\w])os\s*\.\s*system\s*\(|\bfrom\s+os\s+import\b[^\n]*\bsystem\b/, name: 'os.system', what: RUNS_PROGRAMS },
   { re: /(?<![.\w])os\s*\.\s*popen\s*\(|\bfrom\s+os\s+import\b[^\n]*\bpopen\b/, name: 'os.popen', what: RUNS_PROGRAMS },
   { re: /(?<![.\w])os\s*\.\s*exec\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bexec\w*\b/, name: 'os.exec', what: RUNS_PROGRAMS },
-  { re: /(?<![.\w])os\s*\.\s*spawn\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bspawn\w*\b/, name: 'os.spawn', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])os\s*\.\s*(?:posix_)?spawn\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\b(?:posix_)?spawn\w*\b/, name: 'os.spawn', what: RUNS_PROGRAMS },
+  // T-61's security review, SF1: the named forms the first list missed. asyncio itself is ordinary async Python.
+  { re: /(?<![.\w])os\s*\.\s*fork\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bfork\w*\b/, name: 'os.fork', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])asyncio\s*\.\s*create_subprocess_(?:exec|shell)\s*\(|\bfrom\s+asyncio\s+import\b[^\n]*\bcreate_subprocess_\w*/, name: 'asyncio.create_subprocess', what: RUNS_PROGRAMS },
+  { re: /(?<![.\w])asyncio\s*\.\s*open_(?:unix_)?connection\s*\(/, name: 'asyncio.open_connection', what: OPENS_SOCKETS },
+  { re: /(?<![.\w])asyncio\s*\.\s*start_(?:unix_)?server\s*\(/, name: 'asyncio.start_server', what: OPENS_SOCKETS },
 ];
 const REFUSED_TAIL = 'code a model writes may not, so this step keeps the author\u2019s road';
 

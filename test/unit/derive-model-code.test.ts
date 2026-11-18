@@ -43,6 +43,7 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
     ['tls', "import tls from 'node:tls';\nexport const t = tls;\n", /tls/],
     ['process.binding', "export const b = () => process.binding('spawn_sync');\n", /process\.binding/],
     ['process.dlopen', "export const d = (m, f) => process.dlopen(m, f);\n", /process\.dlopen/],
+    ['repl (the security review, SF1)', "import repl from 'node:repl';\nexport const r = () => repl.start();\n", /node:repl.*runs text as code/],
     ['eval', "export const e = (s) => eval(s);\n", /calls eval/],
     ['Function', "export const f = (s) => Function(s)();\n", /calls Function/],
     ['new Function', "export const f = (s) => new Function(s)();\n", /calls Function/],
@@ -80,6 +81,13 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
     ['eval', 'def run(s):\n    return eval(s)\n', /calls eval/],
     ['exec', 'def run(s):\n    exec(s)\n', /calls exec/],
     ['compile', 'def run(s):\n    return compile(s, "x", "exec")\n', /calls compile/],
+    // T-61's security review, SF1: named vectors the first list missed.
+    ['os.fork', 'import os\n\ndef run():\n    return os.fork()\n', /calls os\.fork/],
+    ['os.forkpty', 'import os\n\ndef run():\n    return os.forkpty()\n', /calls os\.fork/],
+    ['os.posix_spawn', 'import os\n\ndef run():\n    os.posix_spawn("/bin/true", ["true"], {})\n', /calls os\.spawn/],
+    ['asyncio.create_subprocess_exec', 'import asyncio\n\nasync def run():\n    await asyncio.create_subprocess_exec("true")\n', /calls asyncio\.create_subprocess/],
+    ['asyncio.create_subprocess_shell', 'import asyncio\n\nasync def run():\n    await asyncio.create_subprocess_shell("true")\n', /calls asyncio\.create_subprocess/],
+    ['asyncio.open_connection', 'import asyncio\n\nasync def run():\n    await asyncio.open_connection("example.invalid", 80)\n', /calls asyncio\.open_connection.*network connections/],
   ];
   for (const [name, code, said] of py) {
     test(`Python, ${name}: refused in one sentence that says why and what the learner keeps`, async () => {
@@ -95,6 +103,8 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
       ['src/serve.js', "import http from 'http';\nimport https from 'node:https';\nimport fs from 'fs';\nimport path from 'path';\nimport { EventEmitter } from 'events';\nexport const s = [http, https, fs, path, EventEmitter];\nconst retrieval = (x) => x;\nexport const r = (o) => o.eval(retrieval(1));\n", 'javascript'],
       ['src/types.ts', "export type Handler = Function;\nexport const call = (h: Handler): unknown => h;\n", 'typescript'],
       ['app/text.py', 'import re\nimport os\n\nPATTERN = re.compile(r"x")\nHERE = os.path.dirname(__file__)\n', 'python'],
+      // asyncio itself is ordinary async Python: only its subprocess and raw-socket calls are refused.
+      ['app/tasks.py', 'import asyncio\n\nasync def main():\n    await asyncio.sleep(0)\n\nasyncio.run(main())\n', 'python'],
     ] as Array<[string, string, CodeLanguage]>) {
       assert.equal(await judged(file, code, language, REPO_IMPORTS), null, `${file} was refused`);
     }
