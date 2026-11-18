@@ -338,6 +338,10 @@ export async function extractAll(core: Pick<DialCore, 'extract'>, files: readonl
  * **An intent check, never a sandbox.** It catches a model that reaches for one of these by name, innocently or on a
  * planted instruction; it cannot catch code that hides what it does. The learner is told to read every model-written file
  * before they run it (T-61 a), and that is the defence that holds.
+ *
+ * **What it does not refuse, and what it still does.** A definition of one of these names, a name the module binds
+ * itself, and a type-only import are not refused (T-61's code review, SF2). JSX text is read as code, so a page whose
+ * prose names `eval(` or `Function(` is refused: no lexical reading tells JSX text from code.
  */
 const RUNS_PROGRAMS = 'which starts other programs';
 const RUNS_TEXT = 'which runs text as code';
@@ -359,9 +363,10 @@ const REFUSED_JS_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }
   { re: /(?<![.\w$])Function\s*\(/, name: 'Function', what: RUNS_TEXT },
 ];
 const REFUSED_PY_CALLS: ReadonlyArray<{ re: RegExp; name: string; what: string }> = [
-  { re: /(?<![.\w])eval\s*\(/, name: 'eval', what: RUNS_TEXT },
-  { re: /(?<![.\w])exec\s*\(/, name: 'exec', what: RUNS_TEXT },
-  { re: /(?<![.\w])compile\s*\(/, name: 'compile', what: RUNS_TEXT },
+  // A `def` or `class` of the name is its definition, not a call (T-61's code review, SF2).
+  { re: /(?<![.\w])(?<!\b(?:def|class)\s+)eval\s*\(/, name: 'eval', what: RUNS_TEXT },
+  { re: /(?<![.\w])(?<!\b(?:def|class)\s+)exec\s*\(/, name: 'exec', what: RUNS_TEXT },
+  { re: /(?<![.\w])(?<!\b(?:def|class)\s+)compile\s*\(/, name: 'compile', what: RUNS_TEXT },
   { re: /(?<![.\w])os\s*\.\s*system\s*\(|\bfrom\s+os\s+import\b[^\n]*\bsystem\b/, name: 'os.system', what: RUNS_PROGRAMS },
   { re: /(?<![.\w])os\s*\.\s*popen\s*\(|\bfrom\s+os\s+import\b[^\n]*\bpopen\b/, name: 'os.popen', what: RUNS_PROGRAMS },
   { re: /(?<![.\w])os\s*\.\s*exec\w*\s*\(|\bfrom\s+os\s+import\b[^\n]*\bexec\w*\b/, name: 'os.exec', what: RUNS_PROGRAMS },
@@ -392,6 +397,103 @@ function pythonImportsInText(code: string): string[] {
   return names;
 }
 
+/**
+ * The names a Python module binds at its top level (a `def`, a `class`, an assignment, a top-level import's name), so a
+ * bare call to one is the module's own and not the builtin: `from re import compile` then `compile(r"x+")` (SF2). Only
+ * the top level: a method `def eval(self)` binds no bare `eval`, and an import inside a function binds it only there.
+ */
+function pythonBoundNames(code: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of code.matchAll(/^(?:async[ \t]+)?(?:def|class)[ \t]+(\w+)/gm)) names.add(m[1] ?? '');
+  for (const m of code.matchAll(/^(\w+)[ \t]*(?::[^=\n]*)?=(?!=)/gm)) names.add(m[1] ?? '');
+  for (const m of code.matchAll(/^from[ \t]+(\.*[A-Za-z_][\w.]*|\.+)[ \t]+import[ \t]+(\([^)]*\)|[^\n]*)/gm)) {
+    if ((m[1] ?? '') === 'builtins') continue;
+    for (const part of (m[2] ?? '').replace(/[()]/g, ' ').split(',')) {
+      const bits = part.trim().split(/\s+as\s+/);
+      const name = (bits[1] ?? bits[0] ?? '').trim();
+      if (name !== '') names.add(name);
+    }
+  }
+  for (const m of code.matchAll(/^import[ \t]+([^\n]+)/gm)) {
+    for (const part of (m[1] ?? '').split(',')) {
+      const alias = part.trim().split(/\s+as\s+/)[1];
+      if (alias !== undefined && alias.trim() !== '') names.add(alias.trim());
+    }
+  }
+  return names;
+}
+
+/** The index of the `)` that closes the `(` at `open`, or -1. On `codeOnly`'s text, so a string's parenthesis is not one. */
+function closingParen(code: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === '(') depth += 1;
+    else if (code[i] === ')') { depth -= 1; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/** Whether `index` starts a class or interface member: after `{`, `}`, `;` or `,`, and any modifiers. */
+function atMemberStart(code: string, index: number): boolean {
+  let before = code.slice(Math.max(0, index - 300), index);
+  for (;;) {
+    before = before.replace(/\s+$/, '');
+    const word = /(?:^|[^\w$])(public|private|protected|static|async|readonly|override|abstract|declare)$/.exec(before);
+    if (word === null) break;
+    before = before.slice(0, before.length - (word[1] ?? '').length);
+  }
+  return before === '' || /[{};,]$/.test(before);
+}
+
+/**
+ * Whether `re` finds a real call in JavaScript's code-only text. `NAME(...) {` on one line is a method's definition, and
+ * `NAME(...): T;` at the start of a member is a signature; neither is a call (SF2). `c ? eval(a) : b` still is one.
+ */
+function jsCalls(code: string, re: RegExp): boolean {
+  for (const m of code.matchAll(new RegExp(re.source, `${re.flags}g`))) {
+    const close = closingParen(code, m.index + m[0].length - 1);
+    if (close !== -1) {
+      const eol = code.indexOf('\n', close + 1);
+      const rest = code.slice(close + 1, eol === -1 ? code.length : eol);
+      if (/^[ \t]*(?::[^;{}=]*)?\{/.test(rest)) continue;
+      if (/^[ \t]*:[^;{}=]*;/.test(rest) && atMemberStart(code, m.index)) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether offset `at` of the file's own text is code, not inside a string or a comment. `codeOnly` drops a string's
+ * contents and a comment, so its offsets are not the file's; it reads the text up to `at` with a marker put there, and
+ * keeps the marker only where code stands.
+ */
+function isCodeAt(content: string, at: number, language: CodeLanguage): boolean {
+  return codeOnly(`${content.slice(0, at)}\u0000`, language).endsWith('\u0000');
+}
+
+const JS_FROM_CLAUSE = /\b(import|export)\b([^;'"`]*?)\bfrom\s*(['"])([^'"\n]+)\3/g;
+
+/**
+ * Whether every statement in the file that names `spec` as its module imports or re-exports only types, which
+ * TypeScript erases: `import type { AddressInfo } from 'node:net'`, `import { type Socket } from 'net'` (SF2). Fails
+ * closed: no such statement found, an empty `{}`, or one value import among them, and the module counts as loaded.
+ */
+function onlyTypesFrom(content: string, spec: string, language: CodeLanguage): boolean {
+  let found = false;
+  for (const m of content.matchAll(JS_FROM_CLAUSE)) {
+    if (m[4] !== spec) continue;
+    // Only where the code itself has the statement: a comment that quotes one is not one.
+    if (!isCodeAt(content, m.index, language)) continue;
+    found = true;
+    const clause = (m[2] ?? '').trim();
+    const specs = /^\{[^}]*\}$/.test(clause) ? clause.slice(1, -1).split(',').map((s) => s.trim()).filter((s) => s !== '') : [];
+    const typeOnly = /^type\b/.test(clause) || (specs.length > 0 && specs.every((s) => /^type\s/.test(s)));
+    if (!typeOnly) return false;
+  }
+  return found;
+}
+
 function runsAsTheLearner(extract: ExtractLike, content: string, code: string, language: CodeLanguage): string | null {
   const refused = language === 'python' ? REFUSED_PYTHON_MODULES : REFUSED_NODE_MODULES;
   // repo-tour's `extract` reads the imports it reaches. It does not reach a Python import more than four blocks deep,
@@ -400,7 +502,7 @@ function runsAsTheLearner(extract: ExtractLike, content: string, code: string, l
     if (imp.resolved !== null || imp.raw.startsWith('.')) continue;
     const name = language === 'python' ? (imp.raw.split('.')[0] ?? '') : (imp.raw.replace(/^node:/, '').split('/')[0] ?? '');
     const what = refused.get(name);
-    if (what !== undefined) return `imports ${quote(imp.raw)}, ${what}: ${REFUSED_TAIL}`;
+    if (what !== undefined && !(language !== 'python' && onlyTypesFrom(content, imp.raw, language))) return `imports ${quote(imp.raw)}, ${what}: ${REFUSED_TAIL}`;
   }
   if (language === 'python') {
     for (const raw of pythonImportsInText(code)) {
@@ -411,11 +513,13 @@ function runsAsTheLearner(extract: ExtractLike, content: string, code: string, l
     for (const m of content.matchAll(JS_REQUIRE_OF)) {
       const what = REFUSED_NODE_MODULES.get((m[3] ?? '').split('/')[0] ?? '');
       // Only where the code itself has a require there: a comment or a string that quotes one is not one.
-      if (what !== undefined && /(?<![.\w$])require\s*\(/.test(code.slice(m.index, m.index + m[0].length))) return `requires ${quote(m[2] ?? '')}, ${what}: ${REFUSED_TAIL}`;
+      if (what !== undefined && isCodeAt(content, m.index, language)) return `requires ${quote(m[2] ?? '')}, ${what}: ${REFUSED_TAIL}`;
     }
   }
+  const bound = language === 'python' ? pythonBoundNames(code) : new Set<string>();
   for (const { re, name, what } of language === 'python' ? REFUSED_PY_CALLS : REFUSED_JS_CALLS) {
-    if (re.test(code)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
+    if (bound.has(name)) continue;
+    if (language === 'python' ? re.test(code) : jsCalls(code, re)) return `calls ${name}, ${what}: ${REFUSED_TAIL}`;
   }
   return null;
 }

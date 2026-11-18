@@ -67,6 +67,14 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
     assert.match(reason, AUTHORS_ROAD);
   });
 
+  // codeOnly drops a string's contents and a comment, so its offsets are not the file's: the code is found by its own
+  // reading at each offset, wherever the statement falls (SF1's read, SF2's type-only check).
+  test('TypeScript, import-equals of child_process after a string and a comment: refused all the same (SF1)', async () => {
+    const reason = await judged('src/late.ts', "// a note\nconst label = 'run';\nimport cp = require('child_process');\nexport const run = () => cp.execSync(label);\n", 'typescript', REPO_IMPORTS);
+    assert.ok(reason !== null, 'a late import cp = require(\'child_process\') passed the check');
+    assert.match(reason, /child_process.*starts other programs/);
+  });
+
   test('a nested import the text read must still pass: a relative one, and one inside a docstring (MF1)', async () => {
     const cases: Array<[string, string]> = [
       ['app/nested.py', 'def load():\n    if True:\n        from . import helpers\n        return helpers\n'],
@@ -133,6 +141,44 @@ suite('a file a model wrote may not start a program, open a raw socket, run text
       assert.equal(await judged(file, code, language, REPO_IMPORTS), null, `${file} was refused`);
     }
   });
+
+  // T-61's code review, SF2: honest code that names one of them is not refused, in a sentence that would be false.
+  const honest: Array<[string, string, CodeLanguage]> = [
+      ['app/calc.py', 'class Calc:\n    def eval(self, node):\n        return node\n\n    def compile(self):\n        return self\n\n    def exec(self, query):\n        return query\n', 'python'],
+      ['app/pattern.py', 'from re import compile\n\nPATTERN = compile(r"x+")\n', 'python'],
+      ['app/own.py', 'def compile(source):\n    return source\n\nRESULT = compile("x")\n', 'python'],
+      ['src/calc.js', 'export class Calc {\n  eval(node) {\n    return node;\n  }\n}\n', 'javascript'],
+      ['src/calc.ts', 'export class Calc {\n  static eval(node: string): number {\n    return node.length;\n  }\n}\n', 'typescript'],
+      ['src/evaluator.ts', 'export interface Evaluator {\n  eval(expr: string): number;\n}\n', 'typescript'],
+      ['src/port.ts', "import type { AddressInfo } from 'node:net';\nexport const port = (a: AddressInfo): number => a.port;\n", 'typescript'],
+      ['src/socket.ts', "import { type Socket } from 'net';\nexport type S = Socket;\n", 'typescript'],
+      ['src/star.ts', "import type * as net from 'node:net';\nexport type S = net.Socket;\n", 'typescript'],
+      ['src/reexport.ts', "export type { Socket } from 'net';\n", 'typescript'],
+      // Comment-aware, wherever it falls: a quoted require, and a commented-out value import beside a type-only one.
+      ['src/quoted.ts', "const label = 'x';\n// never write require('child_process') here\nexport const run = (): string => label;\n", 'typescript'],
+      ['src/commented.ts', "const label = 'x';\n// import net from 'node:net';\nimport type { AddressInfo } from 'node:net';\nexport const port = (a: AddressInfo): string => label + a.port;\n", 'typescript'],
+  ];
+  for (const [file, code, language] of honest) {
+    test(`a definition, a name the module binds, or a type-only import is not refused: ${file} (SF2)`, async () => {
+      const reason = await judged(file, code, language, REPO_IMPORTS);
+      assert.ok(reason === null || !AUTHORS_ROAD.test(reason), `${file} was refused: ${reason ?? ''}`);
+    });
+  }
+
+  const beside: Array<[string, string, CodeLanguage, RegExp]> = [
+      ['app/calc.py', 'class Calc:\n    def eval(self, node):\n        return node\n\ndef run(s):\n    return eval(s)\n', 'python', /calls eval/],
+      ['app/pattern.py', 'from re import compile\n\ndef run(s):\n    return exec(s)\n', 'python', /calls exec/],
+      ['src/pick.js', 'export const run = (c, a) => (c ? eval(a) : null);\n', 'javascript', /calls eval/],
+      ['src/calc.js', 'export class Calc {\n  eval(node) {\n    return eval(node);\n  }\n}\n', 'javascript', /calls eval/],
+      ['src/both.ts', "import type { AddressInfo } from 'node:net';\nimport net from 'node:net';\nexport const s: AddressInfo | typeof net = net;\n", 'typescript', /net.*network connections of its own/],
+  ];
+  for (const [file, code, language, said] of beside) {
+    test(`and a real call or load beside them is still refused: ${file} (SF2)`, async () => {
+      const reason = await judged(file, code, language, REPO_IMPORTS);
+      assert.ok(reason !== null, `${file} passed the check`);
+      assert.match(reason, said);
+    });
+  }
 
   test('the words are about the model\'s code: a sentence that names one of them in a comment or a string is not refused', async () => {
     const js = "// we do not use child_process or eval( here\nexport const note = 'process.binding( is not called';\n";
