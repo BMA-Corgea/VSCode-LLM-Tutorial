@@ -42,6 +42,27 @@ export const HEARTBEAT_MS = 30_000;
 export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS;
 /** A marker with no heartbeat (one written before T-71) is taken as a build in progress for this long. */
 const NO_HEARTBEAT_STALE_MS = 6 * 60 * 60 * 1000;
+/** How often a reader waiting out a heartbeat (T-121) looks at a Cancel. */
+const READER_CANCEL_POLL_MS = 250;
+/**
+ * How long a reader waits before it reads a marker again (T-121): one heartbeat, and a grace for a beat that comes a
+ * little late (an event loop that lagged, the write itself, a shared folder's cache; review S1).
+ */
+export const REREAD_AFTER_MS = HEARTBEAT_MS + 5_000;
+
+/**
+ * The clock a READER of a marker waits by (T-121): its own monotonic time, which only goes forward and is never the
+ * wall clock a marker's times are written in. A test passes a fake one; nothing else should.
+ */
+export interface ReaderClock {
+  /** Milliseconds on a clock that only goes forward (`performance.now()`), whatever the wall clock does. */
+  monotonic(): number;
+  sleep(ms: number): Promise<void>;
+}
+export const READER_CLOCK: ReaderClock = {
+  monotonic: () => performance.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
 export const PHASES: readonly string[] = ['digest', 'plan', 'interpret', 'write'];
 
 export type Dial = 'manual' | 'scaffolded' | 'automated';
@@ -235,10 +256,56 @@ export function markerSaysRunning(
   if (typeof marker.endedAt === 'string') return false;
   if (pidIsAskable(marker) && !processAlive(marker.pid as number)) return false;
   const beat = typeof marker.heartbeatAt === 'string' ? Date.parse(marker.heartbeatAt) : Number.NaN;
-  if (!Number.isNaN(beat)) return now - beat < HEARTBEAT_STALE_MS;
+  // T-121: a beat from further in the future than the window is not trusted. Trusted, a crashed build whose clock ran a
+  // day ahead kept its folder refused for that day. A marker read as not running by its heartbeat alone is read again
+  // before a build goes over it (`confirmNotRunning`), and is never deleted on that word alone (review M1).
+  if (!Number.isNaN(beat)) return now - beat < HEARTBEAT_STALE_MS && beat - now < HEARTBEAT_STALE_MS;
   if (withoutHeartbeat === 'not-running') return false;
   const started = typeof marker.startedAt === 'string' ? Date.parse(marker.startedAt) : Number.NaN;
   return Number.isNaN(started) || now - started < NO_HEARTBEAT_STALE_MS;
+}
+
+/**
+ * Whether `marker` reads as not running by its HEARTBEAT alone (T-121): stale, or from the future beyond the window,
+ * with nothing surer said (it has not ended, and its host is not one this machine sees gone). Only that word compares
+ * two clocks, the writer's and this reader's, so only that word is read again before a build goes over it.
+ */
+export function onlyItsHeartbeatSaysDead(marker: Record<string, unknown>, now: number = Date.now()): boolean {
+  if (typeof marker.endedAt === 'string') return false;
+  if (pidIsAskable(marker) && !processAlive(marker.pid as number)) return false;
+  const beat = typeof marker.heartbeatAt === 'string' ? Date.parse(marker.heartbeatAt) : Number.NaN;
+  return !Number.isNaN(beat) && !markerSaysRunning(marker, now);
+}
+
+/**
+ * Whether a build whose marker reads as not running only by its heartbeat (`onlyItsHeartbeatSaysDead`) truly is not
+ * running (T-121), decided without comparing two clocks: `first` is read again ONCE, after one `HEARTBEAT_MS` (and a
+ * grace: `REREAD_AFTER_MS`) of THIS process's monotonic time, and a live build beats in that time whatever its clock or
+ * this one says (a reader whose
+ * clock is ahead, a wake from sleep, another machine with skew). So, read again:
+ *   - its heartbeat moved, or the marker is another build's now: running (`false`);
+ *   - it ended, it is gone, or its beat stood still for the whole heartbeat: not running (`true`).
+ * A marker that is not dead by its heartbeat alone stands as read, at once: `true`, no wait and no second read.
+ * `'cancelled'` as soon as `isCancelled` says so during the wait.
+ */
+export async function confirmNotRunning(
+  read: () => Record<string, unknown> | null | undefined,
+  first: Record<string, unknown>,
+  clock: ReaderClock = READER_CLOCK,
+  isCancelled?: () => boolean,
+): Promise<boolean | 'cancelled'> {
+  if (!onlyItsHeartbeatSaysDead(first)) return true;
+  const from = clock.monotonic();
+  for (;;) {
+    if (isCancelled?.()) return 'cancelled';
+    const left = REREAD_AFTER_MS - (clock.monotonic() - from);
+    if (left <= 0) break;
+    await clock.sleep(Math.min(left, READER_CANCEL_POLL_MS));
+  }
+  const again = read();
+  if (!again || typeof again.endedAt === 'string') return true;
+  if (again.id !== first.id || again.startedAt !== first.startedAt) return false; // another build's marker: not ours to call dead
+  return again.heartbeatAt === first.heartbeatAt;
 }
 
 /**
